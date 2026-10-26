@@ -83,6 +83,8 @@ export function reviewTemplateDraft(draft: { subject: string; body: string }, fi
 // ---------------------------------------------------------------------------
 
 export const STARTER_GOALS = {
+  mise_pilot: { label: "Mise Hotel Outreach", description: "Frontline SOP execution & Advisory Board pilot." },
+  co_market: { label: "Co-Market Partnership", description: "Training, recruitment, and service quality partner proposal." },
   introduction: { label: "Introduce yourself", description: "First email to someone new." },
   partnership: { label: "Propose a partnership", description: "Suggest working together." },
   meeting: { label: "Ask for a meeting", description: "Request a short call." },
@@ -111,7 +113,41 @@ export function buildStarterTemplate(args: { goal: StarterGoal; tone: WriterTone
   const easyOut =
     t === "concise" ? "" : "If now isn't the right time, just reply and let me know. I won't keep chasing.";
 
-  const goals: Record<StarterGoal, { name: string; subject: string; paragraphs: string[] }> = {
+  const goals: Record<StarterGoal, { name: string; subject: string; paragraphs: string[]; customBody?: string }> = {
+    mise_pilot: {
+      name: "Mise Hotel Outreach",
+      subject: `Ensuring frontline service execution at ${company}`,
+      paragraphs: [],
+      customBody: [
+        greeting,
+        "I’m reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
+        "One of the key challenges in hospitality is ensuring that SOPs, training, and service standards defined at the corporate level are consistently followed by frontline teams across properties. Even when standards are clearly documented, ensuring that tasks are executed correctly, verified, and recorded can be difficult across multiple teams and locations.",
+        "Mise Hotel, our hospitality-focused Service Execution Platform, is designed to address this challenge by bringing SOPs, training, and operational workflows together in a mobile-first platform. It helps translate documented standards into assigned tasks, supports teams in executing them, and captures evidence of completion to improve operational visibility and accountability.",
+        `As we continue developing Mise Hotel, we would welcome the opportunity to explore a pilot with ${company} to demonstrate the platform, understand your operational requirements, and gather feedback from your team.`,
+        `We are also bringing together experienced hospitality leaders for the FocusRealm Hotel Advisory Board, where industry experts can help shape Mise Hotel around the real-world needs of hotel operations, workforce training, and service delivery. Given ${company}’s experience in the hospitality industry, we would be honoured to explore your potential involvement.`,
+        "Would your team be available for a 20-minute meeting with Sehej to discuss Mise Hotel, a potential pilot, and the advisory opportunity? We would be happy to coordinate a time that suits your schedule.",
+        "Thank you for your time. We look forward to the opportunity to connect.",
+        `Best wishes,\n${args.signOff?.trim() || "Sachin Annadurai\nFounder’s Office\nFocusRealm\nhttps://misehotel.com/\nhttps://focusrealm.org/"}`,
+      ].join("\n\n"),
+    },
+    co_market: {
+      name: "Co-Market Partnership",
+      subject: `Co-market partnership opportunity: ${company} & FocusRealm`,
+      paragraphs: [],
+      customBody: [
+        greeting,
+        "I’m reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
+        "One of the key challenges in hospitality is ensuring that SOPs, training, and service standards defined at the corporate level are consistently followed by frontline teams across properties. Even when standards are clearly documented, ensuring that tasks are executed correctly, verified, and recorded can be difficult across multiple teams and locations.",
+        "Mise Hotel, our hospitality-focused Service Execution Platform, is designed to address this challenge by bringing SOPs, training, and operational workflows together in a mobile-first platform. It helps translate documented standards into assigned tasks, supports teams in executing them, and captures evidence of completion to improve operational visibility and accountability.",
+        `We have been closely following ${company} and your work in hospitality: ${has("whatItDoes") ? "{{whatItDoes|customized training and operational infrastructure}}" : "customized training and operational infrastructure"}.`,
+        `We see a natural synergy: ${has("partnershipOpportunity") ? "{{partnershipOpportunity|verifying frontline service execution}}" : "verifying frontline service execution"}.`,
+        `As we continue developing Mise Hotel, we would welcome the opportunity to explore a pilot with ${company} to demonstrate the platform, understand your operational requirements, and gather feedback from your team.`,
+        `We are also bringing together experienced hospitality leaders for the FocusRealm Hotel Advisory Board, where industry experts can help shape Mise Hotel around the real-world needs of hotel operations, workforce training, and service delivery. Given ${company}’s experience in the hospitality industry, we would be honoured to explore your potential involvement.`,
+        "Would your team be available for a 20-minute meeting with Sehej to discuss Mise Hotel, a potential pilot, and the advisory opportunity? We would be happy to coordinate a time that suits your schedule.",
+        "Thank you for your time. We look forward to the opportunity to connect.",
+        `Best wishes,\n${args.signOff?.trim() || "Sachin\nFounder’s Office\nFocusRealm\nhttps://misehotel.com/\nhttps://focusrealm.org/"}`,
+      ].join("\n\n"),
+    },
     introduction: {
       name: "Introduction",
       subject: t === "concise" ? `Quick intro for ${company}` : `A quick introduction for ${company}`,
@@ -168,7 +204,7 @@ export function buildStarterTemplate(args: { goal: StarterGoal; tone: WriterTone
 
   const g = goals[args.goal];
   const middle = t === "concise" ? g.paragraphs.filter((_, i) => i !== 1 || g.paragraphs.length < 3) : g.paragraphs;
-  const body = [greeting, ...middle, ...(easyOut && args.goal !== "thank_you" ? [easyOut] : []), `${closing}\n${sign}`].join("\n\n");
+  const body = g.customBody ?? [greeting, ...middle, ...(easyOut && args.goal !== "thank_you" ? [easyOut] : []), `${closing}\n${sign}`].join("\n\n");
   return { name: `${g.name} (${WRITER_TONES[t].toLowerCase()})`, subject: g.subject, body, warnings: [], source: "starter" };
 }
 

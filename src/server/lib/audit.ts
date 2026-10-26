@@ -21,7 +21,7 @@ export async function audit(req: Request | null, entry: AuditEntry, db: Db = pri
       metadata: (entry.metadata ?? {}) as Prisma.InputJsonValue,
       userId: req?.user?.id,
       ipAddress: req?.ip,
-      userAgent: req?.get("user-agent")?.slice(0, 300),
+      userAgent: req?.get?.("user-agent")?.slice(0, 300) ?? null,
     },
   });
 }

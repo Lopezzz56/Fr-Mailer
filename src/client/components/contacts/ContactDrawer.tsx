@@ -6,16 +6,24 @@ import { api, errorMessage } from "../../lib/api";
 import { useContact, useInvalidate } from "../../lib/queries";
 import { useAuth } from "../../lib/auth";
 import { contactName, formatDate, formatDateTime } from "../../lib/format";
-import { Badge, DeliveryStatusBadge } from "../ui/Badge";
+import { CheckCircle2, AlertTriangle, ShieldCheck } from "lucide-react";
+import { SelectField, TextField } from "../ui/Field";
 import { Button } from "../ui/Button";
-import { TextField } from "../ui/Field";
+import { Badge, DeliveryStatusBadge } from "../ui/Badge";
 import { Callout, ErrorState } from "../ui/Feedback";
 import { Drawer } from "../ui/Overlay";
 import { PageLoader } from "../ui/Spinner";
 import { useToast } from "../ui/Toast";
 import { EnrichmentSection } from "./EnrichmentSection";
 import { AddToListDialog } from "./ContactDialogs";
-import { ContactInputSchema, SUPPRESSION_REASON_LABELS } from "@shared/types";
+import {
+  ContactInputSchema,
+  CONTACT_PERSONAS,
+  CONTACT_PERSONA_LABELS,
+  HOTEL_SEGMENTS,
+  HOTEL_SEGMENT_LABELS,
+  SUPPRESSION_REASON_LABELS,
+} from "@shared/types";
 
 const FIELDS = [
   { key: "firstName", label: "First name" },
@@ -25,7 +33,7 @@ const FIELDS = [
   { key: "phone", label: "Phone" },
 ] as const;
 
-type Form = Record<(typeof FIELDS)[number]["key"] | "email", string>;
+type Form = Record<(typeof FIELDS)[number]["key"] | "email" | "hotelSegment" | "contactPersona", string>;
 
 export function ContactDrawer({ contactId, onClose }: { contactId: string; onClose: () => void }) {
   const contact = useContact(contactId);
@@ -40,7 +48,16 @@ export function ContactDrawer({ contactId, onClose }: { contactId: string; onClo
 
   useEffect(() => {
     if (c) {
-      setForm({ email: c.email, firstName: c.firstName ?? "", lastName: c.lastName ?? "", company: c.company ?? "", title: c.title ?? "", phone: c.phone ?? "" });
+      setForm({
+        email: c.email,
+        firstName: c.firstName ?? "",
+        lastName: c.lastName ?? "",
+        company: c.company ?? "",
+        title: c.title ?? "",
+        phone: c.phone ?? "",
+        hotelSegment: c.hotelSegment ?? "",
+        contactPersona: c.contactPersona ?? "",
+      });
       setCustom(c.customFields);
     }
   }, [c]);
@@ -53,6 +70,22 @@ export function ContactDrawer({ contactId, onClose }: { contactId: string; onClo
     },
     onError: (err) => setError(errorMessage(err)),
   });
+
+  const verifyClassification = useMutation({
+    mutationFn: () =>
+      api.patch(`/api/contacts/${contactId}/classification`, {
+        hotelSegmentStatus: form?.hotelSegment ? "VERIFIED" : undefined,
+        hotelSegmentConfidence: form?.hotelSegment ? 1.0 : undefined,
+        contactPersonaStatus: form?.contactPersona ? "VERIFIED" : undefined,
+        contactPersonaConfidence: form?.contactPersona ? 1.0 : undefined,
+      }),
+    onSuccess: async () => {
+      await invalidate("contacts", "lists");
+      toast.success("Classification verified");
+    },
+    onError: (err) => setError(errorMessage(err)),
+  });
+
   const removeFromList = useMutation({
     mutationFn: (listId: string) => api.post(`/api/lists/${listId}/members/remove`, { contactIds: [contactId] }),
     onSuccess: () => invalidate("contacts", "lists"),
@@ -60,12 +93,64 @@ export function ContactDrawer({ contactId, onClose }: { contactId: string; onClo
   });
 
   const editable = can("contacts.manage");
-  const dirty = Boolean(c && form && (JSON.stringify(form) !== JSON.stringify({ email: c.email, firstName: c.firstName ?? "", lastName: c.lastName ?? "", company: c.company ?? "", title: c.title ?? "", phone: c.phone ?? "" }) || JSON.stringify(custom) !== JSON.stringify(c.customFields)));
+  const initialCompare = c
+    ? JSON.stringify({
+        email: c.email,
+        firstName: c.firstName ?? "",
+        lastName: c.lastName ?? "",
+        company: c.company ?? "",
+        title: c.title ?? "",
+        phone: c.phone ?? "",
+        hotelSegment: c.hotelSegment ?? "",
+        contactPersona: c.contactPersona ?? "",
+      })
+    : "";
+  const dirty = Boolean(c && form && (JSON.stringify(form) !== initialCompare || JSON.stringify(custom) !== JSON.stringify(c.customFields)));
+
   const submit = () => {
-    const parsed = ContactInputSchema.safeParse({ ...form, customFields: custom });
+    const parsed = ContactInputSchema.safeParse({
+      ...form,
+      hotelSegment: form?.hotelSegment || null,
+      contactPersona: form?.contactPersona || null,
+      customFields: custom,
+    });
     if (!parsed.success) return setError(parsed.error.issues[0]?.message ?? "Check the details.");
     setError(null);
     save.mutate(parsed.data);
+  };
+
+  const hotelSegmentOptions = [
+    { value: "", label: "Select hotel segment..." },
+    ...HOTEL_SEGMENTS.map((s) => ({ value: s, label: HOTEL_SEGMENT_LABELS[s] })),
+  ];
+
+  const contactPersonaOptions = [
+    { value: "", label: "Select contact persona..." },
+    ...CONTACT_PERSONAS.map((p) => ({ value: p, label: CONTACT_PERSONA_LABELS[p] })),
+  ];
+
+  const renderStatusBadge = (status?: string | null, confidence?: number | null) => {
+    if (status === "VERIFIED" || status === "MANUAL") {
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 border border-emerald-200">
+          <CheckCircle2 className="h-3 w-3" />
+          {status === "VERIFIED" ? "Verified" : "Manual entry"}
+        </span>
+      );
+    }
+    if (status === "GUESSED") {
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 border border-amber-200">
+          <AlertTriangle className="h-3 w-3" />
+          Unverified estimate {confidence ? `(${Math.round(confidence * 100)}%)` : ""}
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-surface-muted px-2 py-0.5 text-[11px] font-medium text-ink-muted border border-line">
+        Unclassified
+      </span>
+    );
   };
 
   return (
@@ -102,6 +187,63 @@ export function ContactDrawer({ contactId, onClose }: { contactId: string; onClo
                   <TextField key={f.key} label={f.label} value={form[f.key]} onChange={(e) => setForm({ ...form, [f.key]: e.target.value })} disabled={!editable} />
                 ))}
               </div>
+            </section>
+
+            <section className="space-y-4 rounded-lg border border-line bg-surface-subtle p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-[13px] font-semibold">Segmentation & Persona</h3>
+                  <p className="text-xs text-ink-muted">Used for template assignment and outreach personalization</p>
+                </div>
+                {editable && (c.hotelSegmentStatus === "GUESSED" || c.contactPersonaStatus === "GUESSED") && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon={<ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />}
+                    loading={verifyClassification.isPending}
+                    onClick={() => verifyClassification.mutate()}
+                  >
+                    Confirm as verified
+                  </Button>
+                )}
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-ink-subtle">Hotel Segment</span>
+                    {renderStatusBadge(c.hotelSegmentStatus, c.hotelSegmentConfidence)}
+                  </div>
+                  <SelectField
+                    value={form.hotelSegment}
+                    onChange={(e) => setForm({ ...form, hotelSegment: e.target.value })}
+                    options={hotelSegmentOptions}
+                    disabled={!editable}
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-ink-subtle">Contact Persona</span>
+                    {renderStatusBadge(c.contactPersonaStatus, c.contactPersonaConfidence)}
+                  </div>
+                  <SelectField
+                    value={form.contactPersona}
+                    onChange={(e) => setForm({ ...form, contactPersona: e.target.value })}
+                    options={contactPersonaOptions}
+                    disabled={!editable}
+                  />
+                </div>
+              </div>
+
+              {(c.hotelSegmentStatus === "GUESSED" || c.contactPersonaStatus === "GUESSED") && (
+                <p className="text-[11px] text-amber-700 bg-amber-50 rounded p-2 border border-amber-200">
+                  Unverified estimates are derived from title or company heuristics and are never treated as confirmed facts.
+                </p>
+              )}
+            </section>
+
+            <section className="space-y-4">
               {Object.keys(custom).length > 0 && (
                 <div className="space-y-3">
                   <p className="text-xs font-medium text-ink-subtle">Custom fields (use as {"{{fieldName}}"} in templates)</p>

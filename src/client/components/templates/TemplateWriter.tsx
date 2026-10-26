@@ -27,9 +27,9 @@ import {
 } from "@shared/template-writer";
 
 const BRIEF_IDEAS = [
-  "Introduce our services to boutique hotels and ask for a 15-minute call",
-  "Follow up with people who attended last week's webinar",
-  "Thank customers for renewing and ask for a short review",
+  "Reach out to hotel leadership about Mise Hotel service execution platform and advisory board pilot",
+  "Propose co-marketing partnership between FocusRealm and hospitality training or recruitment platforms",
+  "Ask general managers for a 20-minute introductory meeting on SOP task verification",
 ];
 
 const toneOptions = Object.entries(WRITER_TONES).map(([value, label]) => ({ value, label }));
@@ -102,7 +102,7 @@ export function TemplateWriter({
   const [learnFromDraft, setLearnFromDraft] = useState(false);
   const [example, setExample] = useState("");
   const [signOff, setSignOff] = useState(user?.name ?? "");
-  const [goal, setGoal] = useState<StarterGoal>("introduction");
+  const [goal, setGoal] = useState<StarterGoal>("mise_pilot");
 
   const hasDraft = Boolean(currentDraft && currentDraft.body.replace(/\{\{[^}]*\}\}|Hi|Best|[\s,]/g, "").length > 40);
 

@@ -34,8 +34,64 @@ const optionalText = (max: number) =>
 // CONTACTS & LISTS
 // ============================================================================
 
-export const STANDARD_CONTACT_FIELDS = ["firstName", "lastName", "company", "title", "phone"] as const;
+export const STANDARD_CONTACT_FIELDS = ["firstName", "lastName", "company", "title", "phone", "hotelSegment", "contactPersona"] as const;
 export type StandardContactField = (typeof STANDARD_CONTACT_FIELDS)[number];
+
+// ============================================================================
+// HOTEL SEGMENTS & CONTACT PERSONAS
+// ============================================================================
+
+export const HOTEL_SEGMENTS = [
+  "LUXURY",
+  "BOUTIQUE",
+  "UPSCALE",
+  "MIDSCALE",
+  "BUDGET",
+  "RESORT",
+  "EXTENDED_STAY",
+  "INDEPENDENT",
+  "UNKNOWN",
+] as const;
+export type HotelSegment = (typeof HOTEL_SEGMENTS)[number];
+export const HotelSegmentSchema = z.enum(HOTEL_SEGMENTS);
+
+export const HOTEL_SEGMENT_LABELS: Record<HotelSegment, string> = {
+  LUXURY: "Luxury",
+  BOUTIQUE: "Boutique",
+  UPSCALE: "Upscale / Full Service",
+  MIDSCALE: "Midscale / Select Service",
+  BUDGET: "Budget / Economy",
+  RESORT: "Resort & Destination",
+  EXTENDED_STAY: "Extended Stay",
+  INDEPENDENT: "Independent",
+  UNKNOWN: "Unknown",
+};
+
+export const CONTACT_PERSONAS = [
+  "GENERAL_MANAGER",
+  "OPERATIONS_DIRECTOR",
+  "REVENUE_MANAGER",
+  "SALES_MARKETING_DIRECTOR",
+  "IT_DIRECTOR",
+  "OWNER_OPERATOR",
+  "FINANCE_PROCUREMENT",
+  "OTHER",
+  "UNKNOWN",
+] as const;
+export type ContactPersona = (typeof CONTACT_PERSONAS)[number];
+export const ContactPersonaSchema = z.enum(CONTACT_PERSONAS);
+
+export const CONTACT_PERSONA_LABELS: Record<ContactPersona, string> = {
+  GENERAL_MANAGER: "General Manager",
+  OPERATIONS_DIRECTOR: "Director of Operations",
+  REVENUE_MANAGER: "Director of Revenue Management",
+  SALES_MARKETING_DIRECTOR: "Director of Sales & Marketing",
+  IT_DIRECTOR: "IT & Systems Director",
+  OWNER_OPERATOR: "Owner / Principal",
+  FINANCE_PROCUREMENT: "Finance & Procurement",
+  OTHER: "Other Staff",
+  UNKNOWN: "Unknown",
+};
 
 export const CUSTOM_FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,49}$/;
 
@@ -59,6 +115,12 @@ export const ContactInputSchema = z.object({
   company: optionalText(200),
   title: optionalText(200),
   phone: optionalText(50),
+  hotelSegment: optionalText(100),
+  hotelSegmentConfidence: z.coerce.number().min(0).max(1).optional().nullable(),
+  hotelSegmentStatus: z.enum(["GUESSED", "VERIFIED", "MANUAL", "REJECTED"]).optional().nullable(),
+  contactPersona: optionalText(100),
+  contactPersonaConfidence: z.coerce.number().min(0).max(1).optional().nullable(),
+  contactPersonaStatus: z.enum(["GUESSED", "VERIFIED", "MANUAL", "REJECTED"]).optional().nullable(),
   customFields: z
     .record(z.string().regex(CUSTOM_FIELD_NAME, "Field names use letters, numbers and _"), z.string().max(2000))
     .default({}),
@@ -83,6 +145,12 @@ export interface ContactDto {
   company: string | null;
   title: string | null;
   phone: string | null;
+  hotelSegment: string | null;
+  hotelSegmentConfidence: number | null;
+  hotelSegmentStatus: EnrichmentStatus | null;
+  contactPersona: string | null;
+  contactPersonaConfidence: number | null;
+  contactPersonaStatus: EnrichmentStatus | null;
   customFields: Record<string, string>;
   source: string | null;
   importedAt: string;
@@ -115,6 +183,8 @@ export const IMPORT_TARGET_LABELS: Record<"email" | StandardContactField | "full
   company: "Company",
   title: "Job title",
   phone: "Phone",
+  hotelSegment: "Hotel segment",
+  contactPersona: "Contact persona",
 };
 
 export const MAX_IMPORT_ROWS = 50_000;
@@ -298,6 +368,7 @@ export type CampaignInput = z.input<typeof CampaignInputSchema>;
 export const TestSendInputSchema = z.object({
   to: z.array(EmailSchema).min(1, "Add at least one address").max(5, "Up to 5 test addresses"),
   contactId: IdSchema.optional(),
+  dryRun: z.boolean().default(false),
 });
 export type TestSendInput = z.input<typeof TestSendInputSchema>;
 
@@ -336,6 +407,90 @@ export interface CampaignSummaryDto {
   pausedReason: string | null;
 }
 
+export interface CampaignTemplateDto {
+  id: string;
+  campaignId: string;
+  templateId: string;
+  name: string;
+  subject: string;
+  version: number;
+  isFallback: boolean;
+  priority: number;
+}
+
+export const CampaignTemplateInputSchema = z.object({
+  templateId: IdSchema,
+  isFallback: z.boolean().default(false),
+  priority: z.coerce.number().int().default(0),
+});
+export type CampaignTemplateInput = z.input<typeof CampaignTemplateInputSchema>;
+
+export const CampaignRuleInputSchema = z.object({
+  templateId: IdSchema,
+  priority: z.coerce.number().int().min(1).default(1),
+  hotelSegment: optionalText(100),
+  contactPersona: optionalText(100),
+  requiresVerified: z.boolean().default(false),
+  minConfidence: z.coerce.number().min(0).max(1).optional().nullable(),
+  city: optionalText(100),
+  description: optionalText(500),
+});
+export type CampaignRuleInput = z.input<typeof CampaignRuleInputSchema>;
+
+export interface CampaignRuleDto {
+  id: string;
+  campaignId: string;
+  templateId: string;
+  templateName: string;
+  priority: number;
+  hotelSegment: string | null;
+  contactPersona: string | null;
+  requiresVerified: boolean;
+  minConfidence: number | null;
+  city: string | null;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const CampaignRecipientOverrideInputSchema = z.object({
+  contactId: IdSchema,
+  templateId: IdSchema,
+  reason: optionalText(500),
+});
+export type CampaignRecipientOverrideInput = z.input<typeof CampaignRecipientOverrideInputSchema>;
+
+export interface CampaignRecipientOverrideDto {
+  id: string;
+  campaignId: string;
+  contactId: string;
+  contactEmail: string;
+  templateId: string;
+  templateName: string;
+  reason: string | null;
+  createdAt: string;
+}
+
+export interface ReviewRecipientSample {
+  contactId: string;
+  email: string;
+  subject: string;
+  html: string;
+  text: string;
+  missingFields: string[];
+  templateId: string;
+  templateName: string;
+  assignmentSource: "OVERRIDE" | "RULE" | "FALLBACK";
+  assignmentReason: string;
+}
+
+export interface TemplateBreakdownItem {
+  templateId: string;
+  templateName: string;
+  count: number;
+  isFallback: boolean;
+}
+
 export interface CampaignDetailDto extends CampaignSummaryDto {
   description: string | null;
   fromName: string;
@@ -348,6 +503,9 @@ export interface CampaignDetailDto extends CampaignSummaryDto {
   /** Frozen content after approval; null while editable */
   snapshot: { subject: string; bodyHtml: string; bodyText: string | null } | null;
   liveSendingBlocker: string | null;
+  templates: CampaignTemplateDto[];
+  rules: CampaignRuleDto[];
+  overridesCount: number;
 }
 
 export interface RecipientIssue {
@@ -356,7 +514,7 @@ export interface RecipientIssue {
   reason: string;
 }
 
-/** Pre-approval check of every recipient against the current template */
+/** Pre-approval check of every recipient against the current templates and rules */
 export interface CampaignReviewDto {
   total: number;
   ready: number;
@@ -364,7 +522,9 @@ export interface CampaignReviewDto {
   missingFields: { email: string; contactId: string; fields: string[] }[];
   suppressed: RecipientIssue[];
   issueCount: number;
-  sample: { contactId: string; email: string; subject: string; html: string; text: string; missingFields: string[] }[];
+  sample: ReviewRecipientSample[];
+  templateBreakdown: TemplateBreakdownItem[];
+  rulesCount: number;
   /** Fingerprint of the template content reviewed; approval must echo it back */
   contentHash: string;
 }
@@ -387,6 +547,55 @@ export interface SendDto {
   repliedAt: string | null;
   unsubscribedAt: string | null;
   updatedAt: string;
+  templateId?: string | null;
+  templateVersion?: number | null;
+  assignmentReason?: string | null;
+}
+
+export interface CampaignAnalyticsSummaryDto {
+  campaignId: string;
+  campaignName: string;
+  totalRecipients: number;
+  attemptedSends: number;
+  providerAcceptedCount: number;
+  bouncedCount: number;
+  repliedCount: number;
+  positiveRepliesCount: number;
+  meetingsBookedCount: number;
+  unsubscribedCount: number;
+  rates: {
+    bounceRate: number;
+    replyRate: number;
+    positiveReplyRate: number;
+    meetingRate: number;
+    unsubscribeRate: number;
+  };
+  byTemplate: {
+    templateId: string;
+    templateName: string;
+    templateVersion: number;
+    assignedCount: number;
+    sentCount: number;
+    repliedCount: number;
+    positiveRepliesCount: number;
+    meetingsBookedCount: number;
+  }[];
+  byHotelSegment: {
+    segment: string;
+    assignedCount: number;
+    sentCount: number;
+    repliedCount: number;
+    positiveRepliesCount: number;
+    meetingsBookedCount: number;
+  }[];
+  byContactPersona: {
+    persona: string;
+    assignedCount: number;
+    sentCount: number;
+    repliedCount: number;
+    positiveRepliesCount: number;
+    meetingsBookedCount: number;
+  }[];
 }
 
 // ============================================================================

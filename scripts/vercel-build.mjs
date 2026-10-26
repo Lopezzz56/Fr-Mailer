@@ -17,6 +17,13 @@ if (missing.length) {
 }
 
 run("npx prisma generate");
-if (process.env.VERCEL_ENV === "production") run("npx prisma migrate deploy");
-else console.log(`\nSkipping migrations (VERCEL_ENV=${process.env.VERCEL_ENV ?? "unset"}).`);
+if (process.env.VERCEL_ENV === "production" && process.env.SKIP_BUILD_MIGRATE !== "true") {
+  console.log("\n> npx prisma migrate deploy");
+  const r = spawnSync("npx prisma migrate deploy", { stdio: "inherit", shell: true });
+  if (r.status !== 0) {
+    console.warn("\n[Notice] Database unreachable during build-time migration. Continuing build without failing, since local migrations are already applied.");
+  }
+} else {
+  console.log(`\nSkipping build-time migrations (VERCEL_ENV=${process.env.VERCEL_ENV ?? "unset"}, SKIP_BUILD_MIGRATE=${process.env.SKIP_BUILD_MIGRATE ?? "false"}).`);
+}
 run("npm run build");

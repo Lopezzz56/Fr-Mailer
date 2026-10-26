@@ -19,14 +19,34 @@ import { SUPPRESSION_REASON_LABELS, type CampaignReviewDto, type CampaignStatus 
 import { getTransport, messageIdDomain } from "./mailer.js";
 import { unsubscribeHeaders, unsubscribeUrl, withFooter } from "./unsubscribe.js";
 
+import { selectTemplateForRecipient, type EligibleTemplate, type SelectionRule } from "./template-selection.js";
+
 type Tx = Prisma.TransactionClient;
 
 export function contentHash(parts: TemplateParts): string {
   return crypto.createHash("sha256").update(JSON.stringify([parts.subject, parts.bodyHtml, parts.bodyText ?? ""])).digest("hex").slice(0, 16);
 }
 
+export function multiTemplateContentHash(templates: EligibleTemplate[], rules: SelectionRule[] = [], overridesCount = 0): string {
+  if (templates.length === 1 && rules.length === 0 && overridesCount === 0) {
+    const t = templates[0]!;
+    return contentHash({ subject: t.subject, bodyHtml: t.bodyHtml, bodyText: t.bodyText });
+  }
+  const parts = templates.map((t) => [t.id, t.version, t.subject, t.bodyHtml, t.bodyText ?? "", t.isFallback ? 1 : 0]);
+  const ruleParts = rules.map((r) => [r.id, r.priority, r.templateId, r.hotelSegment ?? "", r.contactPersona ?? "", r.requiresVerified ? 1 : 0, r.minConfidence ?? 0, r.city ?? ""]);
+  return crypto.createHash("sha256").update(JSON.stringify([parts, ruleParts, overridesCount])).digest("hex").slice(0, 16);
+}
+
 async function getCampaignOr404(id: string, db: Tx | typeof prisma = prisma) {
-  const campaign = await db.campaign.findUnique({ where: { id }, include: { template: true } });
+  const campaign = await db.campaign.findUnique({
+    where: { id },
+    include: {
+      template: true,
+      campaignTemplates: { include: { template: true }, orderBy: { priority: "asc" } },
+      rules: { include: { template: true }, orderBy: { priority: "asc" } },
+      recipientOverrides: { include: { template: true } },
+    },
+  });
   if (!campaign) throw AppError.notFound("CAMPAIGN_NOT_FOUND", "That campaign no longer exists.");
   return campaign;
 }
@@ -38,19 +58,81 @@ async function transition(db: Tx | typeof prisma, id: string, from: CampaignStat
 }
 
 // ---------------------------------------------------------------------------
-// Review (live check against the current template and list)
+// Review (live check against the current templates, rules and list)
 // ---------------------------------------------------------------------------
+
+interface ReadyRecipient {
+  contactId: string;
+  email: string;
+  rendered: ReturnType<typeof renderEmail>;
+  templateId: string;
+  templateVersion: number;
+  templateName: string;
+  assignmentSource: "OVERRIDE" | "RULE" | "FALLBACK";
+  assignmentReason: string;
+}
+
+interface SkippedRecipient {
+  contactId: string;
+  email: string;
+  reason: string;
+  templateId?: string;
+  templateVersion?: number;
+  assignmentReason?: string;
+}
 
 interface ReviewWork {
   review: CampaignReviewDto & { contentHash: string };
-  ready: { contactId: string; email: string; rendered: ReturnType<typeof renderEmail> }[];
-  skipped: { contactId: string; email: string; reason: string }[];
+  ready: ReadyRecipient[];
+  skipped: SkippedRecipient[];
 }
 
-async function buildReview(campaignId: string, db: Tx | typeof prisma = prisma, sampleSize = 5): Promise<ReviewWork> {
+export async function buildReview(campaignId: string, db: Tx | typeof prisma = prisma, sampleSize = 5): Promise<ReviewWork> {
   const campaign = await getCampaignOr404(campaignId, db);
-  const parts: TemplateParts = { subject: campaign.template.subject, bodyHtml: campaign.template.bodyHtml, bodyText: campaign.template.bodyText };
-  const templateErrors = validateTemplate(parts);
+
+  const eligibleTemplates: EligibleTemplate[] = campaign.campaignTemplates.length
+    ? campaign.campaignTemplates.map((ct) => ({
+        id: ct.template.id,
+        name: ct.template.name,
+        subject: ct.template.subject,
+        bodyHtml: ct.template.bodyHtml,
+        bodyText: ct.template.bodyText,
+        version: ct.template.version,
+        isFallback: ct.isFallback,
+      }))
+    : [
+        {
+          id: campaign.template.id,
+          name: campaign.template.name,
+          subject: campaign.template.subject,
+          bodyHtml: campaign.template.bodyHtml,
+          bodyText: campaign.template.bodyText,
+          version: campaign.template.version,
+          isFallback: true,
+        },
+      ];
+
+  const templateErrors: string[] = [];
+  for (const t of eligibleTemplates) {
+    const errs = validateTemplate({ subject: t.subject, bodyHtml: t.bodyHtml, bodyText: t.bodyText });
+    for (const e of errs) templateErrors.push(`[${t.name}] ${e}`);
+  }
+
+  const rules: SelectionRule[] = campaign.rules.map((r) => ({
+    id: r.id,
+    templateId: r.templateId,
+    priority: r.priority,
+    hotelSegment: r.hotelSegment,
+    contactPersona: r.contactPersona,
+    requiresVerified: r.requiresVerified,
+    minConfidence: r.minConfidence,
+    city: r.city,
+    description: r.description,
+  }));
+
+  const overridesMap = new Map(
+    campaign.recipientOverrides.map((o) => [o.contactId, { contactId: o.contactId, templateId: o.templateId, reason: o.reason }])
+  );
 
   const members = await db.listMembership.findMany({
     where: { contactListId: campaign.contactListId },
@@ -61,6 +143,16 @@ async function buildReview(campaignId: string, db: Tx | typeof prisma = prisma, 
   const suppressions = emails.length ? await db.suppressionEntry.findMany({ where: { email: { in: emails } } }) : [];
   const suppressedBy = new Map(suppressions.filter((s) => !s.expiresAt || s.expiresAt > new Date()).map((s) => [s.email.toLowerCase(), s.reason]));
 
+  const selectionContext = {
+    templates: eligibleTemplates,
+    rules,
+    overrides: overridesMap,
+    defaultTemplateId: campaign.templateId,
+  };
+
+  const countsByTemplate = new Map<string, number>();
+  for (const t of eligibleTemplates) countsByTemplate.set(t.id, 0);
+
   const work: ReviewWork = {
     review: {
       total: members.length,
@@ -70,7 +162,9 @@ async function buildReview(campaignId: string, db: Tx | typeof prisma = prisma, 
       suppressed: [],
       issueCount: 0,
       sample: [],
-      contentHash: contentHash(parts),
+      templateBreakdown: [],
+      rulesCount: rules.length,
+      contentHash: multiTemplateContentHash(eligibleTemplates, rules, campaign.recipientOverrides.length),
     },
     ready: [],
     skipped: [],
@@ -84,17 +178,71 @@ async function buildReview(campaignId: string, db: Tx | typeof prisma = prisma, 
       work.skipped.push({ contactId: contact.id, email: contact.email, reason: label });
       continue;
     }
+
+    const selection = selectTemplateForRecipient(
+      {
+        id: contact.id,
+        email: contact.email,
+        firstName: contact.firstName,
+        lastName: contact.lastName,
+        company: contact.company,
+        title: contact.title,
+        hotelSegment: contact.hotelSegment,
+        hotelSegmentConfidence: contact.hotelSegmentConfidence,
+        hotelSegmentStatus: contact.hotelSegmentStatus,
+        contactPersona: contact.contactPersona,
+        contactPersonaConfidence: contact.contactPersonaConfidence,
+        contactPersonaStatus: contact.contactPersonaStatus,
+        customFields:
+          typeof contact.customFields === "object" && contact.customFields !== null
+            ? (contact.customFields as Record<string, string>)
+            : {},
+      },
+      selectionContext
+    );
+
+    const parts: TemplateParts = {
+      subject: selection.template.subject,
+      bodyHtml: selection.template.bodyHtml,
+      bodyText: selection.template.bodyText,
+    };
     const rendered = renderEmail(parts, contactMergeData(contact));
     if (rendered.missingFields.length) {
       work.review.missingFields.push({ email: contact.email, contactId: contact.id, fields: rendered.missingFields });
-      work.skipped.push({ contactId: contact.id, email: contact.email, reason: `Missing: ${rendered.missingFields.join(", ")}` });
+      work.skipped.push({
+        contactId: contact.id,
+        email: contact.email,
+        reason: `Missing: ${rendered.missingFields.join(", ")}`,
+        templateId: selection.templateId,
+        templateVersion: selection.template.version,
+        assignmentReason: selection.explanation,
+      });
       continue;
     }
-    work.ready.push({ contactId: contact.id, email: contact.email, rendered });
+
+    countsByTemplate.set(selection.templateId, (countsByTemplate.get(selection.templateId) ?? 0) + 1);
+
+    work.ready.push({
+      contactId: contact.id,
+      email: contact.email,
+      rendered,
+      templateId: selection.templateId,
+      templateVersion: selection.template.version,
+      templateName: selection.templateName,
+      assignmentSource: selection.assignmentSource,
+      assignmentReason: selection.explanation,
+    });
   }
 
   work.review.ready = work.ready.length;
   work.review.issueCount = work.review.missingFields.length + work.review.suppressed.length;
+  work.review.templateBreakdown = eligibleTemplates.map((t) => ({
+    templateId: t.id,
+    templateName: t.name,
+    count: countsByTemplate.get(t.id) ?? 0,
+    isFallback: Boolean(t.isFallback),
+  }));
+
   work.review.sample = work.ready.slice(0, sampleSize).map((r) => ({
     contactId: r.contactId,
     email: r.email,
@@ -102,11 +250,31 @@ async function buildReview(campaignId: string, db: Tx | typeof prisma = prisma, 
     html: r.rendered.html,
     text: r.rendered.text,
     missingFields: [],
+    templateId: r.templateId,
+    templateName: r.templateName,
+    assignmentSource: r.assignmentSource,
+    assignmentReason: r.assignmentReason,
   }));
+
   // Show at least one problem recipient's render when nobody is ready
   if (!work.review.sample.length && members[0]) {
-    const r = renderEmail(parts, contactMergeData(members[0].contact));
-    work.review.sample.push({ contactId: members[0].contact.id, email: members[0].contact.email, subject: r.subject, html: r.html, text: r.text, missingFields: r.missingFields });
+    const defaultTemplate = eligibleTemplates[0]!;
+    const r = renderEmail(
+      { subject: defaultTemplate.subject, bodyHtml: defaultTemplate.bodyHtml, bodyText: defaultTemplate.bodyText },
+      contactMergeData(members[0].contact)
+    );
+    work.review.sample.push({
+      contactId: members[0].contact.id,
+      email: members[0].contact.email,
+      subject: r.subject,
+      html: r.html,
+      text: r.text,
+      missingFields: r.missingFields,
+      templateId: defaultTemplate.id,
+      templateName: defaultTemplate.name,
+      assignmentSource: "FALLBACK",
+      assignmentReason: "Sample problem render",
+    });
   }
   return work;
 }
@@ -200,11 +368,28 @@ export async function approveCampaign(req: Request, id: string, seen: { contentH
           text: content.text,
           messageId: `<${sendId}@${domain}>`,
           status: "PENDING",
+          templateId: r.templateId,
+          templateVersion: r.templateVersion,
+          assignmentReason: r.assignmentReason,
         };
       });
       for (const s of work.skipped) {
         const sendId = crypto.randomUUID();
-        rows.push({ id: sendId, campaignId: id, contactId: s.contactId, email: s.email, subject: "", html: "", text: "", messageId: `<${sendId}@${domain}>`, status: "SKIPPED", skipReason: s.reason });
+        rows.push({
+          id: sendId,
+          campaignId: id,
+          contactId: s.contactId,
+          email: s.email,
+          subject: "",
+          html: "",
+          text: "",
+          messageId: `<${sendId}@${domain}>`,
+          status: "SKIPPED",
+          skipReason: s.reason,
+          templateId: s.templateId ?? null,
+          templateVersion: s.templateVersion ?? null,
+          assignmentReason: s.assignmentReason ?? null,
+        });
       }
       for (let i = 0; i < rows.length; i += 1000) {
         await tx.send.createMany({ data: rows.slice(i, i + 1000), skipDuplicates: true });
@@ -292,18 +477,61 @@ export async function resolveUnknown(req: Request, campaignId: string, sendId: s
 }
 
 // ---------------------------------------------------------------------------
-// Test send (internal addresses only; never touches recipients or Send rows)
+// ---------------------------------------------------------------------------
+// Test send (strictly safe: internal allowlist only, suppression check, dry run support)
 // ---------------------------------------------------------------------------
 
-export async function sendTest(req: Request, id: string, to: string[], contactId?: string) {
-  if (!smtpConfigured) throw AppError.conflict("MAILBOX_NOT_CONFIGURED", "The sending mailbox isn't configured on the server.");
-  const campaign = await getCampaignOr404(id);
-  const parts: TemplateParts = campaign.subject && campaign.bodyHtml
-    ? { subject: campaign.subject, bodyHtml: campaign.bodyHtml, bodyText: campaign.bodyText }
-    : { subject: campaign.template.subject, bodyHtml: campaign.template.bodyHtml, bodyText: campaign.template.bodyText };
+export const PERMITTED_TEST_RECIPIENTS = [
+  "s265.frank@gmail.com",
+  "aves7203@gmail.com",
+] as const;
 
-  const errors = validateTemplate(parts);
-  if (errors.length) throw AppError.badRequest("TEMPLATE_INVALID", `Fix the template first: ${errors[0]}`);
+export function getPermittedTestRecipients(): string[] {
+  if (process.env.ALLOWED_TEST_RECIPIENTS) {
+    return process.env.ALLOWED_TEST_RECIPIENTS.split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+  }
+  if (process.env.NODE_ENV === "test") {
+    return [...PERMITTED_TEST_RECIPIENTS, "qa@focusrealm.test"];
+  }
+  return [...PERMITTED_TEST_RECIPIENTS];
+}
+
+export function isPermittedTestRecipient(email: string): boolean {
+  const allowed = getPermittedTestRecipients();
+  return allowed.includes(email.toLowerCase().trim());
+}
+
+export async function sendTest(
+  req: Request,
+  id: string,
+  to: string[],
+  contactId?: string,
+  options?: { dryRun?: boolean }
+) {
+  if (!smtpConfigured) throw AppError.conflict("MAILBOX_NOT_CONFIGURED", "The sending mailbox isn't configured on the server.");
+
+  const normalizedTo = [...new Set(to.map((e) => e.trim().toLowerCase()))];
+  const disallowed = normalizedTo.filter((e) => !isPermittedTestRecipient(e));
+  if (disallowed.length > 0) {
+    throw AppError.badRequest(
+      "TEST_RECIPIENT_NOT_ALLOWED",
+      `Test sending is restricted to permitted test recipients only (${PERMITTED_TEST_RECIPIENTS.join(", ")}). Disallowed: ${disallowed.join(", ")}`
+    );
+  }
+
+  // Check suppression list for test recipients
+  const activeSuppressions = await prisma.suppressionEntry.findMany({
+    where: {
+      email: { in: normalizedTo },
+      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+    },
+    select: { email: true, reason: true },
+  });
+  const suppressedMap = new Map(activeSuppressions.map((s) => [s.email.toLowerCase(), s.reason]));
+
+  const campaign = await getCampaignOr404(id);
 
   const membership = await prisma.listMembership.findFirst({
     where: { contactListId: campaign.contactListId, ...(contactId ? { contactId } : {}) },
@@ -312,13 +540,153 @@ export async function sendTest(req: Request, id: string, to: string[], contactId
   });
   if (contactId && !membership) throw AppError.badRequest("NOT_A_RECIPIENT", "That contact isn't on this campaign's list.");
 
-  const data = membership ? contactMergeData(membership.contact) : { firstName: "Alex", lastName: "Sample", fullName: "Alex Sample", company: "Sample Co", email: to[0] };
+  // Multi-template resolution for test send
+  const eligibleTemplates = campaign.campaignTemplates.length
+    ? campaign.campaignTemplates.map((ct) => ({
+        id: ct.template.id,
+        name: ct.template.name,
+        subject: ct.template.subject,
+        bodyHtml: ct.template.bodyHtml,
+        bodyText: ct.template.bodyText,
+        version: ct.template.version,
+        isFallback: ct.isFallback,
+        priority: ct.priority,
+      }))
+    : [
+        {
+          id: campaign.template.id,
+          name: campaign.template.name,
+          subject: campaign.subject || campaign.template.subject,
+          bodyHtml: campaign.bodyHtml || campaign.template.bodyHtml,
+          bodyText: campaign.bodyText || campaign.template.bodyText,
+          version: campaign.template.version,
+          isFallback: true,
+          priority: 0,
+        },
+      ];
+
+  let selectedTemplate: {
+    id: string;
+    name: string;
+    subject: string;
+    bodyHtml: string;
+    bodyText?: string | null;
+    version: number;
+  } = eligibleTemplates[0]!;
+  let assignmentExplanation = "Default template";
+  let assignmentSource: "RULE" | "OVERRIDE" | "FALLBACK" = "FALLBACK";
+
+  if (membership?.contact) {
+    const selection = selectTemplateForRecipient(
+      {
+        id: membership.contact.id,
+        email: membership.contact.email,
+        firstName: membership.contact.firstName,
+        lastName: membership.contact.lastName,
+        company: membership.contact.company,
+        title: membership.contact.title,
+        hotelSegment: membership.contact.hotelSegment,
+        hotelSegmentConfidence: membership.contact.hotelSegmentConfidence,
+        hotelSegmentStatus: membership.contact.hotelSegmentStatus,
+        contactPersona: membership.contact.contactPersona,
+        contactPersonaConfidence: membership.contact.contactPersonaConfidence,
+        contactPersonaStatus: membership.contact.contactPersonaStatus,
+        customFields:
+          typeof membership.contact.customFields === "object" && membership.contact.customFields !== null
+            ? (membership.contact.customFields as Record<string, string>)
+            : {},
+      },
+      {
+        templates: eligibleTemplates,
+        rules: campaign.rules.map((r) => ({
+          id: r.id,
+          templateId: r.templateId,
+          priority: r.priority,
+          hotelSegment: r.hotelSegment,
+          contactPersona: r.contactPersona,
+          requiresVerified: r.requiresVerified,
+          minConfidence: r.minConfidence,
+          city: r.city,
+          description: r.description,
+        })),
+        overrides: new Map(
+          campaign.recipientOverrides.map((o) => [
+            o.contactId,
+            { contactId: o.contactId, templateId: o.templateId, reason: o.reason },
+          ])
+        ),
+        defaultTemplateId: campaign.templateId,
+      }
+    );
+    selectedTemplate = selection.template;
+    assignmentExplanation = selection.explanation;
+    assignmentSource = selection.assignmentSource;
+  }
+
+  const parts: TemplateParts = {
+    subject: selectedTemplate.subject,
+    bodyHtml: selectedTemplate.bodyHtml,
+    bodyText: selectedTemplate.bodyText,
+  };
+
+  const errors = validateTemplate(parts);
+  if (errors.length) throw AppError.badRequest("TEMPLATE_INVALID", `Fix the template first: ${errors[0]}`);
+
+  const data = membership
+    ? contactMergeData(membership.contact)
+    : {
+        firstName: "Alex",
+        lastName: "Sample",
+        fullName: "Alex Sample",
+        company: "Sample Hotel Group",
+        email: normalizedTo[0] ?? "test@example.com",
+        hotelSegment: "Luxury Hotel",
+        contactPersona: "General Manager",
+      };
+
   const rendered = renderEmail(parts, data);
   const content = withFooter(rendered.html, rendered.text, unsubscribeUrl("test-preview"), campaign.fromName);
 
+  const results: { to: string; ok: boolean; error?: string; suppressed?: boolean }[] = [];
+
+  // Dry run mode returns rendered preview and recipients without dispatching SMTP
+  if (options?.dryRun) {
+    for (const address of normalizedTo) {
+      if (suppressedMap.has(address)) {
+        results.push({ to: address, ok: false, suppressed: true, error: `Suppressed: ${suppressedMap.get(address)}` });
+      } else {
+        results.push({ to: address, ok: true });
+      }
+    }
+    return {
+      dryRun: true,
+      recipientCount: normalizedTo.length,
+      allowedRecipients: normalizedTo,
+      results,
+      renderedFor: membership?.contact.email ?? "sample recipient",
+      template: {
+        id: selectedTemplate.id,
+        name: selectedTemplate.name,
+        version: selectedTemplate.version,
+        assignmentSource,
+        assignmentExplanation,
+      },
+      rendered: {
+        subject: `[Test] ${rendered.subject}`,
+        html: content.html,
+        text: content.text,
+      },
+      missingFields: rendered.missingFields,
+    };
+  }
+
+  // Live test send
   const transport = getTransport();
-  const results: { to: string; ok: boolean; error?: string }[] = [];
-  for (const address of to) {
+  for (const address of normalizedTo) {
+    if (suppressedMap.has(address)) {
+      results.push({ to: address, ok: false, suppressed: true, error: `Recipient is suppressed (${suppressedMap.get(address)})` });
+      continue;
+    }
     try {
       await transport.send({
         to: address,
@@ -334,11 +702,36 @@ export async function sendTest(req: Request, id: string, to: string[], contactId
       results.push({ to: address, ok: false, error: (err as Error).message.slice(0, 300) });
     }
   }
+
   await audit(req, {
     action: "campaign.test_send",
     entityType: "Campaign",
     entityId: id,
-    metadata: { to, renderedFor: membership?.contact.email ?? "sample data", failed: results.filter((r) => !r.ok).length },
+    metadata: {
+      to: normalizedTo,
+      renderedFor: membership?.contact.email ?? "sample data",
+      template: selectedTemplate.name,
+      failed: results.filter((r) => !r.ok).length,
+    },
   });
-  return { results, renderedFor: membership?.contact.email ?? null, missingFields: rendered.missingFields };
+
+  return {
+    dryRun: false,
+    recipientCount: normalizedTo.length,
+    results,
+    renderedFor: membership?.contact.email ?? null,
+    template: {
+      id: selectedTemplate.id,
+      name: selectedTemplate.name,
+      version: selectedTemplate.version,
+      assignmentSource,
+      assignmentExplanation,
+    },
+    rendered: {
+      subject: `[Test] ${rendered.subject}`,
+      html: content.html,
+      text: content.text,
+    },
+    missingFields: rendered.missingFields,
+  };
 }

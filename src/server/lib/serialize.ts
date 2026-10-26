@@ -48,6 +48,12 @@ export async function toContactDtos(rows: ContactRow[]): Promise<ContactDto[]> {
       company: c.company,
       title: c.title,
       phone: c.phone,
+      hotelSegment: c.hotelSegment,
+      hotelSegmentConfidence: c.hotelSegmentConfidence,
+      hotelSegmentStatus: c.hotelSegmentStatus,
+      contactPersona: c.contactPersona,
+      contactPersonaConfidence: c.contactPersonaConfidence,
+      contactPersonaStatus: c.contactPersonaStatus,
       customFields: asStringRecord(c.customFields),
       source: c.source,
       importedAt: c.importedAt.toISOString(),
@@ -95,11 +101,20 @@ export function toTemplateDto(t: Prisma.TemplateGetPayload<{ include: { _count: 
 const userRef = { select: { id: true, name: true } } as const;
 
 export const campaignInclude = {
-  template: { select: { id: true, name: true } },
+  template: { select: { id: true, name: true, subject: true, version: true } },
   contactList: { select: { id: true, name: true, _count: { select: { members: true } } } },
   createdBy: userRef,
   approvedByUser: userRef,
   approvalRequestedBy: userRef,
+  campaignTemplates: {
+    include: { template: { select: { id: true, name: true, subject: true, version: true } } },
+    orderBy: { priority: "asc" },
+  },
+  rules: {
+    include: { template: { select: { id: true, name: true } } },
+    orderBy: { priority: "asc" },
+  },
+  _count: { select: { recipientOverrides: true } },
 } satisfies Prisma.CampaignInclude;
 
 type CampaignRow = Prisma.CampaignGetPayload<{ include: typeof campaignInclude }>;
@@ -177,6 +192,46 @@ export async function toCampaignSummaries(rows: CampaignRow[]): Promise<Campaign
 
 export async function toCampaignDetail(c: CampaignRow): Promise<CampaignDetailDto> {
   const counts = (await loadCampaignCounts([c.id])).get(c.id)!;
+  const templates = c.campaignTemplates.length
+    ? c.campaignTemplates.map((ct) => ({
+        id: ct.id,
+        campaignId: ct.campaignId,
+        templateId: ct.templateId,
+        name: ct.template.name,
+        subject: ct.template.subject,
+        version: ct.template.version,
+        isFallback: ct.isFallback,
+        priority: ct.priority,
+      }))
+    : [
+        {
+          id: `default-${c.template.id}`,
+          campaignId: c.id,
+          templateId: c.template.id,
+          name: c.template.name,
+          subject: c.template.subject,
+          version: c.template.version,
+          isFallback: true,
+          priority: 0,
+        },
+      ];
+
+  const rules = c.rules.map((r) => ({
+    id: r.id,
+    campaignId: r.campaignId,
+    templateId: r.templateId,
+    templateName: r.template.name,
+    priority: r.priority,
+    hotelSegment: r.hotelSegment,
+    contactPersona: r.contactPersona,
+    requiresVerified: r.requiresVerified,
+    minConfidence: r.minConfidence,
+    city: r.city,
+    description: r.description,
+    createdAt: r.createdAt.toISOString(),
+    updatedAt: r.updatedAt.toISOString(),
+  }));
+
   return {
     ...toCampaignSummary(c, counts),
     description: c.description,
@@ -189,6 +244,9 @@ export async function toCampaignDetail(c: CampaignRow): Promise<CampaignDetailDt
     cancelledAt: iso(c.cancelledAt),
     snapshot: c.subject && c.bodyHtml ? { subject: c.subject, bodyHtml: c.bodyHtml, bodyText: c.bodyText } : null,
     liveSendingBlocker: liveSendingBlocker(),
+    templates,
+    rules,
+    overridesCount: c._count.recipientOverrides,
   };
 }
 
@@ -205,6 +263,9 @@ export function toSendDto(s: {
   repliedAt: Date | null;
   unsubscribedAt: Date | null;
   updatedAt: Date;
+  templateId?: string | null;
+  templateVersion?: number | null;
+  assignmentReason?: string | null;
 }): SendDto {
   return {
     id: s.id,
@@ -219,6 +280,9 @@ export function toSendDto(s: {
     repliedAt: iso(s.repliedAt),
     unsubscribedAt: iso(s.unsubscribedAt),
     updatedAt: s.updatedAt.toISOString(),
+    templateId: s.templateId ?? null,
+    templateVersion: s.templateVersion ?? null,
+    assignmentReason: s.assignmentReason ?? null,
   };
 }
 

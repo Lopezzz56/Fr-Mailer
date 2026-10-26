@@ -41,6 +41,10 @@ test-results/
 playwright-report/
 .cache/
 tmp/
+scratch/
+.tempmediaStorage/
+docs/rendered-samples/
+bore.exe
 
 # ---------------------------------------------------------------------------
 # Editor, OS and local agent settings
@@ -48,6 +52,11 @@ tmp/
 .vscode/*
 !.vscode/extensions.json
 .idea/
+*.sublime-workspace
+*.sublime-project
 .DS_Store
 Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
 .claude/settings.local.json
+.agents/scratch/

@@ -37,9 +37,23 @@ interface Draft {
 const EMPTY: Draft = {
   name: "",
   description: "",
-  subject: "",
+  subject: "Ensuring frontline service execution at {{company|your hotel}}",
   mode: "text",
-  body: "Hi {{firstName|there}},\n\n\n\nBest,\n",
+  body:
+    "Dear {{firstName|{{company|Hospitality Team}}}},\n\n" +
+    "I’m reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.\n\n" +
+    "One of the key challenges in hospitality is ensuring that SOPs, training, and service standards defined at the corporate level are consistently followed by frontline teams across properties. Even when standards are clearly documented, ensuring that tasks are executed correctly, verified, and recorded can be difficult across multiple teams and locations.\n\n" +
+    "Mise Hotel, our hospitality-focused Service Execution Platform, is designed to address this challenge by bringing SOPs, training, and operational workflows together in a mobile-first platform. It helps translate documented standards into assigned tasks, supports teams in executing them, and captures evidence of completion to improve operational visibility and accountability.\n\n" +
+    "As we continue developing Mise Hotel, we would welcome the opportunity to explore a pilot with {{company|your team}} to demonstrate the platform, understand your operational requirements, and gather feedback from your team.\n\n" +
+    "We are also bringing together experienced hospitality leaders for the FocusRealm Hotel Advisory Board, where industry experts can help shape Mise Hotel around the real-world needs of hotel operations, workforce training, and service delivery. Given {{company|your organization}}’s experience in the hospitality industry, we would be honoured to explore your potential involvement.\n\n" +
+    "Would your team be available for a 20-minute meeting with Sehej to discuss Mise Hotel, a potential pilot, and the advisory opportunity? We would be happy to coordinate a time that suits your schedule.\n\n" +
+    "Thank you for your time. We look forward to the opportunity to connect.\n\n" +
+    "Best wishes,\n" +
+    "Sachin Annadurai\n" +
+    "Founder’s Office\n" +
+    "FocusRealm\n" +
+    "https://misehotel.com/\n" +
+    "https://focusrealm.org/",
   textAlt: "",
 };
 

@@ -227,8 +227,52 @@ router.patch(
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
     const input = ContactInputSchema.partial().parse(req.body);
-    const contact = await prisma.contact.update({ where: { id }, data: input, include: contactInclude });
+    const data: Prisma.ContactUpdateInput = { ...input };
+    // If a person manually updates segment or persona and doesn't specify status, mark as MANUAL
+    if (input.hotelSegment !== undefined && input.hotelSegmentStatus === undefined) {
+      data.hotelSegmentStatus = input.hotelSegment ? "MANUAL" : null;
+      data.hotelSegmentConfidence = input.hotelSegment ? 1.0 : null;
+    }
+    if (input.contactPersona !== undefined && input.contactPersonaStatus === undefined) {
+      data.contactPersonaStatus = input.contactPersona ? "MANUAL" : null;
+      data.contactPersonaConfidence = input.contactPersona ? 1.0 : null;
+    }
+    const contact = await prisma.contact.update({ where: { id }, data, include: contactInclude });
     await audit(req, { action: "contact.update", entityType: "Contact", entityId: id, metadata: { email: contact.email, fields: Object.keys(input) } });
+    ok(res, (await toContactDtos([contact]))[0]);
+  })
+);
+
+router.patch(
+  "/:id/classification",
+  requirePermission("contacts.manage"),
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    const schema = z.object({
+      hotelSegment: z.string().trim().max(100).optional().nullable(),
+      hotelSegmentConfidence: z.coerce.number().min(0).max(1).optional().nullable(),
+      hotelSegmentStatus: z.enum(["GUESSED", "VERIFIED", "MANUAL", "REJECTED"]).optional().nullable(),
+      contactPersona: z.string().trim().max(100).optional().nullable(),
+      contactPersonaConfidence: z.coerce.number().min(0).max(1).optional().nullable(),
+      contactPersonaStatus: z.enum(["GUESSED", "VERIFIED", "MANUAL", "REJECTED"]).optional().nullable(),
+    });
+    const input = schema.parse(req.body);
+    const data: Prisma.ContactUpdateInput = { ...input };
+    if (input.hotelSegment !== undefined && input.hotelSegmentStatus === undefined) {
+      data.hotelSegmentStatus = input.hotelSegment ? "MANUAL" : null;
+      data.hotelSegmentConfidence = input.hotelSegment ? 1.0 : null;
+    }
+    if (input.contactPersona !== undefined && input.contactPersonaStatus === undefined) {
+      data.contactPersonaStatus = input.contactPersona ? "MANUAL" : null;
+      data.contactPersonaConfidence = input.contactPersona ? 1.0 : null;
+    }
+    const contact = await prisma.contact.update({ where: { id }, data, include: contactInclude });
+    await audit(req, {
+      action: "contact.classify",
+      entityType: "Contact",
+      entityId: id,
+      metadata: { hotelSegment: contact.hotelSegment, contactPersona: contact.contactPersona },
+    });
     ok(res, (await toContactDtos([contact]))[0]);
   })
 );

@@ -24,11 +24,15 @@ import {
 } from "../services/campaign-service.js";
 import { sentInLast24h } from "../services/send-worker.js";
 import { kickBackground } from "../services/background.js";
+import { getCampaignAnalytics, recordSendOutcome } from "../services/analytics-service.js";
 import { env } from "../config.js";
 import {
   ApproveInputSchema,
   CampaignInputSchema,
+  CampaignRecipientOverrideInputSchema,
+  CampaignRuleInputSchema,
   CampaignStatusSchema,
+  CampaignTemplateInputSchema,
   IdSchema,
   PaginationQuerySchema,
   TestSendInputSchema,
@@ -153,6 +157,198 @@ router.delete(
 );
 
 // ---------------------------------------------------------------------------
+// Multi-Template & Rules Management
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/:id/templates",
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    const detail = await loadDetail(id);
+    ok(res, detail.templates);
+  })
+);
+
+router.post(
+  "/:id/templates",
+  requirePermission("campaigns.manage"),
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    await assertEditable(id);
+    const input = CampaignTemplateInputSchema.parse(req.body);
+    const template = await prisma.template.findUnique({ where: { id: input.templateId } });
+    if (!template) throw AppError.badRequest("TEMPLATE_NOT_FOUND", "Choose a template that still exists.");
+
+    await prisma.$transaction(async (tx) => {
+      if (input.isFallback) {
+        await tx.campaignTemplate.updateMany({ where: { campaignId: id }, data: { isFallback: false } });
+      }
+      await tx.campaignTemplate.upsert({
+        where: { campaignId_templateId: { campaignId: id, templateId: input.templateId } },
+        create: { campaignId: id, templateId: input.templateId, isFallback: input.isFallback, priority: input.priority },
+        update: { isFallback: input.isFallback, priority: input.priority },
+      });
+      await audit(req, { action: "campaign.template_add", entityType: "Campaign", entityId: id, metadata: { templateId: input.templateId, templateName: template.name } }, tx);
+    });
+    ok(res, await loadDetail(id));
+  })
+);
+
+router.delete(
+  "/:id/templates/:templateId",
+  requirePermission("campaigns.manage"),
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    const templateId = IdSchema.parse(req.params.templateId);
+    await assertEditable(id);
+    const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id }, include: { campaignTemplates: true } });
+    if (campaign.templateId === templateId && campaign.campaignTemplates.length <= 1) {
+      throw AppError.badRequest("LAST_TEMPLATE", "A campaign must have at least one template.");
+    }
+    await prisma.$transaction(async (tx) => {
+      await tx.campaignRule.deleteMany({ where: { campaignId: id, templateId } });
+      await tx.campaignRecipientOverride.deleteMany({ where: { campaignId: id, templateId } });
+      await tx.campaignTemplate.deleteMany({ where: { campaignId: id, templateId } });
+      await audit(req, { action: "campaign.template_remove", entityType: "Campaign", entityId: id, metadata: { templateId } }, tx);
+    });
+    ok(res, await loadDetail(id));
+  })
+);
+
+router.get(
+  "/:id/rules",
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    const detail = await loadDetail(id);
+    ok(res, detail.rules);
+  })
+);
+
+router.post(
+  "/:id/rules",
+  requirePermission("campaigns.manage"),
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    await assertEditable(id);
+    const input = CampaignRuleInputSchema.parse(req.body);
+    const template = await prisma.template.findUnique({ where: { id: input.templateId } });
+    if (!template) throw AppError.badRequest("TEMPLATE_NOT_FOUND", "Choose a template that still exists.");
+
+    const rule = await prisma.campaignRule.create({
+      data: {
+        campaignId: id,
+        templateId: input.templateId,
+        priority: input.priority,
+        hotelSegment: input.hotelSegment || null,
+        contactPersona: input.contactPersona || null,
+        requiresVerified: input.requiresVerified,
+        minConfidence: input.minConfidence,
+        city: input.city || null,
+        description: input.description,
+      },
+      include: { template: { select: { id: true, name: true } } },
+    });
+    await audit(req, { action: "campaign.rule_create", entityType: "CampaignRule", entityId: rule.id, metadata: { priority: rule.priority, template: template.name } });
+    ok(res, await loadDetail(id), 201);
+  })
+);
+
+router.put(
+  "/:id/rules/:ruleId",
+  requirePermission("campaigns.manage"),
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    const ruleId = IdSchema.parse(req.params.ruleId);
+    await assertEditable(id);
+    const input = CampaignRuleInputSchema.partial().parse(req.body);
+    if (input.templateId) {
+      const template = await prisma.template.findUnique({ where: { id: input.templateId } });
+      if (!template) throw AppError.badRequest("TEMPLATE_NOT_FOUND", "Choose a template that still exists.");
+    }
+    await prisma.campaignRule.update({
+      where: { id: ruleId, campaignId: id },
+      data: input,
+    });
+    await audit(req, { action: "campaign.rule_update", entityType: "CampaignRule", entityId: ruleId });
+    ok(res, await loadDetail(id));
+  })
+);
+
+router.delete(
+  "/:id/rules/:ruleId",
+  requirePermission("campaigns.manage"),
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    const ruleId = IdSchema.parse(req.params.ruleId);
+    await assertEditable(id);
+    await prisma.campaignRule.delete({ where: { id: ruleId, campaignId: id } });
+    await audit(req, { action: "campaign.rule_delete", entityType: "CampaignRule", entityId: ruleId });
+    ok(res, await loadDetail(id));
+  })
+);
+
+router.get(
+  "/:id/overrides",
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    const overrides = await prisma.campaignRecipientOverride.findMany({
+      where: { campaignId: id },
+      include: { contact: { select: { email: true } }, template: { select: { name: true } } },
+    });
+    ok(
+      res,
+      overrides.map((o) => ({
+        id: o.id,
+        campaignId: o.campaignId,
+        contactId: o.contactId,
+        contactEmail: o.contact.email,
+        templateId: o.templateId,
+        templateName: o.template.name,
+        reason: o.reason,
+        createdAt: o.createdAt.toISOString(),
+      }))
+    );
+  })
+);
+
+router.post(
+  "/:id/overrides",
+  requirePermission("campaigns.manage"),
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    await assertEditable(id);
+    const input = CampaignRecipientOverrideInputSchema.parse(req.body);
+    const [contact, template] = await Promise.all([
+      prisma.contact.findUnique({ where: { id: input.contactId } }),
+      prisma.template.findUnique({ where: { id: input.templateId } }),
+    ]);
+    if (!contact) throw AppError.badRequest("CONTACT_NOT_FOUND", "Contact no longer exists.");
+    if (!template) throw AppError.badRequest("TEMPLATE_NOT_FOUND", "Template no longer exists.");
+
+    const override = await prisma.campaignRecipientOverride.upsert({
+      where: { campaignId_contactId: { campaignId: id, contactId: input.contactId } },
+      create: { campaignId: id, contactId: input.contactId, templateId: input.templateId, reason: input.reason },
+      update: { templateId: input.templateId, reason: input.reason },
+    });
+    await audit(req, { action: "campaign.override_set", entityType: "CampaignRecipientOverride", entityId: override.id, metadata: { contact: contact.email, template: template.name } });
+    ok(res, await loadDetail(id));
+  })
+);
+
+router.delete(
+  "/:id/overrides/:contactId",
+  requirePermission("campaigns.manage"),
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    const contactId = IdSchema.parse(req.params.contactId);
+    await assertEditable(id);
+    await prisma.campaignRecipientOverride.deleteMany({ where: { campaignId: id, contactId } });
+    await audit(req, { action: "campaign.override_remove", entityType: "Campaign", entityId: id, metadata: { contactId } });
+    ok(res, await loadDetail(id));
+  })
+);
+
+// ---------------------------------------------------------------------------
 // Review & approval
 // ---------------------------------------------------------------------------
 
@@ -224,8 +420,39 @@ router.post(
   "/:id/test",
   requirePermission("campaigns.send_test"),
   asyncHandler(async (req, res) => {
-    const { to, contactId } = TestSendInputSchema.parse(req.body);
-    ok(res, await sendTest(req, IdSchema.parse(req.params.id), to, contactId));
+    const { to, contactId, dryRun } = TestSendInputSchema.parse(req.body);
+    ok(res, await sendTest(req, IdSchema.parse(req.params.id), to, contactId, { dryRun }));
+  })
+);
+
+router.get(
+  "/:id/analytics",
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    ok(res, await getCampaignAnalytics(id));
+  })
+);
+
+router.post(
+  "/:id/sends/:sendId/outcome",
+  requirePermission("campaigns.manage"),
+  asyncHandler(async (req, res) => {
+    const sendId = IdSchema.parse(req.params.sendId);
+    const input = z
+      .object({
+        replyClassification: z.enum(["POSITIVE", "NEGATIVE", "NEUTRAL", "OUT_OF_OFFICE"]).optional(),
+        meetingBooked: z.boolean().optional(),
+        note: z.string().trim().max(500).optional(),
+      })
+      .parse(req.body);
+    const event = await recordSendOutcome(sendId, input);
+    await audit(req, {
+      action: "send.record_outcome",
+      entityType: "Send",
+      entityId: sendId,
+      metadata: input,
+    });
+    ok(res, event);
   })
 );
 

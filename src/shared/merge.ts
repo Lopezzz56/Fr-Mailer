@@ -196,6 +196,8 @@ export interface ContactLike {
   company?: string | null;
   title?: string | null;
   phone?: string | null;
+  hotelSegment?: string | null;
+  contactPersona?: string | null;
   customFields?: unknown;
 }
 
@@ -215,6 +217,8 @@ export function contactMergeData(contact: ContactLike, overrides?: MergeData): M
     company: contact.company ?? undefined,
     title: contact.title ?? undefined,
     phone: contact.phone ?? undefined,
+    hotelSegment: contact.hotelSegment ?? undefined,
+    contactPersona: contact.contactPersona ?? undefined,
     ...(overrides ?? {}),
   };
 }

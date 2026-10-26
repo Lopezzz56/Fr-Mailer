@@ -7,6 +7,7 @@ import type { Prisma } from "@prisma/client";
 import prisma from "../db.js";
 import { AppError } from "../middleware/error-handler.js";
 import { extractEmails, likelyTypo, suggestEmailFix } from "./email-cells.js";
+import { inferPersonaFromTitle, inferSegmentFromCompany, normalizeContactPersona, normalizeHotelSegment } from "./classification.js";
 import {
   ALL_SHEETS,
   CUSTOM_FIELD_NAME,
@@ -145,6 +146,8 @@ const ALIASES: Record<"email" | StandardContactField | "fullName", string[]> = {
   company: ["company", "companyname", "organization", "organisation", "org", "account", "accountname", "business", "hotel", "property"],
   title: ["title", "jobtitle", "position", "role", "designation"],
   phone: ["phone", "phonenumber", "mobile", "mobilenumber", "tel", "telephone", "cell", "contactnumber"],
+  hotelSegment: ["hotelsegment", "segment", "propertytype", "hoteltype", "starrating", "category"],
+  contactPersona: ["contactpersona", "persona", "rolecategory", "jobfunction", "department"],
 };
 
 const normalize = (h: string) => h.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -325,7 +328,16 @@ export function planImport(sheet: ParsedSheet, mapping: Record<string, ImportTar
 
 /** Fields to write for an existing contact under a policy; empty object = nothing changes */
 export function mergeForPolicy(
-  existing: { firstName: string | null; lastName: string | null; company: string | null; title: string | null; phone: string | null; customFields: Record<string, string> },
+  existing: {
+    firstName: string | null;
+    lastName: string | null;
+    company: string | null;
+    title: string | null;
+    phone: string | null;
+    hotelSegment?: string | null;
+    contactPersona?: string | null;
+    customFields: Record<string, string>;
+  },
   incoming: ContactValues,
   policy: DuplicatePolicy
 ): { standard: Partial<Record<StandardContactField, string>>; customFields?: Record<string, string> } {
@@ -371,7 +383,20 @@ export async function runImport(args: {
   const skipped = plan.analysis.problemCount + plan.analysis.skippedRows;
 
   const emails = [...records.keys()];
-  const existing = new Map<string, { id: string; firstName: string | null; lastName: string | null; company: string | null; title: string | null; phone: string | null; customFields: Prisma.JsonValue }>();
+  const existing = new Map<
+    string,
+    {
+      id: string;
+      firstName: string | null;
+      lastName: string | null;
+      company: string | null;
+      title: string | null;
+      phone: string | null;
+      hotelSegment?: string | null;
+      contactPersona?: string | null;
+      customFields: Prisma.JsonValue;
+    }
+  >();
   for (let i = 0; i < emails.length; i += 1000) {
     const batch = await prisma.contact.findMany({ where: { email: { in: emails.slice(i, i + 1000) } } });
     for (const c of batch) existing.set(c.email.toLowerCase(), c);
@@ -401,11 +426,38 @@ export async function runImport(args: {
       for (const record of records.values()) {
         const current = existing.get(record.email);
         if (!current) {
-          toCreate.push({ email: record.email, ...record.standard, customFields: record.custom, source: "csv-import" });
+          const segInferred = !record.standard.hotelSegment && record.standard.company ? inferSegmentFromCompany(record.standard.company, record.custom) : null;
+          const perInferred = !record.standard.contactPersona && record.standard.title ? inferPersonaFromTitle(record.standard.title) : null;
+
+          const hotelSegment = record.standard.hotelSegment ?? (segInferred && segInferred.value !== "UNKNOWN" ? segInferred.value : null);
+          const hotelSegmentStatus = record.standard.hotelSegment ? "MANUAL" : (hotelSegment ? "GUESSED" : null);
+          const hotelSegmentConfidence = record.standard.hotelSegment ? 1.0 : (segInferred && segInferred.value !== "UNKNOWN" ? segInferred.confidence : null);
+
+          const contactPersona = record.standard.contactPersona ?? (perInferred && perInferred.value !== "UNKNOWN" ? perInferred.value : null);
+          const contactPersonaStatus = record.standard.contactPersona ? "MANUAL" : (contactPersona ? "GUESSED" : null);
+          const contactPersonaConfidence = record.standard.contactPersona ? 1.0 : (perInferred && perInferred.value !== "UNKNOWN" ? perInferred.confidence : null);
+
+          toCreate.push({
+            email: record.email,
+            ...record.standard,
+            hotelSegment,
+            hotelSegmentStatus,
+            hotelSegmentConfidence,
+            contactPersona,
+            contactPersonaStatus,
+            contactPersonaConfidence,
+            customFields: record.custom,
+            source: "csv-import",
+          });
           continue;
         }
         const merged = mergeForPolicy(
-          { ...current, customFields: Object.fromEntries(Object.entries((current.customFields as Record<string, unknown>) ?? {}).map(([k, v]) => [k, String(v)])) },
+          {
+            ...current,
+            customFields: Object.fromEntries(
+              Object.entries((current.customFields as Record<string, unknown>) ?? {}).map(([k, v]) => [k, String(v)])
+            ),
+          },
           record,
           policy
         );

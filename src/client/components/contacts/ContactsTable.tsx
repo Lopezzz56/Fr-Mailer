@@ -18,7 +18,14 @@ import { ConfirmDialog } from "../ui/Overlay";
 import { useToast } from "../ui/Toast";
 import { ContactDrawer } from "./ContactDrawer";
 import { AddToListDialog } from "./ContactDialogs";
-import { SUPPRESSION_REASON_LABELS, type ContactDto } from "@shared/types";
+import {
+  CONTACT_PERSONA_LABELS,
+  HOTEL_SEGMENT_LABELS,
+  SUPPRESSION_REASON_LABELS,
+  type ContactDto,
+  type ContactPersona,
+  type HotelSegment,
+} from "@shared/types";
 
 export function ContactsTable({ listId, listName, emptyAction }: { listId?: string; listName?: string; emptyAction?: React.ReactNode }) {
   const { can } = useAuth();
@@ -75,6 +82,50 @@ export function ContactsTable({ listId, listName, emptyAction }: { listId?: stri
           {c.title && <p className="truncate text-xs text-ink-subtle">{c.title}</p>}
         </div>
       ),
+      className: "max-w-[200px]",
+    },
+    {
+      key: "classification",
+      header: "Segment & Persona",
+      cell: (c) => {
+        const seg = c.hotelSegment ? (HOTEL_SEGMENT_LABELS[c.hotelSegment as HotelSegment] ?? c.hotelSegment) : null;
+        const per = c.contactPersona ? (CONTACT_PERSONA_LABELS[c.contactPersona as ContactPersona] ?? c.contactPersona) : null;
+        const isVerified =
+          c.hotelSegmentStatus === "VERIFIED" ||
+          c.hotelSegmentStatus === "MANUAL" ||
+          c.contactPersonaStatus === "VERIFIED" ||
+          c.contactPersonaStatus === "MANUAL";
+        const isGuessed = (c.hotelSegmentStatus === "GUESSED" || c.contactPersonaStatus === "GUESSED") && !isVerified;
+
+        if (!seg && !per) {
+          return <span className="text-xs text-ink-faint">—</span>;
+        }
+
+        return (
+          <div className="flex flex-wrap items-center gap-1">
+            {seg && (
+              <span className="rounded border border-line bg-surface-muted px-1.5 py-0.5 text-[11px] font-medium text-ink-muted">
+                {seg}
+              </span>
+            )}
+            {per && (
+              <span className="rounded border border-line bg-surface-muted px-1.5 py-0.5 text-[11px] font-medium text-ink-muted">
+                {per}
+              </span>
+            )}
+            {isVerified && (
+              <span className="text-[11px] font-semibold text-emerald-600" title="Verified attribute">
+                ✓
+              </span>
+            )}
+            {isGuessed && (
+              <span className="text-[11px] font-medium text-amber-600" title="Unverified estimate">
+                ~
+              </span>
+            )}
+          </div>
+        );
+      },
       className: "max-w-[220px]",
     },
     {

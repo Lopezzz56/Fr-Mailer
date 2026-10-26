@@ -99,11 +99,22 @@ model Contact {
   importedAt   DateTime @default(now()) @db.Timestamptz
   updatedAt    DateTime @updatedAt @db.Timestamptz
 
-  memberships ListMembership[]
-  enrichments Enrichment[]
-  sends       Send[]
+  // Segmentation and persona
+  hotelSegment             String?
+  hotelSegmentConfidence   Float?
+  hotelSegmentStatus       EnrichmentStatus?
+  contactPersona           String?
+  contactPersonaConfidence Float?
+  contactPersonaStatus     EnrichmentStatus?
+
+  memberships       ListMembership[]
+  enrichments       Enrichment[]
+  sends             Send[]
+  campaignOverrides CampaignRecipientOverride[]
 
   @@index([company])
+  @@index([hotelSegment])
+  @@index([contactPersona])
   @@map("contacts")
 }
 
@@ -170,7 +181,11 @@ model Template {
   createdAt   DateTime @default(now()) @db.Timestamptz
   updatedAt   DateTime @updatedAt @db.Timestamptz
 
-  campaigns Campaign[]
+  campaigns         Campaign[]
+  campaignTemplates CampaignTemplate[]
+  campaignRules     CampaignRule[]
+  campaignOverrides CampaignRecipientOverride[]
+  sends             Send[]
 
   @@map("templates")
 }
@@ -211,7 +226,10 @@ model Campaign {
   createdAt             DateTime  @default(now()) @db.Timestamptz
   updatedAt             DateTime  @updatedAt @db.Timestamptz
 
-  sends Send[]
+  campaignTemplates  CampaignTemplate[]
+  rules              CampaignRule[]
+  recipientOverrides CampaignRecipientOverride[]
+  sends              Send[]
 
   @@index([status])
   @@index([contactListId])
@@ -220,28 +238,32 @@ model Campaign {
 
 // One message to one recipient, created (and rendered) when the campaign is approved
 model Send {
-  id             String         @id @default(cuid())
-  campaignId     String
-  campaign       Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  contactId      String?
-  contact        Contact?       @relation(fields: [contactId], references: [id], onDelete: SetNull)
-  email          String         @db.Citext
-  subject        String
-  html           String
-  text           String
-  status         DeliveryStatus @default(PENDING)
-  skipReason     String?
+  id               String         @id @default(cuid())
+  campaignId       String
+  campaign         Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contactId        String?
+  contact          Contact?       @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  email            String         @db.Citext
+  subject          String
+  html             String
+  text             String
+  status           DeliveryStatus @default(PENDING)
+  skipReason       String?
   // Generated before handoff so bounces/replies can be matched and nothing is sent twice
-  messageId      String         @unique
-  attempts       Int            @default(0)
-  lastError      String?
-  claimedAt      DateTime?      @db.Timestamptz
-  sentAt         DateTime?      @db.Timestamptz
-  bouncedAt      DateTime?      @db.Timestamptz
-  repliedAt      DateTime?      @db.Timestamptz
-  unsubscribedAt DateTime?      @db.Timestamptz
-  createdAt      DateTime       @default(now()) @db.Timestamptz
-  updatedAt      DateTime       @updatedAt @db.Timestamptz
+  messageId        String         @unique
+  attempts         Int            @default(0)
+  lastError        String?
+  claimedAt        DateTime?      @db.Timestamptz
+  sentAt           DateTime?      @db.Timestamptz
+  bouncedAt        DateTime?      @db.Timestamptz
+  repliedAt        DateTime?      @db.Timestamptz
+  unsubscribedAt   DateTime?      @db.Timestamptz
+  templateId       String?
+  template         Template?      @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  templateVersion  Int?
+  assignmentReason String?
+  createdAt        DateTime       @default(now()) @db.Timestamptz
+  updatedAt        DateTime       @updatedAt @db.Timestamptz
 
   events SendEvent[]
 
@@ -264,6 +286,59 @@ model SendEvent {
 
   @@index([sendId])
   @@map("send_events")
+}
+
+model CampaignTemplate {
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  templateId String
+  template   Template @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  isFallback Boolean  @default(false)
+  priority   Int      @default(0)
+  createdAt  DateTime @default(now()) @db.Timestamptz
+  updatedAt  DateTime @updatedAt @db.Timestamptz
+
+  @@unique([campaignId, templateId])
+  @@index([campaignId])
+  @@map("campaign_templates")
+}
+
+model CampaignRule {
+  id               String   @id @default(cuid())
+  campaignId       String
+  campaign         Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  templateId       String
+  template         Template @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  priority         Int      @default(0)
+  hotelSegment     String?
+  contactPersona   String?
+  requiresVerified Boolean  @default(false)
+  minConfidence    Float?
+  city             String?
+  description      String?
+  createdAt        DateTime @default(now()) @db.Timestamptz
+  updatedAt        DateTime @updatedAt @db.Timestamptz
+
+  @@index([campaignId, priority])
+  @@map("campaign_rules")
+}
+
+model CampaignRecipientOverride {
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contactId  String
+  contact    Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  templateId String
+  template   Template @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  reason     String?
+  createdAt  DateTime @default(now()) @db.Timestamptz
+  updatedAt  DateTime @updatedAt @db.Timestamptz
+
+  @@unique([campaignId, contactId])
+  @@index([campaignId])
+  @@map("campaign_recipient_overrides")
 }
 
 // ============================================================================

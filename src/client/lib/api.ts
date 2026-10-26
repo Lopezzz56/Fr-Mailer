@@ -52,6 +52,7 @@ const json = (method: string, body?: unknown): RequestInit => ({
 export const api = {
   get: <T>(endpoint: string) => request<T>(endpoint),
   post: <T>(endpoint: string, body?: unknown) => request<T>(endpoint, json("POST", body)),
+  put: <T>(endpoint: string, body?: unknown) => request<T>(endpoint, json("PUT", body)),
   patch: <T>(endpoint: string, body?: unknown) => request<T>(endpoint, json("PATCH", body)),
   delete: <T>(endpoint: string) => request<T>(endpoint, { method: "DELETE" }),
   upload: <T>(endpoint: string, form: FormData) => request<T>(endpoint, { method: "POST", body: form }),

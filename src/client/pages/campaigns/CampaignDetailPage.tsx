@@ -20,6 +20,7 @@ import { useToast } from "../../components/ui/Toast";
 import { CampaignProgress } from "../../components/campaigns/CampaignProgress";
 import { ReviewPanel } from "../../components/campaigns/ReviewPanel";
 import { RecipientsPanel } from "../../components/campaigns/RecipientsPanel";
+import { TemplateRulesPanel } from "../../components/campaigns/TemplateRulesPanel";
 import { EmailPreview } from "../../components/email/EmailPreview";
 import { EmailSchema, type CampaignReviewDto } from "@shared/types";
 
@@ -176,7 +177,7 @@ export function CampaignDetailPage() {
   const [dialog, setDialog] = useState<DialogKey>(null);
   useTitle(c?.name ?? "Campaign");
 
-  const tab = (params.get("tab") ?? (preApproval ? "review" : "recipients")) as "review" | "recipients" | "content" | "details";
+  const tab = (params.get("tab") ?? (preApproval ? "review" : "recipients")) as "review" | "templates" | "recipients" | "content" | "details";
   const setTab = (t: string) => setParams({ tab: t }, { replace: true });
 
   const refresh = () => invalidate("campaigns", "overview");
@@ -274,6 +275,7 @@ export function CampaignDetailPage() {
 
   const tabs = [
     ...(preApproval ? [{ key: "review" as const, label: "Review" }] : [{ key: "recipients" as const, label: "Recipients", count: c.counts.total }]),
+    { key: "templates" as const, label: "Templates & Rules", count: (c.templates?.length ?? 1) },
     ...(!preApproval ? [{ key: "content" as const, label: "Approved content" }] : []),
     { key: "details" as const, label: "Details" },
   ];
@@ -324,8 +326,12 @@ export function CampaignDetailPage() {
 
         <Tabs tabs={tabs} active={tabs.some((t) => t.key === tab) ? tab : tabs[0]!.key} onChange={setTab} />
 
-        {preApproval && tab !== "details" && (
+        {tab === "review" && preApproval && (
           review.isPending ? <PageLoader label="Checking recipients" /> : review.isError ? <ErrorState error={review.error} onRetry={() => review.refetch()} /> : <ReviewPanel review={review.data.data} fromLine={fromLine} />
+        )}
+
+        {tab === "templates" && (
+          <TemplateRulesPanel campaign={c} readOnly={c.status !== "DRAFT"} />
         )}
 
         {tab === "recipients" && !preApproval && <RecipientsPanel campaignId={id} counts={c.counts} live={c.status === "SENDING"} fromLine={fromLine} initialFilter={params.get("filter") ?? undefined} />}
