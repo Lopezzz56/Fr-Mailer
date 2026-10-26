@@ -34,7 +34,7 @@ class SmtpTransport implements MailTransport {
   });
 
   async send(message: OutgoingMessage) {
-    const info = await this.transporter.sendMail({
+    const mailOptions = {
       from: { name: message.fromName, address: env.SMTP_FROM_EMAIL! },
       to: message.to,
       replyTo: message.replyTo ?? undefined,
@@ -43,7 +43,16 @@ class SmtpTransport implements MailTransport {
       text: message.text,
       messageId: message.messageId,
       headers: message.headers,
-    });
+    };
+    const info = await this.transporter.sendMail(mailOptions);
+
+    // Auto-save copy to IMAP Sent folder so it appears in Outlook / webmail
+    if (env.IMAP_HOST && env.IMAP_USER && env.IMAP_PASS) {
+      void appendToSent(mailOptions).catch((err) => {
+        console.warn("[mailer] Could not append to Sent folder:", (err as Error).message);
+      });
+    }
+
     return { response: String(info.response ?? "") };
   }
 
@@ -92,3 +101,31 @@ export function closeTransport() {
 export function messageIdDomain(): string {
   return (env.SMTP_FROM_EMAIL?.split("@")[1] ?? "focusrealm.local").toLowerCase();
 }
+
+/** Appends a message copy to the IMAP Sent mailbox using ImapFlow */
+async function appendToSent(mailOptions: Record<string, unknown>): Promise<void> {
+  const { ImapFlow } = await import("imapflow");
+  const MailComposer = (await import("nodemailer/lib/mail-composer/index.js")).default;
+  // @ts-ignore MailComposer constructor
+  const composer = new MailComposer(mailOptions);
+  const raw = await composer.compile().build();
+
+  const client = new ImapFlow({
+    host: env.IMAP_HOST!,
+    port: env.IMAP_PORT,
+    secure: true,
+    auth: { user: env.IMAP_USER!, pass: env.IMAP_PASS! },
+    logger: false,
+  });
+
+  try {
+    await client.connect();
+    // Locate Sent folder (common names: "Sent", "INBOX.Sent", "Sent Messages", "Sent Items")
+    const list = await client.list();
+    const sentMailbox = list.find((m) => m.specialUse === "\\Sent" || /^sent/i.test(m.name) || /sent items/i.test(m.name))?.path || "Sent";
+    await client.append(sentMailbox, raw, ["\\Seen"]);
+  } finally {
+    await client.logout().catch(() => undefined);
+  }
+}
+
