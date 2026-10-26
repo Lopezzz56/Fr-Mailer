@@ -1,0 +1,502 @@
+// API contracts shared by server and client: request schemas (validated on the server)
+// and response shapes (what the server returns). Dates are ISO strings over the wire.
+import { z } from "zod";
+
+// ============================================================================
+// PRIMITIVES
+// ============================================================================
+
+export const EmailSchema = z.string().trim().toLowerCase().email("Enter a valid email address");
+export const IdSchema = z.string().min(1).max(64);
+
+export const PaginationQuerySchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().positive().max(100).default(25),
+});
+
+export interface Pagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+const optionalText = (max: number) =>
+  z
+    .string()
+    .trim()
+    .max(max)
+    .optional()
+    .nullable()
+    .transform((v) => (v ? v : null));
+
+// ============================================================================
+// CONTACTS & LISTS
+// ============================================================================
+
+export const STANDARD_CONTACT_FIELDS = ["firstName", "lastName", "company", "title", "phone"] as const;
+export type StandardContactField = (typeof STANDARD_CONTACT_FIELDS)[number];
+
+export const CUSTOM_FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,49}$/;
+
+/** camelCase merge-field name for an arbitrary column header, e.g. "Room count" -> "roomCount" */
+export function toFieldName(header: string): string {
+  const words = header
+    .replace(/[^A-Za-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  let name = words.map((w, i) => (i === 0 ? w.toLowerCase() : w[0]!.toUpperCase() + w.slice(1).toLowerCase())).join("");
+  if (!name) name = "field";
+  if (/^[0-9]/.test(name)) name = `f${name}`;
+  return name.slice(0, 50);
+}
+
+export const ContactInputSchema = z.object({
+  email: EmailSchema,
+  firstName: optionalText(100),
+  lastName: optionalText(100),
+  company: optionalText(200),
+  title: optionalText(200),
+  phone: optionalText(50),
+  customFields: z
+    .record(z.string().regex(CUSTOM_FIELD_NAME, "Field names use letters, numbers and _"), z.string().max(2000))
+    .default({}),
+});
+export type ContactInput = z.input<typeof ContactInputSchema>;
+
+export const ContactListInputSchema = z.object({
+  name: z.string().trim().min(1, "Name is required").max(100),
+  description: optionalText(500),
+});
+export type ContactListInput = z.input<typeof ContactListInputSchema>;
+
+export const ListMembersInputSchema = z.object({
+  contactIds: z.array(IdSchema).min(1).max(1000),
+});
+
+export interface ContactDto {
+  id: string;
+  email: string;
+  firstName: string | null;
+  lastName: string | null;
+  company: string | null;
+  title: string | null;
+  phone: string | null;
+  customFields: Record<string, string>;
+  source: string | null;
+  importedAt: string;
+  updatedAt: string;
+  lists: { id: string; name: string }[];
+  suppression: { reason: SuppressionReason; createdAt: string } | null;
+}
+
+export interface ContactListDto {
+  id: string;
+  name: string;
+  description: string | null;
+  memberCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ============================================================================
+// IMPORT
+// ============================================================================
+
+/** Where an import column goes: a contact field, "fullName" (split into first/last), a custom field ("custom:<name>"), or nowhere */
+export type ImportTarget = "email" | StandardContactField | "fullName" | `custom:${string}` | "ignore";
+
+export const IMPORT_TARGET_LABELS: Record<"email" | StandardContactField | "fullName", string> = {
+  email: "Email",
+  firstName: "First name",
+  lastName: "Last name",
+  fullName: "Full name (split into first & last)",
+  company: "Company",
+  title: "Job title",
+  phone: "Phone",
+};
+
+export const MAX_IMPORT_ROWS = 50_000;
+/** Vercel caps function request bodies at 4.5 MB; stay under it everywhere */
+export const MAX_IMPORT_BYTES = 4 * 1024 * 1024;
+
+export const DuplicatePolicySchema = z.enum(["skip", "fill_empty", "overwrite"]);
+export type DuplicatePolicy = z.infer<typeof DuplicatePolicySchema>;
+
+export const DUPLICATE_POLICY_LABELS: Record<DuplicatePolicy, { label: string; description: string }> = {
+  skip: { label: "Keep existing contacts", description: "Contacts already in FocusRealm are left untouched." },
+  fill_empty: { label: "Fill in blanks only", description: "Adds missing details to existing contacts; never changes what's there." },
+  overwrite: { label: "Overwrite with file values", description: "Replaces existing details with non-empty values from the file." },
+};
+
+/** Sheet selector value meaning "every sheet in the workbook, combined by column name" */
+export const ALL_SHEETS = "__all__";
+
+/** A cell with several addresses: one contact per address, or only the first */
+export const MultiEmailPolicySchema = z.enum(["each", "first"]);
+export type MultiEmailPolicy = z.infer<typeof MultiEmailPolicySchema>;
+
+/** Identifies a row across sheets: "<sheet>!<row number>" */
+export const rowRef = (sheet: string, row: number) => `${sheet}!${row}`;
+
+export const ImportOptionsSchema = z.object({
+  mapping: z.record(z.string(), z.string()),
+  sheet: z.string().max(200).optional(),
+  multiEmail: MultiEmailPolicySchema.default("each"),
+  /** Person-confirmed corrections: rowRef -> email, or "" to skip that row */
+  fixes: z.record(z.string().max(250), z.string().trim().max(320)).default({}),
+});
+
+export const ImportConfigSchema = ImportOptionsSchema.extend({
+  duplicatePolicy: DuplicatePolicySchema.default("fill_empty"),
+  listId: IdSchema.optional(),
+  newListName: z.string().trim().min(1).max(100).optional(),
+}).refine((c) => Object.values(c.mapping).includes("email"), { message: "Choose which column holds the email address" });
+export type ImportConfig = z.input<typeof ImportConfigSchema>;
+
+export interface ImportSheetInfo {
+  name: string;
+  rowCount: number;
+  headers: string[];
+}
+
+export interface ImportPreviewDto {
+  fileName: string;
+  /** Every non-empty sheet (one entry for CSV) */
+  sheets: ImportSheetInfo[];
+  /** The sheet this preview shows, or ALL_SHEETS */
+  sheet: string;
+  headers: string[];
+  sampleRows: string[][];
+  totalRows: number;
+  suggestedMapping: Record<string, ImportTarget>;
+}
+
+export interface ImportProblemRow {
+  /** invalid: no usable address, row is left out unless fixed. typo: imported as written unless corrected */
+  kind: "invalid" | "typo";
+  ref: string;
+  sheet: string;
+  row: number;
+  /** What the email column(s) actually contained */
+  raw: string;
+  /** A likely correction for the person to confirm, if one could be guessed */
+  suggestion: string | null;
+  /** typo rows: the address as read from the cell */
+  found?: string;
+  /** Name/company from the same row, to help recognise who it is */
+  context: string;
+  message: string;
+}
+
+/** Result of checking the email column before importing */
+export interface ImportAnalysisDto {
+  totalRows: number;
+  /** Unique addresses that will be imported */
+  contacts: number;
+  /** Rows whose cell held more than one address */
+  multiEmailRows: number;
+  /** Rows where extra text around the address was removed */
+  cleanedRows: number;
+  /** Rows repaired by a confirmed correction */
+  fixedRows: number;
+  /** Rows the person chose to skip */
+  skippedRows: number;
+  /** Addresses that appear more than once in the file */
+  duplicatesInFile: number;
+  /** Rows needing a person: invalid ones first, then possible typos (capped; see the counts) */
+  problems: ImportProblemRow[];
+  problemCount: number;
+  /** Valid addresses at a misspelt provider, e.g. @gmial.com */
+  typoCount: number;
+}
+
+/** A row that wasn't imported; `sheet` is omitted for CSV files */
+export type ImportRowError = {
+  sheet?: string;
+  row: number;
+  message: string;
+};
+
+export interface ImportResultDto {
+  id: string;
+  fileName: string;
+  totalRows: number;
+  created: number;
+  updated: number;
+  unchanged: number;
+  skipped: number;
+  addedToList: number;
+  list: { id: string; name: string } | null;
+  errors: ImportRowError[];
+  suppressedInFile: number;
+}
+
+// ============================================================================
+// TEMPLATES
+// ============================================================================
+
+export const TemplateInputSchema = z.object({
+  name: z.string().trim().min(1, "Name is required").max(100),
+  subject: z.string().trim().min(1, "Subject is required").max(250),
+  bodyHtml: z.string().min(1, "Body is required").max(200_000),
+  bodyText: optionalText(100_000),
+  description: optionalText(500),
+});
+export type TemplateInput = z.input<typeof TemplateInputSchema>;
+
+export interface TemplateDto {
+  id: string;
+  name: string;
+  subject: string;
+  bodyHtml: string;
+  bodyText: string | null;
+  description: string | null;
+  version: number;
+  campaignCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ============================================================================
+// CAMPAIGNS & SENDS
+// ============================================================================
+
+export const CampaignStatusSchema = z.enum([
+  "DRAFT",
+  "PENDING_APPROVAL",
+  "APPROVED",
+  "SENDING",
+  "PAUSED",
+  "COMPLETED",
+  "CANCELLED",
+]);
+export type CampaignStatus = z.infer<typeof CampaignStatusSchema>;
+
+export const DeliveryStatusSchema = z.enum(["PENDING", "CLAIMED", "SENT", "FAILED", "UNKNOWN", "SKIPPED", "CANCELLED"]);
+export type DeliveryStatus = z.infer<typeof DeliveryStatusSchema>;
+
+export const CampaignInputSchema = z.object({
+  name: z.string().trim().min(1, "Name is required").max(100),
+  description: optionalText(500),
+  templateId: IdSchema,
+  contactListId: IdSchema,
+  fromName: z.string().trim().min(1, "Sender name is required").max(100),
+  replyTo: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .email("Enter a valid reply-to address")
+    .optional()
+    .nullable()
+    .or(z.literal("").transform(() => null)),
+  sendRatePerMinute: z.coerce.number().int().min(1).max(120).default(20),
+});
+export type CampaignInput = z.input<typeof CampaignInputSchema>;
+
+export const TestSendInputSchema = z.object({
+  to: z.array(EmailSchema).min(1, "Add at least one address").max(5, "Up to 5 test addresses"),
+  contactId: IdSchema.optional(),
+});
+export type TestSendInput = z.input<typeof TestSendInputSchema>;
+
+export interface UserRef {
+  id: string;
+  name: string;
+}
+
+export interface CampaignCounts {
+  total: number;
+  pending: number;
+  sent: number;
+  failed: number;
+  unknown: number;
+  skipped: number;
+  cancelled: number;
+  bounced: number;
+  replied: number;
+  unsubscribed: number;
+}
+
+export interface CampaignSummaryDto {
+  id: string;
+  name: string;
+  status: CampaignStatus;
+  template: { id: string; name: string };
+  list: { id: string; name: string; memberCount: number };
+  counts: CampaignCounts;
+  createdBy: UserRef | null;
+  approvedBy: UserRef | null;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  pausedReason: string | null;
+}
+
+export interface CampaignDetailDto extends CampaignSummaryDto {
+  description: string | null;
+  fromName: string;
+  fromEmail: string | null;
+  replyTo: string | null;
+  sendRatePerMinute: number;
+  approvalRequestedBy: UserRef | null;
+  approvalRequestedAt: string | null;
+  cancelledAt: string | null;
+  /** Frozen content after approval; null while editable */
+  snapshot: { subject: string; bodyHtml: string; bodyText: string | null } | null;
+  liveSendingBlocker: string | null;
+}
+
+export interface RecipientIssue {
+  email: string;
+  contactId: string | null;
+  reason: string;
+}
+
+/** Pre-approval check of every recipient against the current template */
+export interface CampaignReviewDto {
+  total: number;
+  ready: number;
+  templateErrors: string[];
+  missingFields: { email: string; contactId: string; fields: string[] }[];
+  suppressed: RecipientIssue[];
+  issueCount: number;
+  sample: { contactId: string; email: string; subject: string; html: string; text: string; missingFields: string[] }[];
+  /** Fingerprint of the template content reviewed; approval must echo it back */
+  contentHash: string;
+}
+
+export const ApproveInputSchema = z.object({
+  contentHash: z.string().min(1),
+  ready: z.number().int().nonnegative(),
+});
+
+export interface SendDto {
+  id: string;
+  email: string;
+  contactId: string | null;
+  status: DeliveryStatus;
+  skipReason: string | null;
+  attempts: number;
+  lastError: string | null;
+  sentAt: string | null;
+  bouncedAt: string | null;
+  repliedAt: string | null;
+  unsubscribedAt: string | null;
+  updatedAt: string;
+}
+
+// ============================================================================
+// SUPPRESSIONS
+// ============================================================================
+
+export const SuppressionReasonSchema = z.enum([
+  "HARD_BOUNCE",
+  "SOFT_BOUNCE",
+  "SPAM_COMPLAINT",
+  "UNSUBSCRIBE",
+  "MANUAL",
+  "INVALID_EMAIL",
+  "DOMAIN_SUPPRESSION",
+]);
+export type SuppressionReason = z.infer<typeof SuppressionReasonSchema>;
+
+export const SUPPRESSION_REASON_LABELS: Record<SuppressionReason, string> = {
+  HARD_BOUNCE: "Bounced",
+  SOFT_BOUNCE: "Soft bounce",
+  SPAM_COMPLAINT: "Spam complaint",
+  UNSUBSCRIBE: "Unsubscribed",
+  MANUAL: "Added manually",
+  INVALID_EMAIL: "Invalid address",
+  DOMAIN_SUPPRESSION: "Domain blocked",
+};
+
+export const SuppressionInputSchema = z.object({
+  email: EmailSchema,
+  reason: z.enum(["MANUAL", "UNSUBSCRIBE", "SPAM_COMPLAINT", "INVALID_EMAIL"]).default("MANUAL"),
+  note: optionalText(500),
+});
+export type SuppressionInput = z.input<typeof SuppressionInputSchema>;
+
+export interface SuppressionDto {
+  id: string;
+  email: string;
+  reason: SuppressionReason;
+  source: string;
+  note: string | null;
+  createdAt: string;
+}
+
+// ============================================================================
+// ENRICHMENT
+// ============================================================================
+
+export const EnrichmentStatusSchema = z.enum(["GUESSED", "VERIFIED", "MANUAL", "REJECTED"]);
+export type EnrichmentStatus = z.infer<typeof EnrichmentStatusSchema>;
+
+export const EnrichmentInputSchema = z.object({
+  field: z.string().trim().regex(CUSTOM_FIELD_NAME, "Field names use letters, numbers and _"),
+  value: z.string().trim().min(1, "Value is required").max(2000),
+  source: z.string().trim().min(1, "Say where this came from").max(100),
+  url: z.string().trim().url("Enter a full link, starting with https://").optional().or(z.literal("").transform(() => undefined)),
+  note: optionalText(1000),
+  confidence: z.coerce.number().min(0).max(1).default(0.5),
+  /** I checked this myself against the source */
+  verified: z.boolean().default(false),
+});
+export type EnrichmentInput = z.input<typeof EnrichmentInputSchema>;
+
+export interface EnrichmentDto {
+  id: string;
+  contactId: string;
+  field: string;
+  value: string;
+  source: string;
+  url: string | null;
+  note: string | null;
+  confidence: number;
+  status: EnrichmentStatus;
+  verifiedBy: string | null;
+  verifiedAt: string | null;
+  appliedAt: string | null;
+  /** What the contact currently holds for this field */
+  currentValue: string | null;
+  createdAt: string;
+}
+
+// ============================================================================
+// OVERVIEW, MAILBOX, ACTIVITY
+// ============================================================================
+
+export interface MailboxStatusDto {
+  smtp: { configured: boolean; host: string | null; port: number; secure: boolean; user: string | null; fromEmail: string | null; fromName: string };
+  imap: { configured: boolean; enabled: boolean; host: string | null; port: number; lastCheckedAt: string | null; lastError: string | null };
+  liveSendingEnabled: boolean;
+  liveSendingBlocker: string | null;
+  dailyLimit: number;
+  sentLast24h: number;
+  publicUrl: string;
+}
+
+export interface OverviewDto {
+  counts: { contacts: number; lists: number; templates: number; suppressed: number };
+  mailbox: Pick<MailboxStatusDto, "liveSendingEnabled" | "liveSendingBlocker" | "dailyLimit" | "sentLast24h"> & { smtpConfigured: boolean };
+  awaitingApproval: CampaignSummaryDto[];
+  inProgress: CampaignSummaryDto[];
+  needsAttention: { campaign: { id: string; name: string }; failed: number; unknown: number }[];
+  recent: CampaignSummaryDto[];
+  last30Days: { sent: number; bounced: number; replied: number; unsubscribed: number };
+}
+
+export interface ActivityDto {
+  id: string;
+  action: string;
+  summary: string;
+  entityType: string | null;
+  entityId: string | null;
+  user: UserRef | null;
+  createdAt: string;
+}
