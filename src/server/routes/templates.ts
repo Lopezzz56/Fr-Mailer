@@ -84,13 +84,36 @@ router.get(
   })
 );
 
+async function findUniqueTemplateName(baseName: string, excludeId?: string): Promise<string> {
+  const trimmed = baseName.trim() || "Untitled template";
+  let candidate = trimmed;
+  let counter = 2;
+
+  const match = trimmed.match(/^(.*?)\s*\((\d+)\)$/);
+  let prefix = trimmed;
+  if (match) {
+    prefix = match[1]!.trim();
+    counter = parseInt(match[2]!, 10) + 1;
+  }
+
+  while (true) {
+    const existing = await prisma.template.findUnique({ where: { name: candidate } });
+    if (!existing || (excludeId && existing.id === excludeId)) {
+      return candidate;
+    }
+    candidate = `${prefix} (${counter})`;
+    counter++;
+  }
+}
+
 router.post(
   "/",
   requirePermission("templates.manage"),
   asyncHandler(async (req, res) => {
     const input = TemplateInputSchema.parse(req.body);
     assertValid(input);
-    const template = await prisma.template.create({ data: input, include: withCount });
+    const name = await findUniqueTemplateName(input.name);
+    const template = await prisma.template.create({ data: { ...input, name }, include: withCount });
     await audit(req, { action: "template.create", entityType: "Template", entityId: template.id, metadata: { name: template.name } });
     ok(res, toTemplateDto(template), 201);
   })
@@ -111,9 +134,17 @@ router.patch(
     };
     assertValid(next);
     const contentChanged = next.subject !== existing.subject || next.bodyHtml !== existing.bodyHtml || next.bodyText !== existing.bodyText;
+    let name = input.name;
+    if (input.name && input.name.trim() !== existing.name) {
+      name = await findUniqueTemplateName(input.name, id);
+    }
     const template = await prisma.template.update({
       where: { id },
-      data: { ...input, ...(contentChanged ? { version: { increment: 1 } } : {}) },
+      data: {
+        ...input,
+        ...(name ? { name } : {}),
+        ...(contentChanged ? { version: { increment: 1 } } : {}),
+      },
       include: withCount,
     });
     await audit(req, { action: "template.update", entityType: "Template", entityId: id, metadata: { name: template.name, version: template.version } });
@@ -144,9 +175,14 @@ router.delete(
   requirePermission("templates.manage"),
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
-    const used = await prisma.campaign.count({ where: { templateId: id } });
-    if (used) {
-      throw AppError.conflict("TEMPLATE_IN_USE", `This template is used by ${used} campaign${used === 1 ? "" : "s"}. Duplicate it if you need a variation.`);
+    const [usedInCampaign, usedInMulti, usedInRules] = await Promise.all([
+      prisma.campaign.count({ where: { templateId: id } }),
+      prisma.campaignTemplate.count({ where: { templateId: id } }),
+      prisma.campaignRule.count({ where: { templateId: id } }),
+    ]);
+    const totalUses = usedInCampaign + usedInMulti + usedInRules;
+    if (totalUses > 0) {
+      throw AppError.conflict("TEMPLATE_IN_USE", `This template is used by ${usedInCampaign || usedInMulti} campaign(s) and ${usedInRules} targeting rule(s). Remove it from those campaigns first, or duplicate it.`);
     }
     const template = await prisma.template.delete({ where: { id } });
     await audit(req, { action: "template.delete", entityType: "Template", entityId: id, metadata: { name: template.name } });

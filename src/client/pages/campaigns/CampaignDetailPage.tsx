@@ -1,17 +1,16 @@
-// Campaign workspace: review → test → submit → approve → send → monitor
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
-import { FlaskConical, Pause, Pencil, Play, RotateCcw, Send, ShieldCheck, Undo2 } from "lucide-react";
+import { FlaskConical, Inbox, Pause, Pencil, Play, RefreshCw, RotateCcw, Send, ShieldCheck, Undo2 } from "lucide-react";
 import { api, errorMessage } from "../../lib/api";
-import { useCampaign, useInvalidate, useReview, type CampaignDetail } from "../../lib/queries";
+import { useCampaign, useInvalidate, useMailbox, useReview, type CampaignDetail } from "../../lib/queries";
 import { useTitle } from "../../lib/hooks";
 import { useAuth } from "../../lib/auth";
 import { formatDateTime, num, plural, timeAgo } from "../../lib/format";
 import { PageHeader, Tabs, ActionMenu } from "../../components/ui/Navigation";
 import { DescriptionList, Panel, Stat } from "../../components/ui/Card";
 import { Button, ButtonLink } from "../../components/ui/Button";
-import { CampaignStatusBadge, CAMPAIGN_STATUS } from "../../components/ui/Badge";
+import { Badge, CampaignStatusBadge, CAMPAIGN_STATUS } from "../../components/ui/Badge";
 import { Callout, ErrorState } from "../../components/ui/Feedback";
 import { Checkbox, TextAreaField, TextField } from "../../components/ui/Field";
 import { ConfirmDialog, Dialog } from "../../components/ui/Overlay";
@@ -181,6 +180,18 @@ export function CampaignDetailPage() {
   const setTab = (t: string) => setParams({ tab: t }, { replace: true });
 
   const refresh = () => invalidate("campaigns", "overview");
+  const mailbox = useMailbox();
+  const [showUnmatched, setShowUnmatched] = useState(false);
+  const syncMailbox = useMutation({
+    mutationFn: () => api.post("/api/mailbox/check-inbox"),
+    onSuccess: async () => {
+      await refresh();
+      await mailbox.refetch();
+      toast.success("Mailbox synchronized", "Checked for incoming replies and bounces.");
+    },
+    onError: (err) => toast.error("Mailbox check failed", errorMessage(err)),
+  });
+
   const act = useMutation({
     mutationFn: (path: string) => api.post(`/api/campaigns/${id}/${path}`),
     onSuccess: async (_r, path) => {
@@ -306,6 +317,53 @@ export function CampaignDetailPage() {
         <StatusBanner c={c} />
 
         {!preApproval && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-surface-sunken/40 px-4 py-2.5 text-xs text-ink-muted">
+            <div className="flex items-center gap-2 flex-wrap">
+              <Inbox className="h-4 w-4 text-ink-subtle" />
+              <span>
+                {mailbox.data?.data.imap.configured
+                  ? mailbox.data.data.imap.lastCheckedAt
+                    ? `Mailbox last synced ${timeAgo(mailbox.data.data.imap.lastCheckedAt)}`
+                    : "Mailbox monitoring active"
+                  : "Mailbox monitoring (IMAP) not configured"}
+              </span>
+              {mailbox.data?.data.imap.lastError && (
+                <Badge tone="warning">Check warning: {mailbox.data.data.imap.lastError}</Badge>
+              )}
+              {Boolean(mailbox.data?.data.imap.unmatchedReplies?.length) && (
+                <button
+                  type="button"
+                  onClick={() => setShowUnmatched(true)}
+                  className="text-brand hover:underline font-medium ml-2"
+                >
+                  {mailbox.data!.data.imap.unmatchedReplies!.length} unmatched repl{mailbox.data!.data.imap.unmatchedReplies!.length === 1 ? "y" : "ies"}
+                </button>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {can("settings.manage") && mailbox.data?.data.imap.configured && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon={<RefreshCw className={`h-3.5 w-3.5 ${syncMailbox.isPending ? "animate-spin" : ""}`} />}
+                  loading={syncMailbox.isPending}
+                  onClick={() => syncMailbox.mutate()}
+                >
+                  Sync Mailbox
+                </Button>
+              )}
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={refresh}
+              >
+                Refresh Stats
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {!preApproval && (
           <Panel>
             <div className="grid gap-6 lg:grid-cols-[1fr_auto]">
               <div>
@@ -427,6 +485,32 @@ export function CampaignDetailPage() {
         description={remove.isError ? errorMessage(remove.error) : "The draft and its settings are removed. Templates and contacts stay."}
         confirmLabel="Delete"
       />
+
+      {showUnmatched && (
+        <Dialog
+          open
+          onClose={() => setShowUnmatched(false)}
+          title="Unmatched Inbox Replies"
+          description="These replies were retrieved from SpaceMail but could not be attributed to a specific recipient or campaign by Message-ID or email address."
+          footer={<Button variant="primary" onClick={() => setShowUnmatched(false)}>Close</Button>}
+        >
+          <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
+            {mailbox.data?.data.imap.unmatchedReplies?.map((r, i) => (
+              <div key={i} className="rounded-lg border border-line p-3 text-xs space-y-1 bg-surface-sunken/30">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-ink truncate">{r.from}</span>
+                  <Badge tone={r.detectedSentiment === "POSITIVE" ? "success" : r.detectedSentiment === "NEGATIVE" ? "danger" : "neutral"}>
+                    {r.detectedSentiment}
+                  </Badge>
+                </div>
+                <p className="font-medium text-ink-muted truncate">{r.subject}</p>
+                <p className="text-ink-muted leading-relaxed italic line-clamp-2">"{r.snippet}"</p>
+                <p className="text-[10px] text-ink-subtle">{formatDateTime(r.date)}</p>
+              </div>
+            ))}
+          </div>
+        </Dialog>
+      )}
     </>
   );
 }

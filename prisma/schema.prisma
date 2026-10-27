@@ -325,16 +325,20 @@ model CampaignRule {
 }
 
 model CampaignRecipientOverride {
-  id         String   @id @default(cuid())
-  campaignId String
-  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  contactId  String
-  contact    Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  templateId String
-  template   Template @relation(fields: [templateId], references: [id], onDelete: Restrict)
-  reason     String?
-  createdAt  DateTime @default(now()) @db.Timestamptz
-  updatedAt  DateTime @updatedAt @db.Timestamptz
+  id             String   @id @default(cuid())
+  campaignId     String
+  campaign       Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contactId      String
+  contact        Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  templateId     String
+  template       Template @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  reason         String?
+  customSubject  String?
+  customBodyHtml String?
+  customBodyText String?
+  isCustom       Boolean  @default(false)
+  createdAt      DateTime @default(now()) @db.Timestamptz
+  updatedAt      DateTime @updatedAt @db.Timestamptz
 
   @@unique([campaignId, contactId])
   @@index([campaignId])

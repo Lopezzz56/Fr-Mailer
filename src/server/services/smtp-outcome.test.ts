@@ -10,6 +10,16 @@ describe("classifySmtpError", () => {
     expect(classifySmtpError({ responseCode: 554, command: "DATA", response: "554 5.7.1 message rejected as spam" })).toMatchObject({ kind: "rejected", badAddress: false });
   });
 
+  it("treats a 553 sender login mismatch as rejected but not a bad recipient address", () => {
+    expect(
+      classifySmtpError({
+        responseCode: 553,
+        command: "MAIL FROM",
+        response: "553 5.7.1 <founderoffice@focusrealm.org>: Sender address rejected: not owned by user namaste@misehotel.com",
+      })
+    ).toMatchObject({ kind: "rejected", badAddress: false });
+  });
+
   it("treats 4xx as temporary", () => {
     expect(classifySmtpError({ responseCode: 451, command: "RCPT TO", response: "451 try again later" }).kind).toBe("temporary");
   });

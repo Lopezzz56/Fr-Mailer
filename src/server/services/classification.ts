@@ -217,3 +217,125 @@ export function inferSegmentFromCompany(
   }
   return { value: "UNKNOWN", confidence: 0.2, status: "GUESSED", source: "unrecognized_property" };
 }
+
+export function detectProspectListType(
+  headers: string[],
+  sampleRows: (string[] | Record<string, unknown>)[] = []
+): import("../../shared/types.js").ProspectListType {
+  const allHeadersText = headers.join(" ").toLowerCase();
+  const sampleCellsText = sampleRows
+    .flatMap((r) => (Array.isArray(r) ? r.slice(0, 8) : Object.values(r).slice(0, 8)))
+    .filter(Boolean)
+    .map(String)
+    .join(" ")
+    .toLowerCase();
+  const combined = `${allHeadersText} ${sampleCellsText}`;
+
+  // Co-marketing partner keywords
+  const partnerKeywords = [
+    "partner",
+    "partnership",
+    "training provider",
+    "recruitment",
+    "placement",
+    "consultan",
+    "services provided",
+    "what it does",
+    "partnership opportunity",
+    "target customers",
+    "personalization angle",
+    "channel",
+  ];
+  let partnerScore = 0;
+  for (const kw of partnerKeywords) {
+    if (combined.includes(kw)) partnerScore += 1;
+    if (allHeadersText.includes(kw)) partnerScore += 2;
+  }
+
+  // Hotel keywords
+  const hotelKeywords = [
+    "hotel",
+    "resort",
+    "palace",
+    "boutique",
+    "rooms",
+    "suites",
+    "amenities",
+    "facilities",
+    "star rating",
+    "property type",
+    "general manager",
+    "operations director",
+    "hotelsegment",
+    "contactpersona",
+    "hospitality",
+  ];
+  let hotelScore = 0;
+  for (const kw of hotelKeywords) {
+    if (combined.includes(kw)) hotelScore += 1;
+    if (allHeadersText.includes(kw)) hotelScore += 2;
+  }
+
+  if (partnerScore > hotelScore && partnerScore >= 2) {
+    return "CO_MARKETING_PARTNERS";
+  }
+  if (hotelScore >= 2 || /hotel|resort|hospitality/i.test(allHeadersText)) {
+    return "HOTEL_PROSPECTS";
+  }
+  return "GENERAL_BUSINESS";
+}
+
+export function computeImportQuality(
+  headers: string[],
+  mapping: Record<string, string>,
+  listType: import("../../shared/types.js").ProspectListType = "HOTEL_PROSPECTS"
+): import("../../shared/types.js").ImportQualityBreakdown {
+  const mappedTargets = new Set(Object.values(mapping));
+  const hasEmail = mappedTargets.has("email");
+  const hasName = mappedTargets.has("fullName") || mappedTargets.has("firstName");
+  const hasCompany = mappedTargets.has("company");
+  const hasTargeting =
+    mappedTargets.has("hotelSegment") ||
+    mappedTargets.has("contactPersona") ||
+    mappedTargets.has("title") ||
+    Object.keys(mapping).some((k) => /partnership|training|segment|role/i.test(k));
+
+  const essentialMissing: string[] = [];
+  if (!hasEmail) essentialMissing.push("Contact Email");
+  if (!hasCompany) essentialMissing.push(listType === "HOTEL_PROSPECTS" ? "Hotel Name" : "Company Name");
+
+  const recommendedMissing: string[] = [];
+  if (!hasName) recommendedMissing.push("Contact Person");
+  if (!mappedTargets.has("title")) recommendedMissing.push("Job Title");
+  if (listType === "HOTEL_PROSPECTS" && !mappedTargets.has("hotelSegment")) {
+    recommendedMissing.push("Hotel Segment");
+  }
+
+  let score = 0;
+  if (hasEmail) score += 40;
+  if (hasName) score += 20;
+  if (hasCompany) score += 20;
+  if (hasTargeting) score += 20;
+
+  const personalizationTagsReady: string[] = [];
+  if (hasEmail) personalizationTagsReady.push("email");
+  if (hasCompany) personalizationTagsReady.push("company");
+  if (hasName) personalizationTagsReady.push("firstName");
+  if (mappedTargets.has("title")) personalizationTagsReady.push("title");
+  if (Object.keys(mapping).some((h) => h.toLowerCase().replace(/[^a-z]/g, "") === "city")) {
+    personalizationTagsReady.push("city");
+  }
+  if (mappedTargets.has("hotelSegment")) personalizationTagsReady.push("hotelSegment");
+  if (mappedTargets.has("contactPersona")) personalizationTagsReady.push("contactPersona");
+
+  return {
+    score,
+    hasEmail,
+    hasName,
+    hasCompany,
+    hasTargeting,
+    essentialMissing,
+    recommendedMissing,
+    personalizationTagsReady,
+  };
+}

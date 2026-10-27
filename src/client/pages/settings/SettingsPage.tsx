@@ -36,18 +36,132 @@ function MailboxTab() {
   if (mailbox.isPending) return <PageLoader />;
   if (mailbox.isError) return <ErrorState error={mailbox.error} onRetry={() => mailbox.refetch()} />;
   const m = mailbox.data.data;
+  const [inlineEditing, setInlineEditing] = useState(false);
+  const [editEmail, setEditEmail] = useState("");
+  const [editPassword, setEditPassword] = useState("");
+  const [editFromName, setEditFromName] = useState("");
+  const [editError, setEditError] = useState<string | null>(null);
+  const toast = useToast();
+
+  const updateAccount = useMutation({
+    mutationFn: () =>
+      api.post("/api/mailbox/update-account", {
+        email: editEmail,
+        password: editPassword,
+        fromName: editFromName,
+      }),
+    onSuccess: (res: any) => {
+      toast.success("Sender updated", `Active sender changed to ${res.data.fromName} <${res.data.email}>.`);
+      setInlineEditing(false);
+      setEditPassword("");
+      invalidate("mailbox", "overview");
+    },
+    onError: (err) => setEditError(errorMessage(err)),
+  });
+
+  const startEditing = () => {
+    setEditEmail(m.smtp.fromEmail ?? "");
+    setEditPassword("");
+    setEditFromName(m.smtp.fromName ?? "FocusRealm");
+    setEditError(null);
+    setInlineEditing(true);
+  };
+
+  const toggleLiveSending = useMutation({
+    mutationFn: (enabled: boolean) => api.post<{ success: boolean; allowLiveSending: boolean }>("/api/mailbox/live-sending", { enabled }),
+    onSuccess: (res) => {
+      toast.success(
+        res.data.allowLiveSending ? "Live sending turned ON" : "Live sending turned OFF",
+        res.data.allowLiveSending
+          ? "Approved campaigns can now send live emails to their recipients."
+          : "Sending is paused. Campaigns will not send live emails until turned back on."
+      );
+      invalidate("mailbox", "overview");
+    },
+    onError: (err) => toast.error("Could not change live sending", errorMessage(err)),
+  });
 
   return (
     <div className="space-y-6">
       <Panel
         title="Sending mailbox"
         description="The SpaceMail account every campaign and test is sent from."
-        actions={m.smtp.configured && <Button size="sm" icon={<Mail className="h-4 w-4" />} onClick={() => test.mutate()} loading={test.isPending}>Test connection</Button>}
+        actions={
+          <div className="flex items-center gap-2">
+            {!inlineEditing && (
+              <Button size="sm" variant="secondary" onClick={startEditing}>
+                Edit Sender Name & Email
+              </Button>
+            )}
+            {m.smtp.configured && !inlineEditing && (
+              <Button size="sm" icon={<Mail className="h-4 w-4" />} onClick={() => test.mutate()} loading={test.isPending}>
+                Test connection
+              </Button>
+            )}
+          </div>
+        }
       >
-        {m.smtp.configured ? (
+        {inlineEditing ? (
+          <div className="space-y-4 rounded-lg border border-line bg-canvas p-4">
+            <h4 className="text-sm font-semibold text-ink">Update Sender Identity & Mailbox</h4>
+            <p className="text-xs text-ink-subtle">
+              Change the sender name and email address used for all outreach. Server is mail.spacemail.com:465.
+            </p>
+            {editError && <Callout tone="danger">{editError}</Callout>}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <TextField
+                label="Sender Display Name"
+                value={editFromName}
+                onChange={(e) => setEditFromName(e.target.value)}
+                placeholder="e.g. FocusRealm or Founder’s Office"
+                hint="Name recipients see in their inbox"
+                required
+              />
+              <TextField
+                label="Sender Email Address"
+                value={editEmail}
+                onChange={(e) => setEditEmail(e.target.value)}
+                placeholder="e.g. namaste@misehotel.com or sachin@misehotel.com"
+                hint="Your SpaceMail email address"
+                required
+              />
+            </div>
+            <TextField
+              label="SpaceMail Password"
+              type="password"
+              value={editPassword}
+              onChange={(e) => setEditPassword(e.target.value)}
+              placeholder="Leave blank to keep existing password"
+              hint="Only required if changing the mailbox account or updating credentials"
+            />
+            <div className="flex items-center gap-2 pt-2">
+              <Button
+                variant="primary"
+                loading={updateAccount.isPending}
+                onClick={() => updateAccount.mutate()}
+                disabled={!editEmail.trim() || !editFromName.trim()}
+              >
+                Save Sender Changes
+              </Button>
+              <Button variant="ghost" onClick={() => setInlineEditing(false)} disabled={updateAccount.isPending}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : m.smtp.configured ? (
           <DescriptionList
             items={[
-              { label: "Sends as", value: `${m.smtp.fromName} <${m.smtp.fromEmail}>` },
+              {
+                label: "Sends as",
+                value: (
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-ink">{m.smtp.fromName} &lt;{m.smtp.fromEmail}&gt;</span>
+                    <Button size="sm" variant="ghost" className="text-primary hover:underline text-xs p-1 h-auto" onClick={startEditing}>
+                      Edit
+                    </Button>
+                  </div>
+                ),
+              },
               { label: "Signs in as", value: m.smtp.user ?? "—" },
               { label: "Server", value: `${m.smtp.host}:${m.smtp.port} · ${m.smtp.secure ? "TLS" : "STARTTLS"}` },
               { label: "Links in emails point to", value: m.publicUrl },
@@ -56,29 +170,56 @@ function MailboxTab() {
         ) : (
           <Callout tone="warning" title="Not configured">Set SMTP_HOST, SMTP_USER, SMTP_PASS and SMTP_FROM_EMAIL in the server's .env file, then restart.</Callout>
         )}
-        {test.isSuccess && <p className="mt-4 flex items-center gap-2 text-[13px] text-success"><CheckCircle2 className="h-4 w-4" /> Signed in successfully. No email was sent.</p>}
-        {test.isError && <Callout tone="danger" className="mt-4">{errorMessage(test.error)}</Callout>}
-        <p className="mt-5 border-t border-line pt-4 text-xs text-ink-subtle">Mailbox credentials live in the server's environment file and are never shown or edited here.</p>
+        {test.isSuccess && !inlineEditing && <p className="mt-4 flex items-center gap-2 text-[13px] text-success"><CheckCircle2 className="h-4 w-4" /> Signed in successfully. No email was sent.</p>}
+        {test.isError && !inlineEditing && <Callout tone="danger" className="mt-4">{errorMessage(test.error)}</Callout>}
+        {!inlineEditing && (
+          <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4 text-xs text-ink-subtle">
+            <p>
+              You can change the sender display name and email address directly at any time.
+            </p>
+            <Button size="sm" variant="secondary" onClick={startEditing}>
+              Edit Sender Details
+            </Button>
+          </div>
+        )}
       </Panel>
 
-      <Panel title="Sending">
+      <Panel
+        title="Live Sending & Limits"
+        description="Controls whether approved campaigns can send live emails or remain in safe draft mode."
+        actions={
+          can("campaigns.approve") && (
+            <Button
+              size="sm"
+              variant={m.liveSendingEnabled ? "secondary" : "primary"}
+              loading={toggleLiveSending.isPending}
+              onClick={() => toggleLiveSending.mutate(!m.liveSendingEnabled)}
+            >
+              {m.liveSendingEnabled ? "Turn Off Live Sending" : "Turn On Live Sending"}
+            </Button>
+          )
+        }
+      >
         <div className="space-y-5">
           <div className="flex flex-wrap items-center gap-3">
-            {m.liveSendingEnabled ? <Badge tone="success" dot>Live sending on</Badge> : <Badge tone="warning" dot>Live sending off</Badge>}
+            {m.liveSendingEnabled ? (
+              <Badge tone="success" dot>Live sending is ON</Badge>
+            ) : (
+              <Badge tone="warning" dot>Live sending is OFF</Badge>
+            )}
             <span className="text-[13px] text-ink-muted">
-              {m.liveSendingEnabled ? "Approved campaigns can send to their recipients." : m.liveSendingBlocker}
+              {m.liveSendingEnabled
+                ? "Approved campaigns can immediately dispatch live emails to recipients."
+                : (m.liveSendingBlocker || "Live sending is locked. Test emails can still be sent.")}
             </span>
           </div>
-          {!m.liveSendingEnabled && m.smtp.configured && (
-            <p className="text-xs text-ink-subtle">To turn it on, set <code className="rounded bg-surface-sunken px-1">ALLOW_LIVE_SENDING=true</code> in .env and restart the server. Test emails work either way.</p>
-          )}
           <div>
             <div className="mb-1.5 flex justify-between text-[13px]">
               <span className="text-ink-muted">Sent in the last 24 hours</span>
               <span className="tabular text-ink">{num(m.sentLast24h)} of {num(m.dailyLimit)}</span>
             </div>
             <ProgressBar segments={[{ value: m.sentLast24h, className: "bg-brand", label: "Sent" }, { value: Math.max(0, m.dailyLimit - m.sentLast24h), className: "bg-transparent", label: "Remaining" }]} />
-            <p className="mt-1.5 text-xs text-ink-subtle">When the limit is reached, sending waits and continues automatically. Change it with DAILY_SEND_LIMIT.</p>
+            <p className="mt-1.5 text-xs text-ink-subtle">When the daily limit is reached, sending waits and continues automatically.</p>
           </div>
         </div>
       </Panel>

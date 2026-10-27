@@ -58,6 +58,29 @@ describe("renderEmail", () => {
     const r = renderEmail({ subject: "s", bodyHtml: "<p>Hello {{firstName}}</p><p>Visit <a href=\"https://x.io\">our site</a></p>" }, { firstName: "Ana" });
     expect(r.text).toBe("Hello Ana\nVisit our site (https://x.io)");
   });
+
+  it("supports chained fallbacks like {{firstName|company|Hospitality Team}}", () => {
+    const template = {
+      subject: "Hello {{firstName|company|Hospitality Team}}",
+      bodyHtml: "<p>Dear {{firstName|company|Hospitality Team}}, welcome.</p>",
+    };
+
+    // 1. When firstName is present, uses firstName
+    const r1 = renderEmail(template, { firstName: "Rajesh", company: "HTI India" });
+    expect(r1.subject).toBe("Hello Rajesh");
+    expect(r1.html).toBe("<p>Dear Rajesh, welcome.</p>");
+
+    // 2. When firstName is empty, uses company
+    const r2 = renderEmail(template, { firstName: "", company: "HTI India" });
+    expect(r2.subject).toBe("Hello HTI India");
+    expect(r2.html).toBe("<p>Dear HTI India, welcome.</p>");
+
+    // 3. When both are empty, uses the literal fallback
+    const r3 = renderEmail(template, { firstName: "", company: "" });
+    expect(r3.subject).toBe("Hello Hospitality Team");
+    expect(r3.html).toBe("<p>Dear Hospitality Team, welcome.</p>");
+    expect(r3.missingFields).toEqual([]);
+  });
 });
 
 describe("contactMergeData", () => {

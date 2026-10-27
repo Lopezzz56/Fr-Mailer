@@ -11,6 +11,7 @@ const worker = new SendWorker();
 const inbox = new InboxMonitor();
 
 async function main() {
+  await prisma.$connect();
   const recovered = await recoverInterruptedSends();
   if (recovered) console.warn(`[worker] ${recovered} message(s) were interrupted mid-send last time; marked UNKNOWN for review.`);
 

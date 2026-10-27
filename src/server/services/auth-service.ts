@@ -49,6 +49,19 @@ export function getDummyHash(): Promise<string> {
 
 const SESSION_TTL_MS = SESSION_TTL_DAYS * 24 * 60 * 60 * 1000;
 const LAST_SEEN_THROTTLE_MS = 5 * 60 * 1000;
+const SESSION_CACHE_TTL_MS = 60 * 1000; // 60s memory cache for session verification to eliminate remote DB contention
+
+interface CachedSession {
+  user: SessionUser;
+  expiresAt: number;
+  cachedAt: number;
+}
+
+const sessionCache = new Map<string, CachedSession>();
+
+export function clearSessionCache(): void {
+  sessionCache.clear();
+}
 
 function hashToken(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
@@ -68,30 +81,55 @@ export async function createSession(
 
 /** Returns the session's user if the token is valid, unexpired and the user is active. */
 export async function getSessionUser(token: string): Promise<SessionUser | null> {
+  const tokenH = hashToken(token);
+  const now = Date.now();
+  const cached = sessionCache.get(tokenH);
+  if (cached) {
+    if (cached.expiresAt > now && now - cached.cachedAt < SESSION_CACHE_TTL_MS) {
+      return cached.user;
+    }
+    sessionCache.delete(tokenH);
+  }
+
   const session = await prisma.session.findUnique({
-    where: { tokenHash: hashToken(token) },
+    where: { tokenHash: tokenH },
     include: { user: true },
   });
   if (!session) return null;
 
   if (session.expiresAt < new Date()) {
-    await prisma.session.delete({ where: { id: session.id } }).catch(() => undefined);
+    sessionCache.delete(tokenH);
+    prisma.session.delete({ where: { id: session.id } }).catch(() => undefined);
     return null;
   }
-  if (session.user.status !== "ACTIVE") return null;
-
-  if (Date.now() - session.lastSeenAt.getTime() > LAST_SEEN_THROTTLE_MS) {
-    await prisma.session.update({ where: { id: session.id }, data: { lastSeenAt: new Date() } });
+  if (session.user.status !== "ACTIVE") {
+    sessionCache.delete(tokenH);
+    return null;
   }
 
-  return toSessionUser(session.user);
+  // Update lastSeenAt asynchronously in the background so it never adds latency to user requests
+  if (now - session.lastSeenAt.getTime() > LAST_SEEN_THROTTLE_MS) {
+    prisma.session.update({ where: { id: session.id }, data: { lastSeenAt: new Date() } }).catch(() => undefined);
+  }
+
+  const sessionUser = toSessionUser(session.user);
+  sessionCache.set(tokenH, {
+    user: sessionUser,
+    expiresAt: session.expiresAt.getTime(),
+    cachedAt: now,
+  });
+
+  return sessionUser;
 }
 
 export async function revokeSession(token: string): Promise<void> {
-  await prisma.session.deleteMany({ where: { tokenHash: hashToken(token) } });
+  const tokenH = hashToken(token);
+  sessionCache.delete(tokenH);
+  await prisma.session.deleteMany({ where: { tokenHash: tokenH } });
 }
 
 export async function revokeAllSessions(userId: string): Promise<void> {
+  sessionCache.clear();
   await prisma.session.deleteMany({ where: { userId } });
 }
 

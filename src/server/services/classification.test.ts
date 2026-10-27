@@ -4,6 +4,8 @@ import {
   inferSegmentFromCompany,
   normalizeContactPersona,
   normalizeHotelSegment,
+  detectProspectListType,
+  computeImportQuality,
 } from "./classification.js";
 
 describe("classification service", () => {
@@ -75,4 +77,45 @@ describe("classification service", () => {
       expect(unk.value).toBe("UNKNOWN");
     });
   });
+
+  describe("detectProspectListType", () => {
+    it("identifies hotel prospect lists from hotel-specific headers and values", () => {
+      const headers = ["Hotel Name", "Contact Email", "City", "Rooms", "Star Rating"];
+      const rows = [{ "Hotel Name": "Grand Palace Hotel", "Contact Email": "gm@grandpalace.com" }];
+      expect(detectProspectListType(headers, rows)).toBe("HOTEL_PROSPECTS");
+    });
+
+    it("identifies co-marketing partner lists from partnership headers", () => {
+      const headers = ["Company Name", "Email", "Partner Category", "Services Provided", "Partnership Angle"];
+      const rows = [{ "Company Name": "Hospitality Academy", "Email": "partner@academy.com" }];
+      expect(detectProspectListType(headers, rows)).toBe("CO_MARKETING_PARTNERS");
+    });
+
+    it("defaults to general business prospects for generic lists", () => {
+      const headers = ["Company", "Email", "Phone", "Notes"];
+      const rows = [{ Company: "Acme Corp", Email: "contact@acme.com" }];
+      expect(detectProspectListType(headers, rows)).toBe("GENERAL_BUSINESS");
+    });
+  });
+
+  describe("computeImportQuality", () => {
+    it("calculates readiness and personalization quality breakdown", () => {
+      const headers = ["Hotel Name", "Email", "Contact Person", "Job Title", "City"];
+      const mapping = {
+        "Hotel Name": "company",
+        Email: "email",
+        "Contact Person": "name",
+        "Job Title": "title",
+        City: "city",
+      };
+      const quality = computeImportQuality(headers, mapping, "HOTEL_PROSPECTS");
+      expect(quality.score).toBeGreaterThan(60);
+      expect(quality.hasEmail).toBe(true);
+      expect(quality.hasCompany).toBe(true);
+      expect(quality.essentialMissing).toHaveLength(0);
+      expect(quality.personalizationTagsReady).toContain("email");
+      expect(quality.personalizationTagsReady).toContain("company");
+    });
+  });
 });
+

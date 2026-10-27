@@ -26,7 +26,18 @@ describe("buildStarterTemplate", () => {
     expect(bare.body).not.toMatch(/\{\{/);
     expect(bare.body).toMatch(/^Hi there,/);
     const rich = buildStarterTemplate({ goal: "introduction", tone: "warm", fields });
-    expect(rich.body).toContain("{{company|your team}} in {{city|your area}}");
+    expect(rich.body).toContain("{{company|your team}} is building in {{city|your area}}");
+  });
+
+  it("produces distinct copy across warm, professional, concise, and upbeat tones", () => {
+    for (const goal of Object.keys(STARTER_GOALS) as StarterGoal[]) {
+      const bodies = (Object.keys(WRITER_TONES) as WriterTone[]).map(
+        (tone) => buildStarterTemplate({ goal, tone, fields }).body
+      );
+      // All 4 tones must be distinct from each other
+      const uniqueBodies = new Set(bodies);
+      expect(uniqueBodies.size).toBe(4);
+    }
   });
 
   it("uses a custom organisation column when there's no company", () => {

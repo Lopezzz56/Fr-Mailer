@@ -10,6 +10,7 @@ export interface OutgoingMessage {
   /** Full RFC 5322 Message-ID including angle brackets */
   messageId?: string;
   fromName: string;
+  fromEmail?: string | null;
   replyTo?: string | null;
   headers?: Record<string, string>;
 }
@@ -34,10 +35,21 @@ class SmtpTransport implements MailTransport {
   });
 
   async send(message: OutgoingMessage) {
+    // SpaceMail SMTP strictly enforces that the envelope/sender address matches the authenticated mailbox user (SMTP_USER).
+    // Always use the authenticated SMTP_USER for the transport address so SpaceMail never rejects with 553 5.7.1.
+    // Any custom sender email or campaign reply-to is preserved via the Reply-To header.
+    const authenticatedAddress = env.SMTP_USER || env.SMTP_FROM_EMAIL!;
+    const effectiveReplyTo =
+      message.replyTo ||
+      message.fromEmail ||
+      (env.SMTP_FROM_EMAIL && env.SMTP_FROM_EMAIL.toLowerCase() !== authenticatedAddress.toLowerCase()
+        ? env.SMTP_FROM_EMAIL
+        : undefined);
+
     const mailOptions = {
-      from: { name: message.fromName, address: env.SMTP_FROM_EMAIL! },
+      from: { name: message.fromName, address: authenticatedAddress },
       to: message.to,
-      replyTo: message.replyTo ?? undefined,
+      replyTo: effectiveReplyTo,
       subject: message.subject,
       html: message.html,
       text: message.text,
@@ -99,7 +111,7 @@ export function closeTransport() {
 
 /** Domain used for our Message-IDs, so replies and bounces can be matched back */
 export function messageIdDomain(): string {
-  return (env.SMTP_FROM_EMAIL?.split("@")[1] ?? "focusrealm.local").toLowerCase();
+  return ((env.SMTP_USER || env.SMTP_FROM_EMAIL)?.split("@")[1] ?? "focusrealm.local").toLowerCase();
 }
 
 /** Appends a message copy to the IMAP Sent mailbox using ImapFlow */

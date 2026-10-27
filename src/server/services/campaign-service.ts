@@ -13,7 +13,7 @@ import prisma from "../db.js";
 import { AppError } from "../middleware/error-handler.js";
 import { audit } from "../lib/audit.js";
 import { liveSendingBlocker, smtpConfigured } from "../config.js";
-import { contactMergeData, renderEmail, validateTemplate, type TemplateParts } from "../../shared/merge.js";
+import { contactMergeData, htmlToText, renderEmail, validateTemplate, type TemplateParts } from "../../shared/merge.js";
 import { FOUNDER_SELF_APPROVAL_ALLOWED } from "../../shared/auth.js";
 import { SUPPRESSION_REASON_LABELS, type CampaignReviewDto, type CampaignStatus } from "../../shared/types.js";
 import { getTransport, messageIdDomain } from "./mailer.js";
@@ -70,6 +70,7 @@ interface ReadyRecipient {
   templateName: string;
   assignmentSource: "OVERRIDE" | "RULE" | "FALLBACK";
   assignmentReason: string;
+  isCustom?: boolean;
 }
 
 interface SkippedRecipient {
@@ -132,6 +133,9 @@ export async function buildReview(campaignId: string, db: Tx | typeof prisma = p
 
   const overridesMap = new Map(
     campaign.recipientOverrides.map((o) => [o.contactId, { contactId: o.contactId, templateId: o.templateId, reason: o.reason }])
+  );
+  const customOverridesMap = new Map(
+    campaign.recipientOverrides.map((o) => [o.contactId, o])
   );
 
   const members = await db.listMembership.findMany({
@@ -201,36 +205,64 @@ export async function buildReview(campaignId: string, db: Tx | typeof prisma = p
       selectionContext
     );
 
-    const parts: TemplateParts = {
-      subject: selection.template.subject,
-      bodyHtml: selection.template.bodyHtml,
-      bodyText: selection.template.bodyText,
-    };
-    const rendered = renderEmail(parts, contactMergeData(contact));
+    const customOverride = customOverridesMap.get(contact.id);
+    let rendered: ReturnType<typeof renderEmail>;
+    let targetTemplateId = selection.templateId;
+    let targetTemplateVersion = selection.template.version;
+    let targetTemplateName = selection.templateName;
+    let assignmentSource = selection.assignmentSource;
+    let assignmentReason = selection.explanation;
+    let isCustom = false;
+
+    if (customOverride && customOverride.isCustom && customOverride.customSubject && customOverride.customBodyHtml) {
+      rendered = {
+        subject: customOverride.customSubject,
+        html: customOverride.customBodyHtml,
+        text: customOverride.customBodyText || htmlToText(customOverride.customBodyHtml),
+        missingFields: [],
+      };
+      assignmentSource = "OVERRIDE";
+      assignmentReason = customOverride.reason || "Customized by user";
+      isCustom = true;
+      if (customOverride.template) {
+        targetTemplateId = customOverride.template.id;
+        targetTemplateVersion = customOverride.template.version;
+        targetTemplateName = customOverride.template.name;
+      }
+    } else {
+      const parts: TemplateParts = {
+        subject: selection.template.subject,
+        bodyHtml: selection.template.bodyHtml,
+        bodyText: selection.template.bodyText,
+      };
+      rendered = renderEmail(parts, contactMergeData(contact));
+    }
+
     if (rendered.missingFields.length) {
       work.review.missingFields.push({ email: contact.email, contactId: contact.id, fields: rendered.missingFields });
       work.skipped.push({
         contactId: contact.id,
         email: contact.email,
         reason: `Missing: ${rendered.missingFields.join(", ")}`,
-        templateId: selection.templateId,
-        templateVersion: selection.template.version,
-        assignmentReason: selection.explanation,
+        templateId: targetTemplateId,
+        templateVersion: targetTemplateVersion,
+        assignmentReason,
       });
       continue;
     }
 
-    countsByTemplate.set(selection.templateId, (countsByTemplate.get(selection.templateId) ?? 0) + 1);
+    countsByTemplate.set(targetTemplateId, (countsByTemplate.get(targetTemplateId) ?? 0) + 1);
 
     work.ready.push({
       contactId: contact.id,
       email: contact.email,
       rendered,
-      templateId: selection.templateId,
-      templateVersion: selection.template.version,
-      templateName: selection.templateName,
-      assignmentSource: selection.assignmentSource,
-      assignmentReason: selection.explanation,
+      templateId: targetTemplateId,
+      templateVersion: targetTemplateVersion,
+      templateName: targetTemplateName,
+      assignmentSource,
+      assignmentReason,
+      isCustom,
     });
   }
 
@@ -254,6 +286,7 @@ export async function buildReview(campaignId: string, db: Tx | typeof prisma = p
     templateName: r.templateName,
     assignmentSource: r.assignmentSource,
     assignmentReason: r.assignmentReason,
+    isCustom: r.isCustom,
   }));
 
   // Show at least one problem recipient's render when nobody is ready
@@ -500,6 +533,7 @@ export function getPermittedTestRecipients(): string[] {
 
 export function isPermittedTestRecipient(email: string): boolean {
   const allowed = getPermittedTestRecipients();
+  if (allowed.includes("*")) return true;
   return allowed.includes(email.toLowerCase().trim());
 }
 

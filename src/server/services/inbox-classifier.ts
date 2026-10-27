@@ -76,3 +76,120 @@ export function classifyIncoming(m: IncomingMessage, ourDomain: string): Classif
     .slice(0, 280);
   return { type: "reply", messageIds: referenced, snippet };
 }
+
+export type ReplySentiment = "POSITIVE" | "NEGATIVE" | "OUT_OF_OFFICE" | "NEUTRAL";
+
+export interface ReplyClassificationResult {
+  sentiment: ReplySentiment;
+  confidence: number;
+  matchedKeywords: string[];
+}
+
+const OUT_OF_OFFICE_PATTERNS = [
+  /\bout of (the )?office\b/i,
+  /\baway from (the )?office\b/i,
+  /\bannual leave\b/i,
+  /\bon (vacation|holiday|leave)\b/i,
+  /\bmaternity leave\b/i,
+  /\bpaternity leave\b/i,
+  /\bcurrently away\b/i,
+  /\breturning on\b/i,
+  /\bback in the office\b/i,
+  /\blimited access to (my )?email\b/i,
+  /\bautomated response\b/i,
+  /\bauto-generated\b/i,
+];
+
+const NEGATIVE_PATTERNS = [
+  /\bunsubscribe\b/i,
+  /\bremove (me|us|my email|this address)\b/i,
+  /\bplease remove\b/i,
+  /\btake (me|us) off\b/i,
+  /\bnot interested\b/i,
+  /\bno thank(s)?\b/i,
+  /\bstop (emailing|contacting|sending|reaching out)\b/i,
+  /\bdo not contact\b/i,
+  /\bwrong person\b/i,
+  /\bspam\b/i,
+  /\bcease and desist\b/i,
+  /\bnot a good fit\b/i,
+  /\bunsolicited\b/i,
+  /\blose my email\b/i,
+];
+
+const POSITIVE_PATTERNS = [
+  /\binterested\b/i,
+  /\bsounds good\b/i,
+  /\bsounds great\b/i,
+  /\blet'?s (talk|chat|connect|speak|discuss)\b/i,
+  /\bschedule a (call|demo|meeting|time)\b/i,
+  /\bbook a (call|demo|meeting|time)\b/i,
+  /\bfree (on|next week|tomorrow|this week)\b/i,
+  /\bconvenient time\b/i,
+  /\bsend (over )?(some )?(pricing|information|details|deck)\b/i,
+  /\bshare more details\b/i,
+  /\btell me more\b/i,
+  /\bwould love to learn more\b/i,
+  /\bavailable on\b/i,
+  /\bcall me at\b/i,
+  /\bhere is my (number|calendar|calendly)\b/i,
+  /\bforward(ed)? to our\b/i,
+];
+
+export function classifyReplySentiment(text: string, subject = ""): ReplyClassificationResult {
+  const combined = `${subject} ${text}`.toLowerCase();
+  const matchedKeywords: string[] = [];
+
+  // 1. Check out of office
+  for (const pat of OUT_OF_OFFICE_PATTERNS) {
+    const match = combined.match(pat);
+    if (match) {
+      matchedKeywords.push(match[0]);
+    }
+  }
+  if (matchedKeywords.length > 0) {
+    return {
+      sentiment: "OUT_OF_OFFICE",
+      confidence: 0.95,
+      matchedKeywords,
+    };
+  }
+
+  // 2. Check negative opt-outs
+  for (const pat of NEGATIVE_PATTERNS) {
+    const match = combined.match(pat);
+    if (match) {
+      matchedKeywords.push(match[0]);
+    }
+  }
+  if (matchedKeywords.length > 0) {
+    return {
+      sentiment: "NEGATIVE",
+      confidence: 0.9,
+      matchedKeywords,
+    };
+  }
+
+  // 3. Check positive interest
+  for (const pat of POSITIVE_PATTERNS) {
+    const match = combined.match(pat);
+    if (match) {
+      matchedKeywords.push(match[0]);
+    }
+  }
+  if (matchedKeywords.length > 0) {
+    return {
+      sentiment: "POSITIVE",
+      confidence: 0.85,
+      matchedKeywords,
+    };
+  }
+
+  // 4. Default Neutral
+  return {
+    sentiment: "NEUTRAL",
+    confidence: 0.6,
+    matchedKeywords: [],
+  };
+}
+

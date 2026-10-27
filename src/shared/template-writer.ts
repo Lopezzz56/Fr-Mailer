@@ -62,7 +62,9 @@ export interface TemplateDraftDto {
 export function reviewTemplateDraft(draft: { subject: string; body: string }, fields: WriterField[], totalContacts: number): string[] {
   const warnings: string[] = [];
   const known = new Map(fields.map((f) => [f.name, f]));
+  const SYNTHESIZED_FIELDS = new Set(["partnerComplement", "partnerFocus", "partnerProposal", "partnerCategory"]);
   for (const f of extractMergeFields({ subject: draft.subject, bodyHtml: draft.body })) {
+    if (SYNTHESIZED_FIELDS.has(f.name)) continue;
     const field = known.get(f.name);
     if (!field) {
       warnings.push(`{{${f.name}}} isn't a field your contacts have. Remove it or import that column.`);
@@ -105,107 +107,382 @@ export function buildStarterTemplate(args: { goal: StarterGoal; tone: WriterTone
   const company = orgField ? `{{${orgField}|your team}}` : "your team";
   const place = PLACE_FIELDS.find(has);
   const where = place ? ` in {{${place}|your area}}` : "";
-  const sign = args.signOff?.trim() || "The FocusRealm team";
   const t = args.tone;
 
+  // Custom rich fields detection
+  const whatItDoesField = ["whatItDoes", "aboutCompany", "servicesProvided", "focusArea"].find(has);
+  const oppField = ["partnershipOpportunity", "personalizationAngle", "potentialPartnership"].find(has);
+
+  const whatText = whatItDoesField
+    ? `{{${whatItDoesField}|aboutCompany|servicesProvided|hospitality services}}`
+    : "hospitality services";
+
+  const oppText = oppField
+    ? `{{${oppField}|personalizationAngle|"Guest Experience Beyond the Booking"}}`
+    : '"Guest Experience Beyond the Booking"';
+
+  const defaultComplementWarm =
+    "At FocusRealm, we're focused on helping hotels improve frontline service execution and operational consistency. While your work helps hotels strengthen their visibility and guest acquisition, we could potentially help those same properties deliver a more consistent guest experience once guests arrive.";
+
+  const defaultComplementProf =
+    "At FocusRealm, we help hotels strengthen frontline service execution and operational consistency. We believe there may be an opportunity to combine revenue-growth initiatives with operational improvements, helping selected properties focus on both commercial performance and the guest experience.";
+
+  const defaultComplementConcise =
+    "While you focus on core hospitality services, FocusRealm ensures frontline operational consistency without any service overlap.";
+
+  const defaultComplementUpbeat =
+    "We’re big believers that memorable guest experiences require both outstanding client engagement and rock-solid frontline execution.";
+
+  const foundersSignOff = args.signOff?.trim()
+    ? args.signOff.trim().includes("\n")
+      ? args.signOff.trim()
+      : `${args.signOff.trim()}\nFounder’s Office\nFocusRealm\nhttps://misehotel.com/\nhttps://focusrealm.org/`
+    : "Founder’s Office\nFocusRealm\nhttps://misehotel.com/\nhttps://focusrealm.org/";
+
+  // Tone-specific templates for each goal
+  if (args.goal === "co_market") {
+    switch (t) {
+      case "warm":
+        return {
+          name: "Co-Market Partnership (warm and personal)",
+          subject: `Exploring a complementary partnership with ${company}`,
+          body: [
+            `Hi ${first},`,
+            "I'm reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
+            `${company}'s work across ${whatText} presents an interesting opportunity for us to explore a complementary partnership.`,
+            `{{partnerComplement|${defaultComplementWarm}}}`,
+            `We'd love to explore a joint initiative around ${oppText}, combining your client relationships with operational readiness for selected hotel clients.`,
+            "Would you be open to a 15–20 minute conversation with Sehej to explore whether there's a fit?",
+            `Best wishes,\n${foundersSignOff}`,
+          ].join("\n\n"),
+          warnings: [],
+          source: "starter",
+        };
+
+      case "professional":
+        return {
+          name: "Co-Market Partnership (professional)",
+          subject: `FocusRealm & ${company} — Strategic Partnership Opportunity`,
+          body: [
+            `Hello ${first},`,
+            "I am reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
+            `${company}'s focus on ${whatText} presents an interesting opportunity to explore a complementary partnership.`,
+            `{{partnerComplement|${defaultComplementProf}}}`,
+            `We would be interested in exploring a small referral or pilot initiative around ${oppText} before considering anything more extensive.`,
+            "Would you or someone from your leadership team be available for a 15–20 minute conversation with Sehej to assess mutual fit?",
+            `Best regards,\n${foundersSignOff}`,
+          ].join("\n\n"),
+          warnings: [],
+          source: "starter",
+        };
+
+      case "concise":
+        return {
+          name: "Co-Market Partnership (short and direct)",
+          subject: `Complementary fit for ${company}`,
+          body: [
+            `Hi ${first},`,
+            "I'm reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
+            `Given ${company}'s work across ${whatText}, we see a natural way to complement what you already deliver to hotels without any operational overlap.`,
+            `{{partnerComplement|${defaultComplementConcise}}} We'd love to explore a simple referral or pilot around ${oppText} for mutual hotel clients.`,
+            "Would you have 15 minutes for a short introductory call with Sehej next week?",
+            `Best,\n${foundersSignOff}`,
+          ].join("\n\n"),
+          warnings: [],
+          source: "starter",
+        };
+
+      case "upbeat":
+        return {
+          name: "Co-Market Partnership (upbeat)",
+          subject: `Excited about ${company} — exploring joint synergy!`,
+          body: [
+            `Hi ${first}!`,
+            "I’m reaching out from the Founder’s Office at FocusRealm on behalf of Sehej Sharma.",
+            `We’ve been following the fantastic work ${company} is doing across ${whatText}!`,
+            `{{partnerComplement|${defaultComplementUpbeat}}} That’s why we’re excited about the idea of teaming up around ${oppText} to offer a complete experience beyond the booking for selected properties.`,
+            "Would you be open to a quick 15-minute chat with Sehej to brainstorm what a collaboration could look like?",
+            `Cheers,\n${foundersSignOff}`,
+          ].join("\n\n"),
+          warnings: [],
+          source: "starter",
+        };
+    }
+  }
+
+  if (args.goal === "mise_pilot") {
+    switch (t) {
+      case "warm":
+        return {
+          name: "Mise Hotel Outreach (warm and personal)",
+          subject: `Ensuring frontline service execution at ${company}`,
+          body: [
+            `Hi ${first},`,
+            "I’m reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
+            "One of the key challenges in hospitality is ensuring that SOPs, training, and service standards defined at the corporate level are consistently followed by frontline teams across properties. Even when standards are clearly documented, ensuring that tasks are executed correctly, verified, and recorded can be difficult across multiple teams and locations.",
+            "Mise Hotel, our hospitality-focused Service Execution Platform, is designed to address this challenge by bringing SOPs, training, and operational workflows together in a mobile-first platform. It helps translate documented standards into assigned tasks, supports teams in executing them, and captures evidence of completion to improve operational visibility and accountability.",
+            `As we continue developing Mise Hotel, we would welcome the opportunity to explore a pilot with ${company} to demonstrate the platform, understand your operational requirements, and gather feedback from your team.`,
+            `We are also bringing together experienced hospitality leaders for the FocusRealm Hotel Advisory Board, where industry experts can help shape Mise Hotel around the real-world needs of hotel operations, workforce training, and service delivery. Given ${company}’s experience in the hospitality industry, we would be honoured to explore your potential involvement.`,
+            "Would your team be available for a 20-minute meeting with Sehej to discuss Mise Hotel, a potential pilot, and the advisory opportunity? We would be happy to coordinate a time that suits your schedule.",
+            "Thank you for your time. We look forward to connecting.",
+            `Best wishes,\n${foundersSignOff}`,
+          ].join("\n\n"),
+          warnings: [],
+          source: "starter",
+        };
+
+      case "professional":
+        return {
+          name: "Mise Hotel Outreach (professional)",
+          subject: `Operational consistency & SOP compliance for ${company}`,
+          body: [
+            `Hello ${first},`,
+            "I am writing on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
+            "Across multi-property hospitality portfolios, standard operating procedures and brand standards are thoroughly documented, yet verifying daily frontline execution remains an operational blind spot.",
+            "FocusRealm's Mise Hotel platform bridges this gap. We translate corporate SOPs and brand audits into structured, mobile task checklists with mandatory completion evidence and real-time operational oversight for leadership.",
+            `We are currently selecting property partners for a structured evaluation pilot with ${company} to measure impact on compliance and operational accountability.`,
+            "Would you or your operations director be open to a 20-minute discussion with Sehej next week to review the pilot parameters?",
+            `Kind regards,\n${foundersSignOff}`,
+          ].join("\n\n"),
+          warnings: [],
+          source: "starter",
+        };
+
+      case "concise":
+        return {
+          name: "Mise Hotel Outreach (short and direct)",
+          subject: `Frontline execution at ${company}`,
+          body: [
+            `Hi ${first},`,
+            "I'm reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
+            `Ensuring frontline hotel teams execute corporate SOPs consistently is a persistent headache. Mise Hotel translates your documented standards into assigned mobile tasks with verified completion records.`,
+            `We'd welcome the chance to run a quick 30-day pilot with ${company} to prove the operational visibility it gives your leadership team.`,
+            "Would you have 15 minutes for a brief call with Sehej next Tuesday or Thursday?",
+            `Best,\n${foundersSignOff}`,
+          ].join("\n\n"),
+          warnings: [],
+          source: "starter",
+        };
+
+      case "upbeat":
+        return {
+          name: "Mise Hotel Outreach (upbeat)",
+          subject: `Empowering frontline teams at ${company}`,
+          body: [
+            `Hi ${first}!`,
+            "I’m reaching out from the Founder’s Office at FocusRealm on behalf of Sehej Sharma.",
+            `Great hospitality lives and dies on frontline execution. We built Mise Hotel to empower property teams with a super intuitive mobile tool that turns complex SOPs into clear daily wins.`,
+            `We'd love to partner with ${company} on a pilot demonstration, and invite you to share your insights on our FocusRealm Hotel Advisory Board!`,
+            "Could we grab 15 minutes with Sehej to show you how it works?",
+            `Cheers,\n${foundersSignOff}`,
+          ].join("\n\n"),
+          warnings: [],
+          source: "starter",
+        };
+    }
+  }
+
+  // General templates: ensure each tone produces distinct voice and structure
   const greeting = t === "professional" ? `Hello ${first},` : t === "upbeat" ? `Hi ${first}!` : `Hi ${first},`;
   const closing = { warm: "Warm regards,", professional: "Kind regards,", concise: "Thanks,", upbeat: "Cheers," }[t];
-  const easyOut =
-    t === "concise" ? "" : "If now isn't the right time, just reply and let me know. I won't keep chasing.";
+  const sign = args.signOff?.trim() || "The FocusRealm team";
 
-  const goals: Record<StarterGoal, { name: string; subject: string; paragraphs: string[]; customBody?: string }> = {
-    mise_pilot: {
-      name: "Mise Hotel Outreach",
-      subject: `Ensuring frontline service execution at ${company}`,
-      paragraphs: [],
-      customBody: [
-        greeting,
-        "I’m reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
-        "One of the key challenges in hospitality is ensuring that SOPs, training, and service standards defined at the corporate level are consistently followed by frontline teams across properties. Even when standards are clearly documented, ensuring that tasks are executed correctly, verified, and recorded can be difficult across multiple teams and locations.",
-        "Mise Hotel, our hospitality-focused Service Execution Platform, is designed to address this challenge by bringing SOPs, training, and operational workflows together in a mobile-first platform. It helps translate documented standards into assigned tasks, supports teams in executing them, and captures evidence of completion to improve operational visibility and accountability.",
-        `As we continue developing Mise Hotel, we would welcome the opportunity to explore a pilot with ${company} to demonstrate the platform, understand your operational requirements, and gather feedback from your team.`,
-        `We are also bringing together experienced hospitality leaders for the FocusRealm Hotel Advisory Board, where industry experts can help shape Mise Hotel around the real-world needs of hotel operations, workforce training, and service delivery. Given ${company}’s experience in the hospitality industry, we would be honoured to explore your potential involvement.`,
-        "Would your team be available for a 20-minute meeting with Sehej to discuss Mise Hotel, a potential pilot, and the advisory opportunity? We would be happy to coordinate a time that suits your schedule.",
-        "Thank you for your time. We look forward to the opportunity to connect.",
-        `Best wishes,\n${args.signOff?.trim() || "Sachin Annadurai\nFounder’s Office\nFocusRealm\nhttps://misehotel.com/\nhttps://focusrealm.org/"}`,
-      ].join("\n\n"),
-    },
-    co_market: {
-      name: "Co-Market Partnership",
-      subject: `Co-market partnership opportunity: ${company} & FocusRealm`,
-      paragraphs: [],
-      customBody: [
-        greeting,
-        "I’m reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
-        "One of the key challenges in hospitality is ensuring that SOPs, training, and service standards defined at the corporate level are consistently followed by frontline teams across properties. Even when standards are clearly documented, ensuring that tasks are executed correctly, verified, and recorded can be difficult across multiple teams and locations.",
-        "Mise Hotel, our hospitality-focused Service Execution Platform, is designed to address this challenge by bringing SOPs, training, and operational workflows together in a mobile-first platform. It helps translate documented standards into assigned tasks, supports teams in executing them, and captures evidence of completion to improve operational visibility and accountability.",
-        `We have been closely following ${company} and your work in hospitality: ${has("whatItDoes") ? "{{whatItDoes|customized training and operational infrastructure}}" : "customized training and operational infrastructure"}.`,
-        `We see a natural synergy: ${has("partnershipOpportunity") ? "{{partnershipOpportunity|verifying frontline service execution}}" : "verifying frontline service execution"}.`,
-        `As we continue developing Mise Hotel, we would welcome the opportunity to explore a pilot with ${company} to demonstrate the platform, understand your operational requirements, and gather feedback from your team.`,
-        `We are also bringing together experienced hospitality leaders for the FocusRealm Hotel Advisory Board, where industry experts can help shape Mise Hotel around the real-world needs of hotel operations, workforce training, and service delivery. Given ${company}’s experience in the hospitality industry, we would be honoured to explore your potential involvement.`,
-        "Would your team be available for a 20-minute meeting with Sehej to discuss Mise Hotel, a potential pilot, and the advisory opportunity? We would be happy to coordinate a time that suits your schedule.",
-        "Thank you for your time. We look forward to the opportunity to connect.",
-        `Best wishes,\n${args.signOff?.trim() || "Sachin\nFounder’s Office\nFocusRealm\nhttps://misehotel.com/\nhttps://focusrealm.org/"}`,
-      ].join("\n\n"),
-    },
+  const generalGoals: Record<Exclude<StarterGoal, "mise_pilot" | "co_market">, Record<WriterTone, { subject: string; paragraphs: string[] }>> = {
     introduction: {
-      name: "Introduction",
-      subject: t === "concise" ? `Quick intro for ${company}` : `A quick introduction for ${company}`,
-      paragraphs: [
-        `I'm reaching out because we work with teams like ${company}${where}, and I think there's a good fit between what we do and what you're building.`,
-        "We keep things simple: a short conversation to understand how you work today, and a couple of practical ideas you can use whether or not we work together.",
-        "Would you be open to a 15-minute call next week?",
-      ],
+      warm: {
+        subject: `A warm introduction for ${company}`,
+        paragraphs: [
+          `I wanted to reach out because we've been following what ${company} is building${where}, and there seems to be a wonderful fit between our approaches.`,
+          "We focus on keeping things simple: a friendly conversation to understand what you're working toward, and sharing practical ideas you can use right away.",
+          "Would you be open to a relaxed 15-minute call next week?",
+        ],
+      },
+      professional: {
+        subject: `Introduction: FocusRealm & ${company}`,
+        paragraphs: [
+          `I am writing to introduce FocusRealm to ${company}${where}. We work with hospitality and service organizations to strengthen operational execution and service consistency.`,
+          "Our objective is straightforward: a brief discussion to understand your current operational priorities and evaluate whether there is strategic alignment.",
+          "Would you have 15 minutes available for an introductory conversation next week?",
+        ],
+      },
+      concise: {
+        subject: `Quick intro for ${company}`,
+        paragraphs: [
+          `Reaching out because we work with organizations like ${company}${where} on operational execution.`,
+          "Would you have 10–15 minutes for a brief call next week to see if there's mutual relevance?",
+        ],
+      },
+      upbeat: {
+        subject: `Hello from FocusRealm — love what ${company} is up to!`,
+        paragraphs: [
+          `I’ve been admiring the work ${company} is doing${where} and couldn't resist reaching out!`,
+          "We help innovative teams unlock effortless operational execution, and I think we could do something really exciting together.",
+          "Let's grab 15 minutes for a quick chat next week — do you have a few minutes to connect?",
+        ],
+      },
     },
     partnership: {
-      name: "Partnership proposal",
-      subject: `An idea for ${company}`,
-      paragraphs: [
-        `I've been looking at how ${company} works${where}, and I'd love to explore a partnership that helps us both reach more of the right people.`,
-        "I have a few concrete ideas in mind, from shared offers to joint introductions, and I'd rather shape them with you than send a long proposal.",
-        "Could we find 20 minutes to talk it through?",
-      ],
+      warm: {
+        subject: `Exploring a collaborative partnership with ${company}`,
+        paragraphs: [
+          `I've been looking at how ${company} works${where}, and I'd love to explore how we might support each other in serving our respective communities.`,
+          "I have a few concrete ideas in mind, from shared client initiatives to joint introductions, and I'd love to explore what would be most valuable for you.",
+          "Could we set aside 20 minutes to talk it through?",
+        ],
+      },
+      professional: {
+        subject: `Strategic Collaboration Proposal: ${company}`,
+        paragraphs: [
+          `I am writing to propose a strategic collaboration between FocusRealm and ${company}${where}.`,
+          "Given our complementary service capabilities, a structured referral or joint initiative presents clear commercial and operational advantages for our shared client base.",
+          "Would you or a representative from your leadership team be open to a 20-minute meeting to discuss mutual fit?",
+        ],
+      },
+      concise: {
+        subject: `Partnership idea for ${company}`,
+        paragraphs: [
+          `We see a natural way to collaborate with ${company}${where} by complementing your existing service offerings without overlap.`,
+          "Are you open to a 15-minute call to see if a joint referral or co-marketing initiative makes sense?",
+        ],
+      },
+      upbeat: {
+        subject: `Let's team up! Partnership idea for ${company}`,
+        paragraphs: [
+          `Big fan of what ${company} is doing${where}! We see a fantastic synergy between our two teams and would love to build something great together.`,
+          "We’ve put together a few fun, high-impact collaboration ideas that could deliver immediate value to your clients.",
+          "Up for a 15-minute brainstorming session next week?",
+        ],
+      },
     },
     meeting: {
-      name: "Meeting request",
-      subject: t === "concise" ? "15 minutes next week?" : `15 minutes with ${company} next week?`,
-      paragraphs: [
-        `I'd value a short call to learn more about ${company}'s plans for the coming months and see where we might help.`,
-        "Does Tuesday or Thursday afternoon work? If another time suits you better, just suggest one and I'll fit around it.",
-      ],
+      warm: {
+        subject: `15 minutes with ${company} next week?`,
+        paragraphs: [
+          `I'd really value a short conversation to learn more about ${company}'s plans for the coming months and see where we might be able to help.`,
+          "Does Tuesday or Thursday afternoon work? If another time suits you better, just let me know and I'll gladly adjust.",
+        ],
+      },
+      professional: {
+        subject: `Brief meeting request regarding ${company}`,
+        paragraphs: [
+          `I would appreciate the opportunity for a 15-minute meeting to discuss your current operational initiatives and explore potential synergies with FocusRealm.`,
+          "Please let me know if Tuesday or Thursday afternoon aligns with your schedule, or feel free to suggest an alternative time.",
+        ],
+      },
+      concise: {
+        subject: `15 minutes next week?`,
+        paragraphs: [
+          `Could we schedule a 15-minute call next week to discuss ${company}'s operational priorities?`,
+          "Does Tuesday or Thursday afternoon suit your calendar?",
+        ],
+      },
+      upbeat: {
+        subject: `Quick coffee chat with ${company}?`,
+        paragraphs: [
+          `Would love to catch up for 15 minutes to hear all about what’s next for ${company}!`,
+          "Are you free for a quick chat next Tuesday or Thursday afternoon?",
+        ],
+      },
     },
     follow_up: {
-      name: "Follow-up",
-      subject: t === "professional" ? "Following up on my last email" : "Circling back",
-      paragraphs: [
-        "I wanted to follow up on my earlier note in case it got buried.",
-        `I'm still keen to hear how things are going at ${company} and whether a quick conversation would be useful.`,
-        "A one-line reply is plenty, even if it's \"not now\".",
-      ],
+      warm: {
+        subject: "Circling back on my earlier note",
+        paragraphs: [
+          "I wanted to follow up gently on my earlier note in case it got buried under a busy week.",
+          `I'm still very keen to hear how things are going at ${company} and whether a quick conversation would be helpful.`,
+          "A one-line reply is plenty, even if now isn't the right time.",
+        ],
+      },
+      professional: {
+        subject: `Following up: FocusRealm & ${company}`,
+        paragraphs: [
+          "I am following up on my previous correspondence regarding potential operational synergies between our organizations.",
+          `Please let me know if you or a member of your team would have 15 minutes to connect, or if we should revisit this at a later date.`,
+        ],
+      },
+      concise: {
+        subject: "Quick follow-up",
+        paragraphs: [
+          `Following up on my previous email regarding ${company}.`,
+          "Do you have 10 minutes to connect this week, or is it better to reconnect next quarter?",
+        ],
+      },
+      upbeat: {
+        subject: `Checking back in with ${company}!`,
+        paragraphs: [
+          "Just bumping this to the top of your inbox! Hope you're having a productive week.",
+          `Still super excited about the chance to connect with ${company}. Let me know if you have 10 minutes to chat!`,
+        ],
+      },
     },
     event: {
-      name: "Event invitation",
-      subject: `You're invited, ${first === "there" ? "friend" : "{{firstName|friend}}"}`,
-      paragraphs: [
-        `We're hosting a small session for teams like ${company}${where}, and I'd love for you to join us.`,
-        "It's practical and short: what's working right now, what isn't, and time for your questions.",
-        "Reply to this email and I'll save you a place and send the details.",
-      ],
+      warm: {
+        subject: `You're warmly invited, ${first === "there" ? "friend" : "{{firstName|friend}}"}`,
+        paragraphs: [
+          `We're hosting an intimate session for teams like ${company}${where}, and I would truly love for you to join us.`,
+          "It's practical, candid and short: what's working right now, what isn't, and plenty of time for open discussion.",
+          "Reply to this email and I'll gladly reserve your spot and send over the details.",
+        ],
+      },
+      professional: {
+        subject: `Executive Briefing Invitation: ${company}`,
+        paragraphs: [
+          `You are invited to an executive briefing designed for leadership teams across ${company}${where}.`,
+          "The agenda focuses on data-backed insights on hospitality frontline consistency and operational benchmarks.",
+          "Please RSVP by replying to this message to receive formal attendance credentials.",
+        ],
+      },
+      concise: {
+        subject: "Session invite",
+        paragraphs: [
+          `Hosting a short executive session for teams like ${company}${where}.`,
+          "Reply here if you'd like an invite with schedule details.",
+        ],
+      },
+      upbeat: {
+        subject: `You're invited! Exclusive session for ${company}`,
+        paragraphs: [
+          `We're gathering a fantastic group of leaders from teams like ${company}${where}, and we want you in the room!`,
+          "Expect great energy, fresh ideas, and actionable takeaways you can apply right away.",
+          "Hit reply to claim your spot before spaces fill up!",
+        ],
+      },
     },
     thank_you: {
-      name: "Thank you",
-      subject: "Thank you",
-      paragraphs: [
-        `Thank you for your time${orgField ? ` and for everything the team at {{${orgField}|your company}} shared` : ""}. I really appreciated it.`,
-        "As promised, I'll send over the next steps shortly. If anything comes up in the meantime, just reply here.",
-      ],
+      warm: {
+        subject: "Thank you for your time",
+        paragraphs: [
+          `Thank you so much for your time today${orgField ? ` and for everything the team at {{${orgField}|your company}} shared` : ""}. I really enjoyed our conversation.`,
+          "As promised, I'll follow up with the next steps shortly. Please feel free to reach out anytime.",
+        ],
+      },
+      professional: {
+        subject: `Thank you — ${company} & FocusRealm discussion`,
+        paragraphs: [
+          `Thank you for taking the time to meet today to discuss ${company}'s operational objectives.`,
+          "I will prepare and circulate the agreed action items and next steps by end of week.",
+        ],
+      },
+      concise: {
+        subject: "Thank you",
+        paragraphs: [
+          `Thanks for your time today discussing ${company}.`,
+          "I'll follow up with the next steps shortly.",
+        ],
+      },
+      upbeat: {
+        subject: `Loved our chat today! Thank you, ${first === "there" ? "friend" : "{{firstName|friend}}"}`,
+        paragraphs: [
+          `Thank you so much for connecting today! Loved learning more about where ${company} is headed.`,
+          "I'll send over the details we discussed shortly. Excited for what’s ahead!",
+        ],
+      },
     },
   };
 
-  const g = goals[args.goal];
-  const middle = t === "concise" ? g.paragraphs.filter((_, i) => i !== 1 || g.paragraphs.length < 3) : g.paragraphs;
-  const body = g.customBody ?? [greeting, ...middle, ...(easyOut && args.goal !== "thank_you" ? [easyOut] : []), `${closing}\n${sign}`].join("\n\n");
-  return { name: `${g.name} (${WRITER_TONES[t].toLowerCase()})`, subject: g.subject, body, warnings: [], source: "starter" };
+  const g = generalGoals[args.goal as keyof typeof generalGoals][t];
+  const body = [greeting, ...g.paragraphs, `${closing}\n${sign}`].join("\n\n");
+  return { name: `${STARTER_GOALS[args.goal].label} (${WRITER_TONES[t].toLowerCase()})`, subject: g.subject, body, warnings: [], source: "starter" };
 }
 
 /** Standard fields with labels, for building a WriterField list */

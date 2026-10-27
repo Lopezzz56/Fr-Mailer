@@ -6,6 +6,8 @@
 //   silently sent with a blank.
 // - Values are HTML-escaped in HTML bodies and stripped of line breaks in subjects.
 
+import { synthesizeRecipientPersonalization } from "./partner-intelligence.js";
+
 export interface MergeField {
   name: string;
   fallback?: string;
@@ -43,12 +45,41 @@ export const STANDARD_FIELDS = [
   { name: "phone", label: "Phone" },
 ] as const;
 
-function parseToken(raw: string): { name: string; fallback?: string } | null {
-  const pipe = raw.indexOf("|");
-  const name = (pipe === -1 ? raw : raw.slice(0, pipe)).trim();
-  if (!FIELD_NAME.test(name)) return null;
-  if (pipe === -1) return { name };
-  return { name, fallback: raw.slice(pipe + 1).trim() };
+export interface ParsedToken {
+  name: string;
+  fieldChain: string[];
+  fallback?: string;
+}
+
+export function parseToken(raw: string): ParsedToken | null {
+  const parts = raw.split("|").map((p) => p.trim());
+  if (parts.length === 0 || !parts[0]) return null;
+  const firstName = parts[0];
+  if (!FIELD_NAME.test(firstName)) return null;
+
+  if (parts.length === 1) {
+    return { name: firstName, fieldChain: [firstName] };
+  }
+
+  const candidateFields: string[] = [];
+  let fallback: string | undefined = undefined;
+
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]!;
+    if (i === parts.length - 1) {
+      fallback = part;
+    } else {
+      if (FIELD_NAME.test(part)) {
+        candidateFields.push(part);
+      }
+    }
+  }
+
+  return {
+    name: firstName,
+    fieldChain: candidateFields.length > 0 ? candidateFields : [firstName],
+    fallback,
+  };
 }
 
 /** All merge fields used across the given template parts (first occurrence wins for fallback) */
@@ -58,12 +89,13 @@ export function extractMergeFields(parts: TemplateParts): MergeField[] {
     for (const match of text.matchAll(TOKEN)) {
       const token = parseToken(match[1]!);
       if (!token) continue;
-      const existing = fields.get(token.name);
-      if (!existing) {
-        fields.set(token.name, { name: token.name, fallback: token.fallback, required: token.fallback === undefined });
-      } else if (token.fallback === undefined) {
-        // Used somewhere without a fallback -> required overall
-        existing.required = true;
+      for (const fieldName of token.fieldChain) {
+        const existing = fields.get(fieldName);
+        if (!existing) {
+          fields.set(fieldName, { name: fieldName, fallback: token.fallback, required: token.fallback === undefined });
+        } else if (token.fallback === undefined) {
+          existing.required = true;
+        }
       }
     }
   }
@@ -93,9 +125,23 @@ export function validateTemplate(parts: TemplateParts): string[] {
       errors.push(`${label}: a merge field is missing its closing "}}" or opening "{{".`);
       continue;
     }
+
+    // Check for malformed single-brace tags like {firstName|...}
+    if (/(?<!\{)\{[a-zA-Z0-9_]+\|[^}]*\}(?!\})/.test(text)) {
+      errors.push(`${label}: single-brace tag detected. Merge tags must use double curly braces: "{{fieldName|fallback}}".`);
+    }
+
+    // Check for empty fallback after pipe, e.g. {{firstName|}} or {{firstName| }}
+    if (/\{\{[a-zA-Z0-9_]+(?:\s*\|\s*[a-zA-Z0-9_]+)*\s*\|\s*\}\}/.test(text)) {
+      errors.push(`${label}: contains an empty fallback after "|". Provide a fallback value or remove the pipe.`);
+    }
+
     for (const match of text.matchAll(TOKEN)) {
-      if (!parseToken(match[1]!)) {
+      const parsed = parseToken(match[1]!);
+      if (!parsed) {
         errors.push(`${label}: "{{${match[1]}}}" isn't a valid field name. Use letters, numbers or _ with no spaces.`);
+      } else if (parsed.fallback !== undefined && parsed.fallback.trim() === "") {
+        errors.push(`${label}: "{{${match[1]}}}" has an empty fallback after "|". Provide a fallback value or remove the pipe.`);
       }
     }
   }
@@ -125,11 +171,31 @@ function renderPart(text: string, data: MergeData, mode: Mode, missing: Set<stri
   return text.replace(TOKEN, (whole, raw: string) => {
     const token = parseToken(raw);
     if (!token) return whole;
-    let value = resolveValue(data, token.name);
+
+    let value: string | undefined = undefined;
+
+    // 1. Try primary field and any chained fallback fields
+    for (const field of token.fieldChain) {
+      value = resolveValue(data, field);
+      if (value !== undefined) break;
+    }
+
+    // 2. If still undefined, check if the fallback itself matches a field present in data
+    if (value === undefined && token.fallback !== undefined && FIELD_NAME.test(token.fallback)) {
+      const fieldVal = resolveValue(data, token.fallback);
+      if (fieldVal !== undefined) {
+        value = fieldVal;
+      }
+    }
+
+    // 3. If still undefined, use the fallback literal string
     if (value === undefined) {
-      if (token.fallback === undefined) missing.add(token.name);
+      if (token.fallback === undefined) {
+        missing.add(token.name);
+      }
       value = token.fallback ?? "";
     }
+
     if (mode === "html") return escapeHtml(value);
     if (mode === "subject") return value.replace(/[\r\n]+/g, " ");
     return value;
@@ -183,9 +249,36 @@ export function isPlainTextTemplate(parts: TemplateParts): boolean {
 
 export function renderEmail(parts: TemplateParts, data: MergeData): RenderedEmail {
   const missing = new Set<string>();
-  const subject = renderPart(parts.subject, data, "subject", missing).trim();
-  const html = renderPart(parts.bodyHtml, data, "html", missing);
-  const text = parts.bodyText?.trim() ? renderPart(parts.bodyText, data, "text", missing) : htmlToText(html);
+  let subject = renderPart(parts.subject, data, "subject", missing).trim();
+  let html = renderPart(parts.bodyHtml, data, "html", missing);
+  let text = parts.bodyText?.trim() ? renderPart(parts.bodyText, data, "text", missing) : htmlToText(html);
+
+  // Strip placeholder sender names like Demo Founder
+  html = html.replace(/Demo Founder\s*(<br\s*\/?>)?/gi, "");
+  text = text.replace(/Demo Founder\s*\n?/gi, "");
+
+  // Maintain consistent FocusRealm branding throughout
+  subject = subject.replace(/Focus Realm/g, "FocusRealm");
+  html = html.replace(/Focus Realm/g, "FocusRealm");
+  text = text.replace(/Focus Realm/g, "FocusRealm");
+
+  // Safety guard: detect any unreplaced merge tokens or malformed single-brace tokens
+  const fullContent = `${subject}\n${text}`;
+  const unreplaced = fullContent.match(/\{\{([a-zA-Z0-9_]+)[^}]*\}\}/g);
+  if (unreplaced) {
+    for (const tag of unreplaced) {
+      const match = tag.match(/\{\{([a-zA-Z0-9_]+)/);
+      if (match && match[1]) missing.add(match[1]);
+    }
+  }
+  const malformedSingle = fullContent.match(/(?<!\{)\{([a-zA-Z0-9_]+)\|[^}]*\}(?!\})/g);
+  if (malformedSingle) {
+    for (const tag of malformedSingle) {
+      const match = tag.match(/\{([a-zA-Z0-9_]+)/);
+      if (match && match[1]) missing.add(match[1]);
+    }
+  }
+
   return { subject, html, text, missingFields: [...missing] };
 }
 
@@ -201,24 +294,7 @@ export interface ContactLike {
   customFields?: unknown;
 }
 
-/** Flattens a contact (standard + custom fields) into merge data; standard fields win on name clashes */
+/** Flattens a contact (standard + custom fields) into clean, normalized merge data */
 export function contactMergeData(contact: ContactLike, overrides?: MergeData): MergeData {
-  const custom =
-    contact.customFields && typeof contact.customFields === "object" && !Array.isArray(contact.customFields)
-      ? (contact.customFields as MergeData)
-      : {};
-  const fullName = [contact.firstName, contact.lastName].filter((p) => p && p.trim()).join(" ");
-  return {
-    ...custom,
-    email: contact.email,
-    firstName: contact.firstName ?? undefined,
-    lastName: contact.lastName ?? undefined,
-    fullName: fullName || undefined,
-    company: contact.company ?? undefined,
-    title: contact.title ?? undefined,
-    phone: contact.phone ?? undefined,
-    hotelSegment: contact.hotelSegment ?? undefined,
-    contactPersona: contact.contactPersona ?? undefined,
-    ...(overrides ?? {}),
-  };
+  return synthesizeRecipientPersonalization(contact, overrides).mergeData;
 }

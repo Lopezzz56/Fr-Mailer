@@ -231,6 +231,20 @@ export interface ImportSheetInfo {
   headers: string[];
 }
 
+export const PROSPECT_LIST_TYPES = ["HOTEL_PROSPECTS", "CO_MARKETING_PARTNERS", "GENERAL_BUSINESS"] as const;
+export type ProspectListType = (typeof PROSPECT_LIST_TYPES)[number];
+
+export interface ImportQualityBreakdown {
+  score: number; // 0 to 100
+  hasEmail: boolean;
+  hasName: boolean;
+  hasCompany: boolean;
+  hasTargeting: boolean;
+  essentialMissing: string[];
+  recommendedMissing: string[];
+  personalizationTagsReady: string[];
+}
+
 export interface ImportPreviewDto {
   fileName: string;
   /** Every non-empty sheet (one entry for CSV) */
@@ -241,6 +255,9 @@ export interface ImportPreviewDto {
   sampleRows: string[][];
   totalRows: number;
   suggestedMapping: Record<string, ImportTarget>;
+  suggestedListType: ProspectListType;
+  readinessScore: number;
+  qualityBreakdown: ImportQualityBreakdown;
 }
 
 export interface ImportProblemRow {
@@ -362,6 +379,29 @@ export const CampaignInputSchema = z.object({
     .nullable()
     .or(z.literal("").transform(() => null)),
   sendRatePerMinute: z.coerce.number().int().min(1).max(120).default(20),
+  templates: z
+    .array(
+      z.object({
+        templateId: IdSchema,
+        isFallback: z.boolean().default(false),
+        priority: z.coerce.number().int().default(0),
+      })
+    )
+    .optional(),
+  rules: z
+    .array(
+      z.object({
+        templateId: IdSchema,
+        priority: z.coerce.number().int().min(1).default(1),
+        hotelSegment: optionalText(100),
+        contactPersona: optionalText(100),
+        requiresVerified: z.boolean().default(false),
+        minConfidence: z.coerce.number().min(0).max(1).optional().nullable(),
+        city: optionalText(100),
+        description: optionalText(500),
+      })
+    )
+    .optional(),
 });
 export type CampaignInput = z.input<typeof CampaignInputSchema>;
 
@@ -455,8 +495,12 @@ export interface CampaignRuleDto {
 
 export const CampaignRecipientOverrideInputSchema = z.object({
   contactId: IdSchema,
-  templateId: IdSchema,
+  templateId: IdSchema.optional(),
   reason: optionalText(500),
+  customSubject: z.string().trim().max(500).optional().nullable(),
+  customBodyHtml: z.string().trim().max(50000).optional().nullable(),
+  customBodyText: z.string().trim().max(50000).optional().nullable(),
+  isCustom: z.boolean().default(false),
 });
 export type CampaignRecipientOverrideInput = z.input<typeof CampaignRecipientOverrideInputSchema>;
 
@@ -468,6 +512,10 @@ export interface CampaignRecipientOverrideDto {
   templateId: string;
   templateName: string;
   reason: string | null;
+  customSubject: string | null;
+  customBodyHtml: string | null;
+  customBodyText: string | null;
+  isCustom: boolean;
   createdAt: string;
 }
 
@@ -482,6 +530,7 @@ export interface ReviewRecipientSample {
   templateName: string;
   assignmentSource: "OVERRIDE" | "RULE" | "FALLBACK";
   assignmentReason: string;
+  isCustom?: boolean;
 }
 
 export interface TemplateBreakdownItem {
@@ -598,6 +647,89 @@ export interface CampaignAnalyticsSummaryDto {
   }[];
 }
 
+export interface TemplatePerformanceItemDto {
+  templateId: string;
+  templateName: string;
+  currentVersion: number;
+  subject: string;
+  assignedCount: number;
+  attemptedCount: number;
+  providerAcceptedCount: number;
+  deliveredCount: number;
+  failedCount: number;
+  bouncedCount: number;
+  repliedCount: number;
+  positiveRepliesCount: number;
+  negativeRepliesCount: number;
+  neutralRepliesCount: number;
+  outOfOfficeCount: number;
+  meetingsBookedCount: number;
+  unsubscribedCount: number;
+  deliveryRate: number;
+  replyRate: number;
+  positiveReplyRate: number;
+  meetingRate: number;
+  unsubscribeRate: number;
+  isLimitedData: boolean;
+  bySegment: {
+    segment: string;
+    deliveredCount: number;
+    repliedCount: number;
+    replyRate: number;
+    meetingsCount: number;
+  }[];
+  byPersona: {
+    persona: string;
+    deliveredCount: number;
+    repliedCount: number;
+    replyRate: number;
+    meetingsCount: number;
+  }[];
+}
+
+export interface ActionableInsightDto {
+  type: "top_performer" | "audience_gap" | "conversion_leak" | "low_sample_warning" | "reply_theme";
+  category: "OBSERVATION" | "HYPOTHESIS";
+  title: string;
+  description: string;
+  metricBadge?: string;
+  recommendation?: string;
+}
+
+export interface WorkspaceTemplateAnalyticsDto {
+  overview: {
+    totalTemplatesEvaluated: number;
+    totalAssigned: number;
+    totalAttempted: number;
+    totalProviderAccepted: number;
+    totalDelivered: number;
+    totalBounced: number;
+    totalReplies: number;
+    totalPositiveReplies: number;
+    totalMeetingsBooked: number;
+    overallDeliveryRate: number;
+    overallReplyRate: number;
+    overallMeetingRate: number;
+  };
+  templates: TemplatePerformanceItemDto[];
+  insights: ActionableInsightDto[];
+  availableFilters: {
+    campaigns: { id: string; name: string }[];
+    segments: string[];
+    personas: string[];
+  };
+}
+
+export const TemplateAnalyticsQuerySchema = z.object({
+  campaignId: z.string().optional(),
+  dateRange: z.enum(["7d", "30d", "90d", "all"]).default("all").optional(),
+  hotelSegment: z.string().optional(),
+  contactPersona: z.string().optional(),
+  templateId: z.string().optional(),
+});
+export type TemplateAnalyticsQuery = z.infer<typeof TemplateAnalyticsQuerySchema>;
+
+
 // ============================================================================
 // SUPPRESSIONS
 // ============================================================================
@@ -682,7 +814,15 @@ export interface EnrichmentDto {
 
 export interface MailboxStatusDto {
   smtp: { configured: boolean; host: string | null; port: number; secure: boolean; user: string | null; fromEmail: string | null; fromName: string };
-  imap: { configured: boolean; enabled: boolean; host: string | null; port: number; lastCheckedAt: string | null; lastError: string | null };
+  imap: {
+    configured: boolean;
+    enabled: boolean;
+    host: string | null;
+    port: number;
+    lastCheckedAt: string | null;
+    lastError: string | null;
+    unmatchedReplies?: { from: string; subject: string; snippet: string; date: string; detectedSentiment: string }[];
+  };
   liveSendingEnabled: boolean;
   liveSendingBlocker: string | null;
   dailyLimit: number;

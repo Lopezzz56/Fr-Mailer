@@ -13,6 +13,13 @@ function serverPort(): string {
   return process.env.PORT ?? vars.PORT ?? "3010";
 }
 
+function clientPort(): number {
+  const file = path.resolve(__dirname, ".env");
+  const vars = fs.existsSync(file) ? parse(fs.readFileSync(file)) : {};
+  const p = process.env.CLIENT_PORT ?? vars.CLIENT_PORT ?? process.env.VITE_PORT ?? vars.VITE_PORT ?? "5173";
+  return parseInt(p, 10) || 5173;
+}
+
 export default defineConfig(() => {
   const apiTarget = `http://127.0.0.1:${serverPort()}`;
 
@@ -28,7 +35,7 @@ export default defineConfig(() => {
       },
     },
     server: {
-      port: 5173,
+      port: clientPort(),
       proxy: {
         "/api": { target: apiTarget, changeOrigin: true },
         // Unsubscribe pages linked from emails
@@ -38,7 +45,7 @@ export default defineConfig(() => {
     build: {
       outDir: "dist/client",
       emptyOutDir: true,
-      sourcemap: true,
+      sourcemap: process.env.SOURCEMAP === "true",
       rollupOptions: {
         output: {
           // Long-lived vendor chunk so app deploys don't re-download React

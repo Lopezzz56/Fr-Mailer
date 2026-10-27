@@ -19,7 +19,20 @@ const EnvSchema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
 
   // Externally reachable origin of this app — used for links inside emails (unsubscribe, invites)
-  PUBLIC_URL: z.string().url().default("http://localhost:5173"),
+  PUBLIC_URL: z
+    .string()
+    .trim()
+    .transform((val) => val.replace(/\/+$/, ""))
+    .pipe(z.string().url())
+    .default(
+      process.env.PUBLIC_URL
+        ? process.env.PUBLIC_URL.trim().replace(/\/+$/, "")
+        : process.env.VERCEL_URL
+        ? `https://${process.env.VERCEL_URL.trim().replace(/\/+$/, "")}`
+        : process.env.VERCEL
+        ? "https://fr-mailer.vercel.app"
+        : "http://localhost:5173"
+    ),
   // Signs unsubscribe links. Generate with: openssl rand -hex 32
   APP_SECRET: z.string().min(32, "APP_SECRET must be at least 32 characters"),
 

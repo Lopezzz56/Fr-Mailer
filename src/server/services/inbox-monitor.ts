@@ -6,7 +6,7 @@ import type { Prisma } from "@prisma/client";
 import prisma from "../db.js";
 import { env, imapConfigured } from "../config.js";
 import { messageIdDomain } from "./mailer.js";
-import { classifyIncoming, type IncomingMessage } from "./inbox-classifier.js";
+import { classifyIncoming, classifyReplySentiment, type IncomingMessage } from "./inbox-classifier.js";
 
 const STATE_KEY = "imap.state";
 const FIRST_RUN_LOOKBACK_DAYS = 14;
@@ -19,6 +19,13 @@ export interface ImapState {
   lastCheckedAt?: string;
   lastError?: string | null;
   processed?: { bounces: number; replies: number };
+  unmatchedReplies?: {
+    from: string;
+    subject: string;
+    snippet: string;
+    date: string;
+    detectedSentiment: string;
+  }[];
 }
 
 export async function getImapState(): Promise<ImapState> {
@@ -57,10 +64,36 @@ async function applyClassification(message: IncomingMessage, domain: string): Pr
 
   const sends = await prisma.send.findMany({ where: { messageId: { in: result.messageIds } } });
   let targets = sends;
-  if (!targets.length && result.type === "bounce" && result.recipient) {
-    // Some servers drop the original headers; fall back to the most recent send to that address
-    const recent = await prisma.send.findFirst({ where: { email: result.recipient, status: "SENT" }, orderBy: { sentAt: "desc" } });
-    targets = recent ? [recent] : [];
+  if (!targets.length) {
+    if (result.type === "bounce" && result.recipient) {
+      // Some servers drop original headers; fall back to most recent send to that address
+      const recent = await prisma.send.findFirst({ where: { email: result.recipient, status: "SENT" }, orderBy: { sentAt: "desc" } });
+      targets = recent ? [recent] : [];
+    } else if (result.type === "reply") {
+      // Extract from email from header
+      const fromEmail = message.from.match(/<([^>]+)>/)?.[1] || message.from.trim();
+      if (fromEmail) {
+        const recent = await prisma.send.findFirst({ where: { email: fromEmail, status: "SENT" }, orderBy: { sentAt: "desc" } });
+        if (recent) targets = [recent];
+      }
+    }
+  }
+
+  // If a reply still cannot be matched to any send record, record as unmatched
+  if (!targets.length && result.type === "reply") {
+    const sentiment = classifyReplySentiment(result.snippet || message.text, message.subject);
+    const state = await getImapState();
+    const unmatched = state.unmatchedReplies ?? [];
+    unmatched.unshift({
+      from: message.from,
+      subject: message.subject,
+      snippet: result.snippet,
+      date: message.date.toISOString(),
+      detectedSentiment: sentiment.sentiment,
+    });
+    // Keep last 50 unmatched replies
+    await saveImapState({ ...state, unmatchedReplies: unmatched.slice(0, 50) });
+    return null;
   }
 
   for (const send of targets) {
@@ -82,8 +115,24 @@ async function applyClassification(message: IncomingMessage, domain: string): Pr
     } else {
       const already = await prisma.sendEvent.findFirst({ where: { sendId: send.id, type: "REPLY" } });
       if (already) continue;
+      const sentiment = classifyReplySentiment(result.snippet || message.text, message.subject);
       await prisma.$transaction([
-        prisma.sendEvent.create({ data: { sendId: send.id, type: "REPLY", occurredAt: message.date, detail: { from: message.from, subject: message.subject, snippet: result.snippet } } }),
+        prisma.sendEvent.create({
+          data: {
+            sendId: send.id,
+            type: "REPLY",
+            occurredAt: message.date,
+            detail: {
+              from: message.from,
+              subject: message.subject,
+              snippet: result.snippet,
+              classification: sentiment.sentiment,
+              confidence: sentiment.confidence,
+              matchedKeywords: sentiment.matchedKeywords,
+              meetingBooked: false,
+            },
+          },
+        }),
         prisma.send.update({ where: { id: send.id }, data: { repliedAt: send.repliedAt ?? message.date } }),
       ]);
     }

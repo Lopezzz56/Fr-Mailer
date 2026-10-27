@@ -12,6 +12,7 @@ import templatesRouter from "./routes/templates.js";
 import campaignsRouter from "./routes/campaigns.js";
 import suppressionsRouter from "./routes/suppressions.js";
 import enrichmentRouter from "./routes/enrichment.js";
+import analyticsRouter from "./routes/analytics.js";
 import { activityRouter, mailboxRouter, overviewRouter } from "./routes/overview.js";
 import { publicRouter } from "./routes/public.js";
 import { internalRouter } from "./routes/internal.js";
@@ -50,6 +51,7 @@ export function createApp() {
   api.use("/campaigns", campaignsRouter);
   api.use("/suppressions", suppressionsRouter);
   api.use("/enrichment", enrichmentRouter);
+  api.use("/analytics", analyticsRouter);
   api.use("/mailbox", mailboxRouter);
   api.use("/activity", activityRouter);
   api.use("/users", usersRouter);

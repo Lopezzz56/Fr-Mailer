@@ -1,16 +1,17 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { FileText, Plus } from "lucide-react";
 import { useTemplates } from "../../lib/queries";
 import { useDebounced, useTitle } from "../../lib/hooks";
 import { timeAgo, plural } from "../../lib/format";
 import { useAuth } from "../../lib/auth";
-import { PageHeader } from "../../components/ui/Navigation";
+import { PageHeader, Tabs } from "../../components/ui/Navigation";
 import { Card } from "../../components/ui/Card";
 import { ButtonLink } from "../../components/ui/Button";
 import { SearchInput } from "../../components/ui/Field";
 import { DataTable, type Column } from "../../components/ui/DataTable";
 import { EmptyState, ErrorState } from "../../components/ui/Feedback";
+import { TemplateAnalyticsDashboard } from "../../components/templates/TemplateAnalyticsDashboard";
 import type { TemplateDto } from "@shared/types";
 import { extractMergeFields } from "@shared/merge";
 
@@ -18,6 +19,8 @@ export function TemplatesPage() {
   useTitle("Templates");
   const navigate = useNavigate();
   const { can } = useAuth();
+  const [params, setParams] = useSearchParams();
+  const tab = (params.get("tab") ?? "templates") as "templates" | "analytics";
   const [search, setSearch] = useState("");
   const templates = useTemplates(useDebounced(search));
 
@@ -53,38 +56,54 @@ export function TemplatesPage() {
     <>
       <PageHeader
         title="Templates"
-        description="Reusable emails with personal fields. Campaigns lock a copy when they're approved."
+        description="Reusable emails with personal fields. Compare performance across audiences and campaigns."
         actions={can("templates.manage") && <ButtonLink to="/templates/new" variant="primary" icon={<Plus className="h-4 w-4" />}>New template</ButtonLink>}
       />
-      <Card>
-        <div className="border-b border-line p-4">
-          <SearchInput value={search} onChange={setSearch} placeholder="Search by name or subject" className="max-w-sm" />
-        </div>
-        {templates.isError ? (
-          <ErrorState error={templates.error} onRetry={() => templates.refetch()} />
+
+      <div className="space-y-6">
+        <Tabs
+          tabs={[
+            { key: "templates" as const, label: "All Templates", count: templates.data?.data?.length },
+            { key: "analytics" as const, label: "Template Performance & Analytics" },
+          ]}
+          active={tab}
+          onChange={(t) => setParams({ tab: t }, { replace: true })}
+        />
+
+        {tab === "analytics" ? (
+          <TemplateAnalyticsDashboard />
         ) : (
-          <DataTable
-            columns={columns}
-            rows={templates.data?.data}
-            rowKey={(t) => t.id}
-            loading={templates.isPending}
-            onRowClick={(t) => navigate(`/templates/${t.id}`)}
-            caption="Templates"
-            empty={
-              search ? (
-                <EmptyState title="No matching templates" description="Try a different search." />
-              ) : (
-                <EmptyState
-                  icon={FileText}
-                  title="No templates yet"
-                  description="Write the email once, with fields like {{firstName}}, and reuse it across campaigns."
-                  action={can("templates.manage") && <ButtonLink to="/templates/new" variant="primary">Write your first template</ButtonLink>}
-                />
-              )
-            }
-          />
+          <Card>
+            <div className="border-b border-line p-4">
+              <SearchInput value={search} onChange={setSearch} placeholder="Search by name or subject" className="max-w-sm" />
+            </div>
+            {templates.isError ? (
+              <ErrorState error={templates.error} onRetry={() => templates.refetch()} />
+            ) : (
+              <DataTable
+                columns={columns}
+                rows={templates.data?.data}
+                rowKey={(t) => t.id}
+                loading={templates.isPending}
+                onRowClick={(t) => navigate(`/templates/${t.id}`)}
+                caption="Templates"
+                empty={
+                  search ? (
+                    <EmptyState title="No matching templates" description="Try a different search." />
+                  ) : (
+                    <EmptyState
+                      icon={FileText}
+                      title="No templates yet"
+                      description="Write the email once, with fields like {{firstName}}, and reuse it across campaigns."
+                      action={can("templates.manage") && <ButtonLink to="/templates/new" variant="primary">Write your first template</ButtonLink>}
+                    />
+                  )
+                }
+              />
+            )}
+          </Card>
         )}
-      </Card>
+      </div>
     </>
   );
 }

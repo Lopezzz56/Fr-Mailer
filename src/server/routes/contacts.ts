@@ -10,6 +10,7 @@ import { audit } from "../lib/audit.js";
 import { ok, okPage, searchParam, skipTake } from "../lib/http.js";
 import { contactInclude, toContactDtos, toSendDto } from "../lib/serialize.js";
 import { parseWorkbook, planImport, runImport, selectSheet, suggestMapping, validateMapping } from "../services/contact-import.js";
+import { computeImportQuality, detectProspectListType } from "../services/classification.js";
 import {
   ALL_SHEETS,
   ContactInputSchema,
@@ -93,6 +94,10 @@ router.post(
     const sheets = await parseWorkbook(file.buffer, file.originalname);
     const requested = typeof req.body.sheet === "string" && req.body.sheet ? req.body.sheet : sheets[0]!.name;
     const table = selectSheet(sheets, requested);
+    const suggestedMapping = suggestMapping(table.headers);
+    const suggestedListType = detectProspectListType(table.headers, table.rows.slice(0, 10));
+    const qualityBreakdown = computeImportQuality(table.headers, suggestedMapping, suggestedListType);
+
     const data: ImportPreviewDto = {
       fileName: file.originalname,
       sheets: sheets.map((s) => ({ name: s.name, rowCount: s.rows.length, headers: s.headers })),
@@ -100,7 +105,10 @@ router.post(
       headers: table.headers,
       sampleRows: table.rows.slice(0, 5),
       totalRows: table.rows.length,
-      suggestedMapping: suggestMapping(table.headers),
+      suggestedMapping,
+      suggestedListType,
+      readinessScore: qualityBreakdown.score,
+      qualityBreakdown,
     };
     ok(res, data);
   })

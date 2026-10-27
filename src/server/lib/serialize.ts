@@ -88,7 +88,7 @@ export function toTemplateDto(t: Prisma.TemplateGetPayload<{ include: { _count: 
     bodyText: t.bodyText,
     description: t.description,
     version: t.version,
-    campaignCount: t._count.campaigns,
+    campaignCount: (t as any)._count?.campaigns ?? 0,
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
   };

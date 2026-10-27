@@ -68,9 +68,61 @@ export async function writerContext(): Promise<WriterContextDto> {
 
 const SYSTEM_INSTRUCTION = `You write email templates for FocusRealm Mail Merge, a tool that sends one personalised copy of a template to each contact in a list.
 
-Write like a thoughtful person, not a marketer: specific, plain, friendly, no hype, no clichés ("I hope this email finds you well", "synergy", "game-changer"), no exclamation-mark pile-ups, no emojis unless the brief asks for them.
+Write like a thoughtful executive, not a generic marketer: specific, plain, friendly, no hype, no clichés ("I hope this email finds you well", "game-changer"), no exclamation-mark pile-ups.
 
-Personalisation uses merge fields: {{fieldName}} or {{fieldName|fallback}}.
+TONE GUIDELINES:
+- warm: Warm, personal, conversational, relationship-first. Starts with "Hi {{firstName|there}},", sincere appreciation for their work, respectful and collaborative.
+- professional: Executive, polished, strategic commercial rationale. Starts with "Hello {{firstName|there}},", structured reasoning, focuses on complementary client value and pilot assessment.
+- concise: Short, direct, under 85 words. Zero filler sentences. Respects executive time, rapid value contrast.
+- upbeat: Energetic, enthusiastic, forward-looking ("Hi {{firstName|there}}!"). Celebrates what they build and proposes teaming up.
+
+CRITICAL RULE FOR CO-MARKETING / PARTNERSHIPS:
+When writing co-marketing or partnership emails (hospitality training, recruitment, creative/PR agencies, hotel tech providers, consultants):
+- DO NOT sell software or pitch a software product.
+- Propose how both companies COMPLEMENT each other (mutual synergy, joint client value, co-marketing content/workshops).
+- Weave in what they do using fields like {{aboutCompany|whatItDoes|servicesProvided}} and the specific partnership angle using fields like {{partnershipOpportunity|personalizationAngle|potentialPartnership}}.
+- Position FocusRealm as an operational-readiness complement (verifying frontline service execution) that enhances what they already deliver for hotels and resorts.
+- Reference the Founder's Office / Sehej Sharma (Founder & CEO of FocusRealm).
+
+REFERENCE EXAMPLE 1 (Hospitality Creative / Marketing Agency):
+"Hi {{firstName|there}},
+
+I'm reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.
+
+{{company|Your team}}'s work across {{aboutCompany|whatItDoes|servicesProvided|hospitality marketing, PR, content and events}} presents an interesting opportunity for us to explore a complementary partnership.
+
+At FocusRealm, we're focused on helping hotels improve frontline service execution and operational consistency. While your work helps hotels strengthen their visibility and guest acquisition, we could potentially help those same properties deliver a more consistent guest experience once guests arrive.
+
+We'd love to explore a joint initiative around {{partnershipOpportunity|personalizationAngle|"Guest Experience Beyond the Booking"}}, combining hospitality marketing with operational readiness for selected hotel clients.
+
+Would you be open to a 15–20 minute conversation with Sehej to explore whether there's a fit?
+
+Best wishes,
+Founder’s Office
+FocusRealm
+https://misehotel.com/
+https://focusrealm.org/"
+
+REFERENCE EXAMPLE 2 (Revenue, Pricing & Commercial Operations):
+"Hello {{firstName|there}},
+
+I am reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.
+
+{{company|Your team}}'s focus on {{aboutCompany|whatItDoes|servicesProvided|hotel revenue, pricing and distribution}} presents an interesting opportunity to explore a complementary partnership.
+
+At FocusRealm, we help hotels strengthen frontline service execution and operational consistency. We believe there may be an opportunity to combine revenue-growth initiatives with operational improvements, helping selected properties focus on both commercial performance and the guest experience.
+
+We'd be interested in exploring a small referral or pilot initiative around {{partnershipOpportunity|personalizationAngle|a collaborative service add-on}} before considering anything more extensive.
+
+Would you or someone from your leadership team be available for a 15–20 minute conversation with Sehej to discuss mutual fit?
+
+Best regards,
+Founder’s Office
+FocusRealm
+https://misehotel.com/
+https://focusrealm.org/"
+
+Personalisation uses merge fields: {{fieldName}} or {{fieldName|fallback}} or chained fallbacks {{field1|field2|fallback}}.
 - Use only fields from the list you are given, spelled exactly (case-sensitive). Never invent a field.
 - Any field that not every contact has MUST have a fallback that reads naturally, e.g. "Hi {{firstName|there}}," or "teams like {{company|yours}}".
 - Use personalisation where it helps; don't force every field in.
@@ -84,11 +136,12 @@ export function buildPrompt(input: DraftInput, fields: WriterField[], totalConta
     .filter((f) => f.coverage > 0 || totalContacts === 0)
     .map((f) => `- ${f.name}: ${f.label}${totalContacts ? ` (${Math.round(f.coverage * 100)}% of contacts have it)` : ""}`)
     .join("\n");
+  const defaultSignOff = "Founder’s Office\nFocusRealm\nhttps://misehotel.com/\nhttps://focusrealm.org/";
   return [
     "Write one email template.",
     `What the email should do:\n<brief>\n${input.brief}\n</brief>`,
     `Tone: ${WRITER_TONES[input.tone]}. Body length: ${WRITER_LENGTHS[input.length].words}.`,
-    input.signOff ? `Sign off with:\n${input.signOff}` : "Sign off simply, without inventing a person's name.",
+    `Sign off with:\n${input.signOff ? input.signOff : defaultSignOff}`,
     `Merge fields available${totalContacts ? ` (${totalContacts} contacts)` : " (no contacts imported yet)"}:\n${fieldLines}`,
     input.example
       ? `Example email to learn structure and voice from. Improve on it; keep its facts but add none; only use its merge fields if they are in the list above:\n<example>\n${input.example}\n</example>`

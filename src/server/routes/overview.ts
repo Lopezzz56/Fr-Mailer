@@ -81,6 +81,7 @@ mailboxRouter.get(
         port: env.IMAP_PORT,
         lastCheckedAt: imap.lastCheckedAt ?? null,
         lastError: imap.lastError ?? null,
+        unmatchedReplies: imap.unmatchedReplies ?? [],
       },
       liveSendingEnabled: !liveSendingBlocker(),
       liveSendingBlocker: liveSendingBlocker(),
@@ -116,6 +117,40 @@ mailboxRouter.post(
       ok(res, await checkInbox());
     } catch (err) {
       throw AppError.badRequest("IMAP_FAILED", `Couldn't read the inbox: ${(err as Error).message}`);
+    }
+  })
+);
+
+/** Toggles ALLOW_LIVE_SENDING on or off */
+mailboxRouter.post(
+  "/live-sending",
+  requirePermission("campaigns.approve"),
+  asyncHandler(async (req, res) => {
+    const { enabled } = req.body ?? {};
+    if (typeof enabled !== "boolean") {
+      throw AppError.badRequest("INVALID_REQUEST", "The 'enabled' boolean is required.");
+    }
+    const { setLiveSending } = await import("../services/mailbox-config.js");
+    const result = await setLiveSending(enabled);
+    ok(res, result);
+  })
+);
+
+/** Updates sender email, password, and fromName; verifies connection before saving */
+mailboxRouter.post(
+  "/update-account",
+  requirePermission("settings.manage"),
+  asyncHandler(async (req, res) => {
+    const { email, password, fromName } = req.body ?? {};
+    if (!email) {
+      throw AppError.badRequest("MISSING_CREDENTIALS", "Sender email is required.");
+    }
+    const { updateMailboxAccount } = await import("../services/mailbox-config.js");
+    try {
+      const result = await updateMailboxAccount({ email, password, fromName });
+      ok(res, result);
+    } catch (err) {
+      throw AppError.badRequest("MAILBOX_UPDATE_FAILED", (err as Error).message);
     }
   })
 );

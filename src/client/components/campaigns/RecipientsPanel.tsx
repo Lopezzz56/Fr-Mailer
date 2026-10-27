@@ -11,7 +11,7 @@ import { formatDateTime } from "../../lib/format";
 import { Card } from "../ui/Card";
 import { Badge, DeliveryStatusBadge } from "../ui/Badge";
 import { Button, buttonClasses } from "../ui/Button";
-import { SearchInput } from "../ui/Field";
+import { Checkbox, SearchInput, SelectField, TextField } from "../ui/Field";
 import { DataTable, Pagination, type Column } from "../ui/DataTable";
 import { FilterChips } from "../ui/Navigation";
 import { Callout, EmptyState, ErrorState } from "../ui/Feedback";
@@ -30,6 +30,110 @@ function Engagement({ s }: { s: SendDto }) {
       {s.repliedAt && <Badge tone="success"><MessageSquareReply className="h-3 w-3" /> Replied</Badge>}
       {s.bouncedAt && <Badge tone="danger"><OctagonX className="h-3 w-3" /> Bounced</Badge>}
       {s.unsubscribedAt && <Badge tone="neutral"><UserMinus className="h-3 w-3" /> Unsubscribed</Badge>}
+    </div>
+  );
+}
+
+function OutcomeReviewForm({
+  campaignId,
+  sendId,
+  send,
+}: {
+  campaignId: string;
+  sendId: string;
+  send: SendDetail;
+}) {
+  const toast = useToast();
+  const invalidate = useInvalidate();
+
+  // Find latest reply event detail if any
+  const replyEvent = [...send.events].reverse().find((e) => e.type === "REPLY");
+  const detail = (replyEvent?.detail as Record<string, unknown> | undefined) ?? {};
+
+  const [classification, setClassification] = useState<string>(
+    String(detail.classification || "")
+  );
+  const [meetingBooked, setMeetingBooked] = useState<boolean>(
+    Boolean(detail.meetingBooked)
+  );
+  const [note, setNote] = useState<string>(String(detail.note || ""));
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.post(`/api/campaigns/${campaignId}/sends/${sendId}/outcome`, {
+        replyClassification: classification ? classification : undefined,
+        meetingBooked,
+        note: note ? note : undefined,
+      }),
+    onSuccess: async () => {
+      await invalidate("campaigns", "overview");
+      toast.success("Outcome saved", "Attribution metrics updated.");
+    },
+    onError: (err) => toast.error("Could not save outcome", errorMessage(err)),
+  });
+
+  return (
+    <div className="rounded-lg border border-line bg-surface-sunken/40 p-3 space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-ink uppercase tracking-wider">
+          Reply Outcome & Meeting Review
+        </span>
+        {classification && (
+          <Badge
+            tone={
+              classification === "POSITIVE"
+                ? "success"
+                : classification === "NEGATIVE"
+                ? "danger"
+                : classification === "OUT_OF_OFFICE"
+                ? "warning"
+                : "neutral"
+            }
+          >
+            {classification}
+          </Badge>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+        <SelectField
+          label="Sentiment Classification"
+          value={classification}
+          onChange={(e) => setClassification(e.target.value)}
+          options={[
+            { value: "", label: "Unclassified" },
+            { value: "POSITIVE", label: "Positive interest" },
+            { value: "NEUTRAL", label: "Neutral / Needs follow-up" },
+            { value: "NEGATIVE", label: "Negative / Not interested" },
+            { value: "OUT_OF_OFFICE", label: "Out of office / Away" },
+          ]}
+        />
+        <div className="pt-5">
+          <Checkbox
+            label="Meeting booked from this outreach"
+            checked={meetingBooked}
+            onChange={(e) => setMeetingBooked(e.target.checked)}
+          />
+        </div>
+      </div>
+
+      <TextField
+        label="Notes / Next steps"
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        placeholder="e.g. Call booked for Thursday 2pm with GM"
+      />
+
+      <div className="flex justify-end">
+        <Button
+          size="sm"
+          variant="primary"
+          loading={save.isPending}
+          onClick={() => save.mutate()}
+        >
+          Save Outcome
+        </Button>
+      </div>
     </div>
   );
 }
@@ -82,19 +186,54 @@ function SendDrawer({ campaignId, sendId, fromLine, onClose }: { campaignId: str
               <div><dt className="text-xs text-ink-subtle">Attempts</dt><dd className="mt-0.5 tabular">{s.attempts}</dd></div>
             </dl>
 
+            {/* Outcome and Reply Management */}
+            {can("campaigns.manage") && (Boolean(s.repliedAt) || s.events.some((e) => e.type === "REPLY")) && (
+              <OutcomeReviewForm campaignId={campaignId} sendId={sendId} send={s} />
+            )}
+
             {s.events.length > 0 && (
               <div>
                 <p className="mb-2 text-[13px] font-medium">What happened next</p>
                 <ol className="space-y-2">
-                  {s.events.map((e) => (
-                    <li key={e.id} className="rounded-lg border border-line px-3 py-2 text-[13px]">
-                      <div className="flex justify-between gap-3">
-                        <span className="font-medium">{EVENT_LABELS[e.type] ?? e.type}</span>
-                        <span className="text-xs text-ink-subtle">{formatDateTime(e.occurredAt)}</span>
-                      </div>
-                      {(e.detail.snippet || e.detail.diagnostic) && <p className="mt-1 text-xs text-ink-muted">{e.detail.snippet ?? e.detail.diagnostic}</p>}
-                    </li>
-                  ))}
+                  {s.events.map((e) => {
+                    const d = (e.detail as Record<string, unknown>) || {};
+                    const cls = String(d.classification || "");
+                    const isMeeting = Boolean(d.meetingBooked);
+                    return (
+                      <li key={e.id} className="rounded-lg border border-line px-3 py-2 text-[13px]">
+                        <div className="flex justify-between items-center gap-3">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium">{EVENT_LABELS[e.type] ?? e.type}</span>
+                            {cls && (
+                              <Badge
+                                tone={
+                                  cls === "POSITIVE"
+                                    ? "success"
+                                    : cls === "NEGATIVE"
+                                    ? "danger"
+                                    : cls === "OUT_OF_OFFICE"
+                                    ? "warning"
+                                    : "neutral"
+                                }
+                              >
+                                {cls}
+                              </Badge>
+                            )}
+                            {isMeeting && <Badge tone="brand">Meeting Booked</Badge>}
+                          </div>
+                          <span className="text-xs text-ink-subtle">{formatDateTime(e.occurredAt)}</span>
+                        </div>
+                        {Boolean(d.snippet || d.diagnostic) && (
+                          <p className="mt-1 text-xs text-ink-muted leading-relaxed">
+                            {String(d.snippet ?? d.diagnostic)}
+                          </p>
+                        )}
+                        {Boolean(d.note) && (
+                          <p className="mt-1 text-xs text-ink italic">Note: {String(d.note)}</p>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ol>
               </div>
             )}

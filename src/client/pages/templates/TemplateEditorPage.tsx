@@ -34,28 +34,31 @@ interface Draft {
   textAlt: string; // optional plain-text alternative in html mode
 }
 
-const EMPTY: Draft = {
-  name: "",
-  description: "",
-  subject: "Ensuring frontline service execution at {{company|your hotel}}",
-  mode: "text",
-  body:
-    "Dear {{firstName|{{company|Hospitality Team}}}},\n\n" +
-    "I’m reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.\n\n" +
-    "One of the key challenges in hospitality is ensuring that SOPs, training, and service standards defined at the corporate level are consistently followed by frontline teams across properties. Even when standards are clearly documented, ensuring that tasks are executed correctly, verified, and recorded can be difficult across multiple teams and locations.\n\n" +
-    "Mise Hotel, our hospitality-focused Service Execution Platform, is designed to address this challenge by bringing SOPs, training, and operational workflows together in a mobile-first platform. It helps translate documented standards into assigned tasks, supports teams in executing them, and captures evidence of completion to improve operational visibility and accountability.\n\n" +
-    "As we continue developing Mise Hotel, we would welcome the opportunity to explore a pilot with {{company|your team}} to demonstrate the platform, understand your operational requirements, and gather feedback from your team.\n\n" +
-    "We are also bringing together experienced hospitality leaders for the FocusRealm Hotel Advisory Board, where industry experts can help shape Mise Hotel around the real-world needs of hotel operations, workforce training, and service delivery. Given {{company|your organization}}’s experience in the hospitality industry, we would be honoured to explore your potential involvement.\n\n" +
-    "Would your team be available for a 20-minute meeting with Sehej to discuss Mise Hotel, a potential pilot, and the advisory opportunity? We would be happy to coordinate a time that suits your schedule.\n\n" +
-    "Thank you for your time. We look forward to the opportunity to connect.\n\n" +
-    "Best wishes,\n" +
-    "Sachin Annadurai\n" +
-    "Founder’s Office\n" +
-    "FocusRealm\n" +
-    "https://misehotel.com/\n" +
-    "https://focusrealm.org/",
-  textAlt: "",
-};
+function getEmptyDraft(userName?: string): Draft {
+  const cleanName = userName && !/demo|founder|admin|test/i.test(userName) ? userName.trim() : "";
+  return {
+    name: "",
+    description: "",
+    subject: "Ensuring frontline service execution at {{company|your hotel}}",
+    mode: "text",
+    body:
+      "Hi {{firstName|company|Hospitality Team}},\n\n" +
+      "I’m reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.\n\n" +
+      "One of the key challenges in hospitality is ensuring that SOPs, training, and service standards defined at the corporate level are consistently followed by frontline teams across properties. Even when standards are clearly documented, ensuring that tasks are executed correctly, verified, and recorded can be difficult across multiple teams and locations.\n\n" +
+      "Mise Hotel, our hospitality-focused Service Execution Platform, is designed to address this challenge by bringing SOPs, training, and operational workflows together in a mobile-first platform. It helps translate documented standards into assigned tasks, supports teams in executing them, and captures evidence of completion to improve operational visibility and accountability.\n\n" +
+      "As we continue developing Mise Hotel, we would welcome the opportunity to explore a pilot with {{company|your team}} to demonstrate the platform, understand your operational requirements, and gather feedback from your team.\n\n" +
+      "We are also bringing together experienced hospitality leaders for the FocusRealm Hotel Advisory Board, where industry experts can help shape Mise Hotel around the real-world needs of hotel operations, workforce training, and service delivery. Given {{company|your organization}}’s experience in the hospitality industry, we would be honoured to explore your potential involvement.\n\n" +
+      "Would your team be available for a 20-minute meeting with Sehej to discuss Mise Hotel, a potential pilot, and the advisory opportunity? We would be happy to coordinate a time that suits your schedule.\n\n" +
+      "Thank you for your time. We look forward to the opportunity to connect.\n\n" +
+      "Best wishes,\n" +
+      (cleanName ? `${cleanName}\n` : "") +
+      "Founder’s Office\n" +
+      "FocusRealm\n" +
+      "https://misehotel.com/\n" +
+      "https://focusrealm.org/",
+    textAlt: "",
+  };
+}
 
 function fromTemplate(t: TemplateDto): Draft {
   const plain = isPlainTextTemplate(t);
@@ -83,18 +86,46 @@ export function TemplateEditorPage() {
   const navigate = useNavigate();
   const toast = useToast();
   const invalidate = useInvalidate();
-  const { can } = useAuth();
+  const { user, can } = useAuth();
   const readOnly = !can("templates.manage");
   const template = useTemplate(id);
   const fields = useContactFields();
 
-  const [draft, setDraft] = useState<Draft | null>(isNew ? EMPTY : null);
-  const [saved, setSaved] = useState<Draft | null>(isNew ? EMPTY : null);
+  const [draft, setDraft] = useState<Draft | null>(() => (isNew ? getEmptyDraft(user?.name) : null));
+  const [saved, setSaved] = useState<Draft | null>(() => (isNew ? getEmptyDraft(user?.name) : null));
   const [touched, setTouched] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [writerOpen, setWriterOpen] = useState(false);
   const [pendingDraft, setPendingDraft] = useState<TemplateDraftDto | null>(null);
   const focused = useRef<{ el: HTMLInputElement | HTMLTextAreaElement; key: "subject" | "body" | "textAlt" } | null>(null);
+  const currentIdRef = useRef(id);
+
+  useEffect(() => {
+    if (currentIdRef.current !== id) {
+      currentIdRef.current = id;
+      if (isNew) {
+        const next = getEmptyDraft(user?.name);
+        setDraft(next);
+        setSaved(next);
+        setTouched(false);
+      } else {
+        setDraft(null);
+        setSaved(null);
+        setTouched(false);
+      }
+    }
+  }, [id, isNew, user?.name]);
+
+  useEffect(() => {
+    if (isNew && draft && !touched && user?.name && !draft.body.includes(user.name)) {
+      const cleanName = user.name && !/demo|founder|admin|test/i.test(user.name) ? user.name.trim() : "";
+      if (cleanName) {
+        const next = getEmptyDraft(cleanName);
+        setDraft(next);
+        setSaved(next);
+      }
+    }
+  }, [isNew, user?.name, touched, draft]);
 
   useEffect(() => {
     if (template.data && !draft) {
@@ -128,11 +159,17 @@ export function TemplateEditorPage() {
       return isNew ? api.post<TemplateDto>("/api/templates", body) : api.patch<TemplateDto>(`/api/templates/${id}`, body);
     },
     onSuccess: async (res) => {
-      flushSync(() => setSaved(draft));
+      const updatedDraft = { ...draft!, name: res.data.name };
+      flushSync(() => {
+        setDraft(updatedDraft);
+        setSaved(updatedDraft);
+      });
+      currentIdRef.current = res.data.id;
       await invalidate("templates");
       toast.success(isNew ? "Template created" : "Template saved");
       if (isNew) navigate(`/templates/${res.data.id}`, { replace: true });
     },
+    onError: (err) => toast.error("Could not save template", errorMessage(err)),
   });
   const duplicate = useMutation({
     mutationFn: () => api.post<TemplateDto>(`/api/templates/${id}/duplicate`),
@@ -182,7 +219,7 @@ export function TemplateEditorPage() {
     setWriterOpen(false);
     toast.success("Draft added to the editor", "Read it through and adjust anything before saving.");
   };
-  const hasContent = draft.subject.trim() !== "" || (draft.body.trim() !== "" && draft.body !== EMPTY.body);
+  const hasContent = draft.subject.trim() !== "" || (draft.body.trim() !== "" && draft.body !== getEmptyDraft(user?.name).body);
   const offerDraft = (g: TemplateDraftDto) => (hasContent ? setPendingDraft(g) : applyDraft(g));
 
   const nameError = touched && !draft.name.trim() ? "Give the template a name." : null;
@@ -311,9 +348,22 @@ export function TemplateEditorPage() {
                       </button>
                     ))}
                   </div>
-                  <p className="mt-2 text-xs text-ink-subtle">
-                    Add a fallback for people missing a value: <code className="rounded bg-surface-sunken px-1">{"{{firstName|there}}"}</code>. Fields without a fallback are required; recipients missing them are skipped and listed before approval.
-                  </p>
+                  <div className="mt-2.5 rounded-lg border border-brand/20 bg-brand-soft/20 p-3 text-xs text-ink-muted space-y-1">
+                    <span className="font-semibold text-ink flex items-center gap-1.5">
+                      💡 How Merge Fields &amp; Fallbacks Work:
+                    </span>
+                    <ul className="list-disc pl-4 space-y-1 text-ink-muted">
+                      <li>
+                        <strong>Single fallback:</strong> <code className="rounded bg-surface px-1 border border-line">{"{{firstName|there}}"}</code> &mdash; uses firstName if present, otherwise "there".
+                      </li>
+                      <li>
+                        <strong>Chained fallback:</strong> <code className="rounded bg-surface px-1 border border-line">{"{{firstName|company|Hospitality Team}}"}</code> &mdash; uses firstName; if missing uses company; if both missing uses "Hospitality Team".
+                      </li>
+                      <li>
+                        <strong>Required fields:</strong> <code className="rounded bg-surface px-1 border border-line">{"{{company}}"}</code> without a fallback is strictly required; recipients missing it are safely reported before sending.
+                      </li>
+                    </ul>
+                  </div>
                 </div>
               )}
 

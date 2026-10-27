@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyIncoming, type IncomingMessage } from "./inbox-classifier.js";
+import { classifyIncoming, classifyReplySentiment, type IncomingMessage } from "./inbox-classifier.js";
 
 const base: IncomingMessage = { from: "", subject: "", headers: {}, text: "", attachments: [], date: new Date() };
 const DOMAIN = "misehotel.com";
@@ -54,3 +54,28 @@ describe("classifyIncoming", () => {
     expect(classifyIncoming({ ...base, subject: "Invoice", headers: { "in-reply-to": "<abc@other.com>" } }, DOMAIN).type).toBe("other");
   });
 });
+
+describe("classifyReplySentiment", () => {
+  it("classifies enthusiastic responses as POSITIVE", () => {
+    const res = classifyReplySentiment("Hi Sachin, sounds good. Let's schedule a call for next Tuesday.", "Re: Quality audits");
+    expect(res.sentiment).toBe("POSITIVE");
+    expect(res.confidence).toBeGreaterThan(0.7);
+  });
+
+  it("classifies opt-outs as NEGATIVE", () => {
+    const res = classifyReplySentiment("Please unsubscribe and remove me from your list.", "Re: Partnership");
+    expect(res.sentiment).toBe("NEGATIVE");
+    expect(res.confidence).toBeGreaterThan(0.7);
+  });
+
+  it("classifies vacation and away notices as OUT_OF_OFFICE", () => {
+    const res = classifyReplySentiment("I am currently away on annual leave returning on Friday.", "Automatic reply: Hello");
+    expect(res.sentiment).toBe("OUT_OF_OFFICE");
+  });
+
+  it("classifies ambiguous responses as NEUTRAL", () => {
+    const res = classifyReplySentiment("Thanks for the message.", "Re: Hello");
+    expect(res.sentiment).toBe("NEUTRAL");
+  });
+});
+

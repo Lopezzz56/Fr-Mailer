@@ -15,6 +15,8 @@ import type {
   SendDto,
   SuppressionDto,
   TemplateDto,
+  WorkspaceTemplateAnalyticsDto,
+  TemplateAnalyticsQuery,
 } from "@shared/types";
 import type { TeamMemberDto } from "@shared/auth";
 import type { WriterContextDto } from "@shared/template-writer";
@@ -38,10 +40,11 @@ export const keys = {
   mailbox: ["mailbox"] as const,
   team: ["team"] as const,
   activity: (page: number) => ["activity", page] as const,
+  templateAnalytics: (p: Record<string, unknown> = {}) => ["analytics", "templates", p] as const,
 };
 
 export type ContactDetail = ContactDto & { history: (SendDto & { campaign: { id: string; name: string } })[] };
-export type SendDetail = SendDto & { subject: string; html: string; text: string; events: { id: string; type: string; occurredAt: string; detail: Record<string, string> }[] };
+export type SendDetail = SendDto & { subject: string; html: string; text: string; events: { id: string; type: string; occurredAt: string; detail: Record<string, unknown> }[] };
 export type CampaignDetail = CampaignDetailDto & { waitingReason: string | null };
 export interface ImportBatchDto {
   id: string;
@@ -81,10 +84,23 @@ export const useImports = () => useQuery({ queryKey: keys.imports, queryFn: () =
 export const useLists = () => useQuery({ queryKey: keys.lists, queryFn: () => api.get<ContactListDto[]>("/api/lists") });
 
 export const useTemplates = (search = "") =>
-  useQuery({ queryKey: keys.templates(search), queryFn: () => api.get<TemplateDto[]>(`/api/templates${qs({ search })}`), placeholderData: keepPreviousData });
+  useQuery({
+    queryKey: keys.templates(search),
+    queryFn: () => api.get<TemplateDto[]>(`/api/templates${qs({ search })}`),
+    placeholderData: keepPreviousData,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+  });
 
 export const useTemplate = (id: string | undefined) =>
   useQuery({ queryKey: keys.template(id ?? ""), queryFn: () => api.get<TemplateDto>(`/api/templates/${id}`), enabled: Boolean(id) });
+
+export const useTemplateAnalytics = (p: TemplateAnalyticsQuery = {}) =>
+  useQuery({
+    queryKey: keys.templateAnalytics(p as Record<string, unknown>),
+    queryFn: () => api.get<WorkspaceTemplateAnalyticsDto>(`/api/analytics/templates${qs(p)}`),
+    placeholderData: keepPreviousData,
+  });
 
 export const useCampaigns = (p: { status?: CampaignStatus; search?: string }) =>
   useQuery({

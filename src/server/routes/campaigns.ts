@@ -25,6 +25,9 @@ import {
 import { sentInLast24h } from "../services/send-worker.js";
 import { kickBackground } from "../services/background.js";
 import { getCampaignAnalytics, recordSendOutcome } from "../services/analytics-service.js";
+import { selectTemplateForRecipient, type EligibleTemplate, type SelectionContext } from "../services/template-selection.js";
+import { contactMergeData, htmlToText, renderEmail, type TemplateParts } from "../../shared/merge.js";
+import { synthesizeRecipientPersonalization } from "../../shared/partner-intelligence.js";
 import { env } from "../config.js";
 import {
   ApproveInputSchema,
@@ -82,12 +85,252 @@ router.get(
 );
 
 router.post(
+  "/preview-simulation",
+  asyncHandler(async (req, res) => {
+    const { contactListId, templates, rules, defaultTemplateId, campaignId } = z
+      .object({
+        contactListId: IdSchema,
+        campaignId: IdSchema.optional(),
+        templates: z
+          .array(
+            z.object({
+              templateId: IdSchema,
+              isFallback: z.boolean().default(false),
+              priority: z.coerce.number().int().default(0),
+            })
+          )
+          .min(1, "Select at least one template"),
+        rules: z.array(CampaignRuleInputSchema).default([]),
+        defaultTemplateId: IdSchema.optional(),
+      })
+      .parse(req.body);
+
+    const list = await prisma.contactList.findUnique({
+      where: { id: contactListId },
+      include: {
+        members: {
+          include: { contact: true },
+          take: 500,
+        },
+      },
+    });
+    if (!list) throw AppError.notFound("LIST_NOT_FOUND", "Contact list not found.");
+
+    const overrides = campaignId
+      ? await prisma.campaignRecipientOverride.findMany({
+          where: { campaignId },
+          include: { template: true },
+        })
+      : [];
+    const overrideMap = new Map(overrides.map((o) => [o.contactId, o]));
+
+    const templateIds = templates.map((t) => t.templateId);
+    const dbTemplates = await prisma.template.findMany({
+      where: { id: { in: templateIds } },
+    });
+    const templateMap = new Map(dbTemplates.map((t) => [t.id, t]));
+
+    const eligibleTemplates: EligibleTemplate[] = templates.map((t) => {
+      const dbT = templateMap.get(t.templateId);
+      if (!dbT) throw AppError.badRequest("TEMPLATE_NOT_FOUND", `Template ${t.templateId} not found`);
+      return {
+        id: dbT.id,
+        name: dbT.name,
+        subject: dbT.subject,
+        bodyHtml: dbT.bodyHtml,
+        bodyText: dbT.bodyText,
+        version: dbT.version,
+        isFallback: t.isFallback,
+      };
+    });
+
+    const fallback = eligibleTemplates.find((t) => t.isFallback) ?? eligibleTemplates[0]!;
+    const defId = defaultTemplateId || fallback.id;
+
+    const selectionContext: SelectionContext = {
+      templates: eligibleTemplates,
+      rules: rules.map((r, i) => ({
+        id: `sim-rule-${i}`,
+        templateId: r.templateId,
+        priority: r.priority,
+        hotelSegment: r.hotelSegment,
+        contactPersona: r.contactPersona,
+        requiresVerified: r.requiresVerified,
+        minConfidence: r.minConfidence,
+        city: r.city,
+        description: r.description,
+      })),
+      defaultTemplateId: defId,
+    };
+
+    const countsByTemplate = new Map<string, number>();
+    for (const t of eligibleTemplates) countsByTemplate.set(t.id, 0);
+
+    const sample: any[] = [];
+    const missingFields: { email: string; contactId: string; fields: string[] }[] = [];
+    let readyCount = 0;
+
+    for (const { contact } of list.members) {
+      const selection = selectTemplateForRecipient(
+        {
+          id: contact.id,
+          email: contact.email,
+          firstName: contact.firstName,
+          lastName: contact.lastName,
+          company: contact.company,
+          title: contact.title,
+          hotelSegment: contact.hotelSegment,
+          hotelSegmentConfidence: contact.hotelSegmentConfidence,
+          hotelSegmentStatus: contact.hotelSegmentStatus,
+          contactPersona: contact.contactPersona,
+          contactPersonaConfidence: contact.contactPersonaConfidence,
+          contactPersonaStatus: contact.contactPersonaStatus,
+          customFields:
+            typeof contact.customFields === "object" && contact.customFields !== null
+              ? (contact.customFields as Record<string, string>)
+              : {},
+        },
+        selectionContext
+      );
+
+      const ov = overrideMap.get(contact.id);
+      let rendered: ReturnType<typeof renderEmail>;
+      let targetTemplateId = selection.templateId;
+      let targetTemplateName = selection.templateName;
+      let assignmentSource = selection.assignmentSource;
+      let assignmentReason = selection.explanation;
+      let isCustom = false;
+
+      if (ov && ov.isCustom && ov.customSubject && ov.customBodyHtml) {
+        rendered = {
+          subject: ov.customSubject,
+          html: ov.customBodyHtml,
+          text: ov.customBodyText || htmlToText(ov.customBodyHtml),
+          missingFields: [],
+        };
+        assignmentSource = "OVERRIDE";
+        assignmentReason = ov.reason || "Customized by user";
+        isCustom = true;
+        if (ov.template) {
+          targetTemplateId = ov.template.id;
+          targetTemplateName = ov.template.name;
+        }
+      } else {
+        const parts: TemplateParts = {
+          subject: selection.template.subject,
+          bodyHtml: selection.template.bodyHtml,
+          bodyText: selection.template.bodyText,
+        };
+        rendered = renderEmail(parts, contactMergeData(contact));
+      }
+
+      if (rendered.missingFields.length) {
+        missingFields.push({ email: contact.email, contactId: contact.id, fields: rendered.missingFields });
+        continue;
+      }
+
+      readyCount++;
+      countsByTemplate.set(targetTemplateId, (countsByTemplate.get(targetTemplateId) ?? 0) + 1);
+
+      if (sample.length < 15) {
+        sample.push({
+          contactId: contact.id,
+          email: contact.email,
+          firstName: contact.firstName,
+          lastName: contact.lastName,
+          company: contact.company,
+          hotelSegment: contact.hotelSegment,
+          contactPersona: contact.contactPersona,
+          subject: rendered.subject,
+          html: rendered.html,
+          text: rendered.text,
+          missingFields: rendered.missingFields,
+          templateId: targetTemplateId,
+          templateName: targetTemplateName,
+          assignmentSource,
+          assignmentReason,
+          isCustom,
+        });
+      }
+    }
+
+    const templateBreakdown = eligibleTemplates.map((t) => ({
+      templateId: t.id,
+      templateName: t.name,
+      count: countsByTemplate.get(t.id) ?? 0,
+      isFallback: Boolean(t.isFallback),
+    }));
+
+    ok(res, {
+      total: list.members.length,
+      ready: readyCount,
+      missingFields,
+      templateBreakdown,
+      sample,
+    });
+  })
+);
+
+router.post(
   "/",
   requirePermission("campaigns.manage"),
   asyncHandler(async (req, res) => {
     const input = CampaignInputSchema.parse(req.body);
     await assertReferences(input.templateId, input.contactListId);
-    const campaign = await prisma.campaign.create({ data: { ...input, createdById: req.user!.id } });
+    if (input.templates?.length) {
+      for (const t of input.templates) {
+        const found = await prisma.template.findUnique({ where: { id: t.templateId } });
+        if (!found) throw AppError.badRequest("TEMPLATE_NOT_FOUND", `Template ${t.templateId} not found`);
+      }
+    }
+
+    const campaign = await prisma.$transaction(async (tx) => {
+      const created = await tx.campaign.create({
+        data: {
+          name: input.name,
+          description: input.description,
+          templateId: input.templateId,
+          contactListId: input.contactListId,
+          fromName: input.fromName,
+          replyTo: input.replyTo,
+          sendRatePerMinute: input.sendRatePerMinute,
+          createdById: req.user!.id,
+        },
+      });
+
+      const templatesToInsert = input.templates?.length
+        ? input.templates
+        : [{ templateId: input.templateId, isFallback: true, priority: 0 }];
+
+      for (const t of templatesToInsert) {
+        await tx.campaignTemplate.upsert({
+          where: { campaignId_templateId: { campaignId: created.id, templateId: t.templateId } },
+          create: { campaignId: created.id, templateId: t.templateId, isFallback: t.isFallback, priority: t.priority ?? 0 },
+          update: { isFallback: t.isFallback, priority: t.priority ?? 0 },
+        });
+      }
+
+      if (input.rules?.length) {
+        for (const r of input.rules) {
+          await tx.campaignRule.create({
+            data: {
+              campaignId: created.id,
+              templateId: r.templateId,
+              priority: r.priority,
+              hotelSegment: r.hotelSegment || null,
+              contactPersona: r.contactPersona || null,
+              requiresVerified: r.requiresVerified,
+              minConfidence: r.minConfidence,
+              city: r.city || null,
+              description: r.description,
+            },
+          });
+        }
+      }
+
+      return created;
+    });
+
     await audit(req, { action: "campaign.create", entityType: "Campaign", entityId: campaign.id, metadata: { name: campaign.name } });
     ok(res, await loadDetail(campaign.id), 201);
   })
@@ -107,7 +350,40 @@ router.patch(
     const input = CampaignInputSchema.partial().parse(req.body);
     const current = await prisma.campaign.findUniqueOrThrow({ where: { id } });
     await assertReferences(input.templateId ?? current.templateId, input.contactListId ?? current.contactListId);
-    await prisma.campaign.update({ where: { id }, data: input });
+
+    await prisma.$transaction(async (tx) => {
+      const { templates, rules, ...baseData } = input;
+      await tx.campaign.update({ where: { id }, data: baseData });
+
+      if (templates) {
+        await tx.campaignTemplate.deleteMany({ where: { campaignId: id } });
+        for (const t of templates) {
+          await tx.campaignTemplate.create({
+            data: { campaignId: id, templateId: t.templateId, isFallback: t.isFallback, priority: t.priority ?? 0 },
+          });
+        }
+      }
+
+      if (rules) {
+        await tx.campaignRule.deleteMany({ where: { campaignId: id } });
+        for (const r of rules) {
+          await tx.campaignRule.create({
+            data: {
+              campaignId: id,
+              templateId: r.templateId,
+              priority: r.priority,
+              hotelSegment: r.hotelSegment || null,
+              contactPersona: r.contactPersona || null,
+              requiresVerified: r.requiresVerified,
+              minConfidence: r.minConfidence,
+              city: r.city || null,
+              description: r.description,
+            },
+          });
+        }
+      }
+    });
+
     await audit(req, { action: "campaign.update", entityType: "Campaign", entityId: id, metadata: { fields: Object.keys(input) } });
     ok(res, await loadDetail(id));
   })
@@ -305,6 +581,10 @@ router.get(
         templateId: o.templateId,
         templateName: o.template.name,
         reason: o.reason,
+        customSubject: o.customSubject,
+        customBodyHtml: o.customBodyHtml,
+        customBodyText: o.customBodyText,
+        isCustom: o.isCustom,
         createdAt: o.createdAt.toISOString(),
       }))
     );
@@ -318,20 +598,174 @@ router.post(
     const id = IdSchema.parse(req.params.id);
     await assertEditable(id);
     const input = CampaignRecipientOverrideInputSchema.parse(req.body);
+
+    const campaign = await prisma.campaign.findUnique({ where: { id } });
+    if (!campaign) throw AppError.notFound("CAMPAIGN_NOT_FOUND", "Campaign not found.");
+
+    const targetTemplateId = input.templateId || campaign.templateId;
     const [contact, template] = await Promise.all([
       prisma.contact.findUnique({ where: { id: input.contactId } }),
-      prisma.template.findUnique({ where: { id: input.templateId } }),
+      prisma.template.findUnique({ where: { id: targetTemplateId } }),
     ]);
     if (!contact) throw AppError.badRequest("CONTACT_NOT_FOUND", "Contact no longer exists.");
     if (!template) throw AppError.badRequest("TEMPLATE_NOT_FOUND", "Template no longer exists.");
 
+    const customBodyText = input.customBodyText || (input.customBodyHtml ? htmlToText(input.customBodyHtml) : null);
+    const isCustom = input.isCustom ?? Boolean(input.customSubject && input.customBodyHtml);
+
     const override = await prisma.campaignRecipientOverride.upsert({
       where: { campaignId_contactId: { campaignId: id, contactId: input.contactId } },
-      create: { campaignId: id, contactId: input.contactId, templateId: input.templateId, reason: input.reason },
-      update: { templateId: input.templateId, reason: input.reason },
+      create: {
+        campaignId: id,
+        contactId: input.contactId,
+        templateId: targetTemplateId,
+        reason: input.reason,
+        customSubject: input.customSubject,
+        customBodyHtml: input.customBodyHtml,
+        customBodyText,
+        isCustom,
+      },
+      update: {
+        templateId: targetTemplateId,
+        reason: input.reason,
+        customSubject: input.customSubject,
+        customBodyHtml: input.customBodyHtml,
+        customBodyText,
+        isCustom,
+      },
     });
-    await audit(req, { action: "campaign.override_set", entityType: "CampaignRecipientOverride", entityId: override.id, metadata: { contact: contact.email, template: template.name } });
+    await audit(req, {
+      action: "campaign.override_set",
+      entityType: "CampaignRecipientOverride",
+      entityId: override.id,
+      metadata: { contact: contact.email, template: template.name, isCustom },
+    });
     ok(res, await loadDetail(id));
+  })
+);
+
+router.get(
+  "/:id/recipients/:contactId/preview",
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    const contactId = IdSchema.parse(req.params.contactId);
+
+    const [campaign, contact, override] = await Promise.all([
+      prisma.campaign.findUnique({
+        where: { id },
+        include: {
+          template: true,
+          campaignTemplates: { include: { template: true }, orderBy: { priority: "asc" } },
+          rules: { include: { template: true }, orderBy: { priority: "asc" } },
+        },
+      }),
+      prisma.contact.findUnique({ where: { id: contactId } }),
+      prisma.campaignRecipientOverride.findUnique({
+        where: { campaignId_contactId: { campaignId: id, contactId } },
+        include: { template: true },
+      }),
+    ]);
+
+    if (!campaign) throw AppError.notFound("CAMPAIGN_NOT_FOUND", "Campaign not found.");
+    if (!contact) throw AppError.notFound("CONTACT_NOT_FOUND", "Contact not found.");
+
+    const eligibleTemplates: EligibleTemplate[] = campaign.campaignTemplates.length
+      ? campaign.campaignTemplates.map((ct) => ({
+          id: ct.template.id,
+          name: ct.template.name,
+          subject: ct.template.subject,
+          bodyHtml: ct.template.bodyHtml,
+          bodyText: ct.template.bodyText,
+          version: ct.template.version,
+          isFallback: ct.isFallback,
+        }))
+      : [
+          {
+            id: campaign.template.id,
+            name: campaign.template.name,
+            subject: campaign.template.subject,
+            bodyHtml: campaign.template.bodyHtml,
+            bodyText: campaign.template.bodyText,
+            version: campaign.template.version,
+            isFallback: true,
+          },
+        ];
+
+    const fallback = eligibleTemplates.find((t) => t.isFallback) ?? eligibleTemplates[0]!;
+    const selection = selectTemplateForRecipient(
+      {
+        id: contact.id,
+        email: contact.email,
+        firstName: contact.firstName,
+        lastName: contact.lastName,
+        company: contact.company,
+        title: contact.title,
+        hotelSegment: contact.hotelSegment,
+        hotelSegmentConfidence: contact.hotelSegmentConfidence,
+        hotelSegmentStatus: contact.hotelSegmentStatus,
+        contactPersona: contact.contactPersona,
+        contactPersonaConfidence: contact.contactPersonaConfidence,
+        contactPersonaStatus: contact.contactPersonaStatus,
+        customFields:
+          typeof contact.customFields === "object" && contact.customFields !== null
+            ? (contact.customFields as Record<string, string>)
+            : {},
+      },
+      {
+        templates: eligibleTemplates,
+        rules: campaign.rules.map((r) => ({
+          id: r.id,
+          templateId: r.templateId,
+          priority: r.priority,
+          hotelSegment: r.hotelSegment,
+          contactPersona: r.contactPersona,
+          requiresVerified: r.requiresVerified,
+          minConfidence: r.minConfidence,
+          city: r.city,
+          description: r.description,
+        })),
+        defaultTemplateId: fallback.id,
+      }
+    );
+
+    const targetTemplate = override?.template ?? selection.template;
+    const defaultRender = renderEmail(
+      {
+        subject: targetTemplate.subject,
+        bodyHtml: targetTemplate.bodyHtml,
+        bodyText: targetTemplate.bodyText,
+      },
+      contactMergeData(contact)
+    );
+
+    const personalization = synthesizeRecipientPersonalization(contact);
+    const isCustom = Boolean(override?.isCustom && override?.customSubject && override?.customBodyHtml);
+
+    ok(res, {
+      contact: {
+        id: contact.id,
+        email: contact.email,
+        firstName: contact.firstName,
+        lastName: contact.lastName,
+        company: contact.company,
+        title: contact.title,
+      },
+      template: {
+        id: targetTemplate.id,
+        name: targetTemplate.name,
+      },
+      isCustom,
+      subject: isCustom ? override!.customSubject! : defaultRender.subject,
+      bodyHtml: isCustom ? override!.customBodyHtml! : defaultRender.html,
+      bodyText: isCustom ? (override!.customBodyText ?? htmlToText(override!.customBodyHtml!)) : defaultRender.text,
+      defaultSubject: defaultRender.subject,
+      defaultBodyHtml: defaultRender.html,
+      defaultBodyText: defaultRender.text,
+      understanding: personalization.understanding,
+      reasoning: personalization.reasoning,
+      assignmentSource: isCustom ? "OVERRIDE" : selection.assignmentSource,
+      assignmentReason: override?.reason || selection.explanation,
+    });
   })
 );
 

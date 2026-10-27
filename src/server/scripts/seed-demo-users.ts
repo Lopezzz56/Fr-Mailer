@@ -8,8 +8,8 @@ import { hashPassword } from "../services/auth-service.js";
 import type { UserRole } from "../../shared/auth.js";
 
 const DEMO_USERS: { email: string; name: string; role: UserRole }[] = [
-  { email: "founder@focusrealm.test", name: "Demo Founder", role: "FOUNDER" },
-  { email: "employee@focusrealm.test", name: "Demo Employee", role: "EMPLOYEE" },
+  { email: "founder@focusrealm.test", name: "Founder’s Office", role: "FOUNDER" },
+  { email: "employee@focusrealm.test", name: "FocusRealm Team", role: "EMPLOYEE" },
 ];
 
 async function main() {

@@ -11,7 +11,7 @@
     "typecheck": "npx tsc -p tsconfig.server.json --noEmit && npx tsc -p tsconfig.client.json --noEmit",
     "build": "npm run typecheck && npm run build:server && npm run build:client",
     "build:server": "npx tsc -p tsconfig.server.json",
-    "build:client": "npx vite build",
+    "build:client": "node --max-old-space-size=4096 ./node_modules/vite/bin/vite.js build",
     "start": "node dist/server/server/index.js",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",

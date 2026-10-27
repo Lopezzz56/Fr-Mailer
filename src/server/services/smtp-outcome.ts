@@ -35,7 +35,15 @@ export function classifySmtpError(error: unknown): SmtpOutcome {
   if (typeof err.responseCode === "number") {
     if (err.responseCode >= 500) {
       const atRecipient = command.startsWith("RCPT");
-      return { kind: "rejected", message: text, badAddress: atRecipient || BAD_ADDRESS.test(text) };
+      const isSenderRejection =
+        command.startsWith("MAIL") ||
+        /sender (address )?rejected|not owned by user|authenticated sender/i.test(text);
+
+      return {
+        kind: "rejected",
+        message: text,
+        badAddress: !isSenderRejection && (atRecipient || BAD_ADDRESS.test(text)),
+      };
     }
     if (err.responseCode >= 400) return { kind: "temporary", message: text };
   }
