@@ -14,7 +14,28 @@ import { emailBrandHeader } from "../lib/brand.js";
 const INVITE_TTL_HOURS = 7 * 24;
 const RESET_TTL_HOURS = 24;
 
-const link = (path: string, token: string) => `${env.PUBLIC_URL.replace(/\/$/, "")}${path}?token=${encodeURIComponent(token)}`;
+const resolveBaseUrl = (req?: Request): string => {
+  if (req) {
+    const origin = req.get("origin");
+    if (origin && origin.startsWith("http")) return origin.replace(/\/+$/, "");
+    const referer = req.get("referer");
+    if (referer) {
+      try {
+        const u = new URL(referer);
+        return `${u.protocol}//${u.host}`;
+      } catch {}
+    }
+    const host = req.get("x-forwarded-host") || req.get("host");
+    if (host) {
+      const proto = req.get("x-forwarded-proto") || (req.secure ? "https" : "http");
+      return `${proto}://${host}`;
+    }
+  }
+  return env.PUBLIC_URL.replace(/\/+$/, "");
+};
+
+const link = (req: Request | undefined, path: string, token: string) =>
+  `${resolveBaseUrl(req)}${path}?token=${encodeURIComponent(token)}`;
 
 async function emailLink(to: string, subject: string, intro: string, url: string, cta: string): Promise<boolean> {
   if (!smtpConfigured) return false;
@@ -46,7 +67,7 @@ export async function inviteUser(req: Request, input: { email: string; name: str
     : await prisma.user.create({ data: { email: input.email, name: input.name, role: input.role, status: "INVITED", invitedById: req.user!.id } });
 
   const token = await createAuthToken(user.id, "INVITE", INVITE_TTL_HOURS);
-  const url = link("/accept-invite", token);
+  const url = link(req, "/accept-invite", token);
   const emailed = input.sendEmail
     ? await emailLink(
         user.email,
@@ -94,7 +115,7 @@ export async function createResetLink(req: Request, id: string, sendEmail: boole
   if (!user) throw AppError.notFound("USER_NOT_FOUND", "That person isn't on the team.");
   if (user.status !== "ACTIVE") throw AppError.badRequest("NOT_ACTIVE", "Only active members can reset their password.");
   const token = await createAuthToken(user.id, "PASSWORD_RESET", RESET_TTL_HOURS);
-  const url = link("/reset-password", token);
+  const url = link(req, "/reset-password", token);
   const emailed = sendEmail
     ? await emailLink(user.email, "Reset your FocusRealm Mail Merge password", "A founder created a password reset link for your account. It works once, for 24 hours.", url, "Choose a new password")
     : false;

@@ -60,7 +60,7 @@ export interface ImportBatchDto {
   createdAt: string;
 }
 
-export const useOverview = () => useQuery({ queryKey: keys.overview, queryFn: () => api.get<OverviewDto>("/api/overview"), refetchInterval: 15_000 });
+export const useOverview = () => useQuery({ queryKey: keys.overview, queryFn: () => api.get<OverviewDto>("/api/overview"), refetchInterval: 30_000 });
 
 export const useContacts = (p: { page: number; search: string; listId?: string; filter?: string }) =>
   useQuery({
@@ -88,8 +88,7 @@ export const useTemplates = (search = "") =>
     queryKey: keys.templates(search),
     queryFn: () => api.get<TemplateDto[]>(`/api/templates${qs({ search })}`),
     placeholderData: keepPreviousData,
-    staleTime: 0,
-    refetchOnWindowFocus: true,
+    staleTime: 30_000,
   });
 
 export const useTemplate = (id: string | undefined) =>

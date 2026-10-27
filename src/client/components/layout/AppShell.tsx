@@ -8,6 +8,10 @@ import { initials } from "../../lib/format";
 import { ROLE_LABELS } from "@shared/auth";
 import { BrandLockup, BrandMark } from "./Brand";
 
+import { useQueryClient } from "@tanstack/react-query";
+import { keys } from "../../lib/queries";
+import { api } from "../../lib/api";
+
 interface NavItem {
   to: string;
   label: string;
@@ -36,10 +40,31 @@ const SECTIONS: { title: string; items: NavItem[] }[] = [
 
 function NavItemLink({ item }: { item: NavItem }) {
   const Icon = item.icon;
+  const qc = useQueryClient();
+
+  const handlePrefetch = () => {
+    if (item.to === "/") {
+      void qc.prefetchQuery({ queryKey: keys.overview, queryFn: () => api.get("/api/overview") });
+    } else if (item.to === "/contacts") {
+      void qc.prefetchQuery({
+        queryKey: keys.contacts({ page: 1, search: "" }),
+        queryFn: () => api.get("/api/contacts?page=1&pageSize=25"),
+      });
+    } else if (item.to === "/campaigns") {
+      void qc.prefetchQuery({ queryKey: keys.campaigns({}), queryFn: () => api.get("/api/campaigns") });
+    } else if (item.to === "/templates") {
+      void qc.prefetchQuery({ queryKey: keys.templates(""), queryFn: () => api.get("/api/templates") });
+    } else if (item.to === "/lists") {
+      void qc.prefetchQuery({ queryKey: keys.lists, queryFn: () => api.get("/api/lists") });
+    }
+  };
+
   return (
     <NavLink
       to={item.to}
       end={item.end}
+      onMouseEnter={handlePrefetch}
+      onFocus={handlePrefetch}
       className={({ isActive }) =>
         cn(
           "relative flex items-center gap-3 rounded-md px-3 py-2 text-[13px] font-medium transition-colors",

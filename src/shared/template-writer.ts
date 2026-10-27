@@ -51,7 +51,7 @@ export interface TemplateDraftDto {
   /** Plain-text body using {{field}} / {{field|fallback}} */
   body: string;
   warnings: string[];
-  source: "gemini" | "starter";
+  source: "gemini" | "starter" | "bot";
   model?: string;
 }
 
@@ -117,9 +117,9 @@ export function buildStarterTemplate(args: { goal: StarterGoal; tone: WriterTone
     ? `{{${whatItDoesField}|aboutCompany|servicesProvided|hospitality services}}`
     : "hospitality services";
 
-  const oppText = oppField
-    ? `{{${oppField}|personalizationAngle|"Guest Experience Beyond the Booking"}}`
-    : '"Guest Experience Beyond the Booking"';
+  const coMarketGreeting = has("greetingLine") ? "{{greetingLine|Hi there,}}" : `Hi ${first},`;
+  const partnerStrengthTag = has("partnerStrength") ? "{{partnerStrength|hotel marketing and direct-booking growth}}" : "hotel marketing and direct-booking growth";
+  const partnerOfferingTag = has("partnerOffering") ? "{{partnerOffering|your core services}}" : "your core services";
 
   const defaultComplementWarm =
     "At FocusRealm, we're focused on helping hotels improve frontline service execution and operational consistency. While your work helps hotels strengthen their visibility and guest acquisition, we could potentially help those same properties deliver a more consistent guest experience once guests arrive.";
@@ -133,6 +133,15 @@ export function buildStarterTemplate(args: { goal: StarterGoal; tone: WriterTone
   const defaultComplementUpbeat =
     "We’re big believers that memorable guest experiences require both outstanding client engagement and rock-solid frontline execution.";
 
+  const partnerComplementWarm = has("partnerComplement") ? `{{partnerComplement|${defaultComplementWarm}}}` : defaultComplementWarm;
+  const partnerComplementProf = has("partnerComplement") ? `{{partnerComplement|${defaultComplementProf}}}` : defaultComplementProf;
+  const partnerComplementConcise = has("partnerComplement") ? `{{partnerComplement|${defaultComplementConcise}}}` : defaultComplementConcise;
+  const partnerComplementUpbeat = has("partnerComplement") ? `{{partnerComplement|${defaultComplementUpbeat}}}` : defaultComplementUpbeat;
+
+  const oppText = oppField
+    ? (has("initiativeHeadline") ? `{{initiativeHeadline|${oppField}|"More Bookings, Better Operations"}}` : `{{${oppField}|"More Bookings, Better Operations"}}`)
+    : (has("initiativeHeadline") ? '{{initiativeHeadline|"More Bookings, Better Operations"}}' : '"More Bookings, Better Operations"');
+
   const foundersSignOff = args.signOff?.trim()
     ? args.signOff.trim().includes("\n")
       ? args.signOff.trim()
@@ -145,15 +154,16 @@ export function buildStarterTemplate(args: { goal: StarterGoal; tone: WriterTone
       case "warm":
         return {
           name: "Co-Market Partnership (warm and personal)",
-          subject: `Exploring a complementary partnership with ${company}`,
+          subject: `Exploring a collaborative initiative with ${company}`,
           body: [
-            `Hi ${first},`,
-            "I'm reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
-            `${company}'s work across ${whatText} presents an interesting opportunity for us to explore a complementary partnership.`,
-            `{{partnerComplement|${defaultComplementWarm}}}`,
-            `We'd love to explore a joint initiative around ${oppText}, combining your client relationships with operational readiness for selected hotel clients.`,
-            "Would you be open to a 15–20 minute conversation with Sehej to explore whether there's a fit?",
-            `Best wishes,\n${foundersSignOff}`,
+            coMarketGreeting,
+            "I’m reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
+            `We see a potential opportunity for ${company} and FocusRealm to collaborate by combining ${partnerStrengthTag} with technology that helps hotels improve operational execution and service consistency.`,
+            `${company} focuses on ${whatText}. At FocusRealm, we are building Mise Hotel, a hospitality-focused Service Execution Platform that helps hotels translate SOPs and service standards into assigned tasks, track completion, and improve operational visibility and accountability.`,
+            `We believe these offerings could complement each other. ${partnerComplementWarm}`,
+            `We would love to explore a joint ${oppText} initiative, combining ${partnerOfferingTag} with an operational execution pilot from FocusRealm. This could provide hotel clients with a more comprehensive approach to growth and service delivery.`,
+            "Would you be available for a brief 20-minute discussion with Sehej to explore a potential collaboration and identify a suitable hotel for an initial pilot?",
+            `Thank you for your time. We look forward to the possibility of working together.\n\n${foundersSignOff}`,
           ].join("\n\n"),
           warnings: [],
           source: "starter",
@@ -162,15 +172,16 @@ export function buildStarterTemplate(args: { goal: StarterGoal; tone: WriterTone
       case "professional":
         return {
           name: "Co-Market Partnership (professional)",
-          subject: `FocusRealm & ${company} — Strategic Partnership Opportunity`,
+          subject: `FocusRealm & ${company} — Strategic Collaboration Opportunity`,
           body: [
-            `Hello ${first},`,
+            has("greetingLine") ? "{{greetingLine|Hello there,}}" : `Hello ${first},`,
             "I am reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
-            `${company}'s focus on ${whatText} presents an interesting opportunity to explore a complementary partnership.`,
-            `{{partnerComplement|${defaultComplementProf}}}`,
-            `We would be interested in exploring a small referral or pilot initiative around ${oppText} before considering anything more extensive.`,
-            "Would you or someone from your leadership team be available for a 15–20 minute conversation with Sehej to assess mutual fit?",
-            `Best regards,\n${foundersSignOff}`,
+            `We see a meaningful opportunity for ${company} and FocusRealm to collaborate by combining ${partnerStrengthTag} with technology that ensures frontline operational consistency.`,
+            `${company} focuses on ${whatText}. At FocusRealm, we developed Mise Hotel to help properties translate service standards and operating procedures into assigned, verified daily tasks.`,
+            `We believe our capabilities naturally complement each other. ${partnerComplementProf}`,
+            `We would be interested in exploring a joint ${oppText} initiative, pairing ${partnerOfferingTag} with an operational execution pilot from FocusRealm to deliver end-to-end value for hotel clients.`,
+            "Would you or someone from your leadership team be available for a 20-minute introductory conversation with Sehej to assess mutual fit?",
+            `Thank you for your consideration.\n\nBest regards,\n${foundersSignOff}`,
           ].join("\n\n"),
           warnings: [],
           source: "starter",
@@ -181,11 +192,11 @@ export function buildStarterTemplate(args: { goal: StarterGoal; tone: WriterTone
           name: "Co-Market Partnership (short and direct)",
           subject: `Complementary fit for ${company}`,
           body: [
-            `Hi ${first},`,
+            coMarketGreeting,
             "I'm reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
-            `Given ${company}'s work across ${whatText}, we see a natural way to complement what you already deliver to hotels without any operational overlap.`,
-            `{{partnerComplement|${defaultComplementConcise}}} We'd love to explore a simple referral or pilot around ${oppText} for mutual hotel clients.`,
-            "Would you have 15 minutes for a short introductory call with Sehej next week?",
+            `We see a direct way for ${company} and FocusRealm to collaborate by connecting ${whatText} with our Mise Hotel frontline execution platform.`,
+            `${partnerComplementConcise} We would love to explore a joint ${oppText} initiative for mutual hotel clients without any operational overlap.`,
+            "Would you be open to a 15-minute call with Sehej next week to explore whether there's a good fit?",
             `Best,\n${foundersSignOff}`,
           ].join("\n\n"),
           warnings: [],
@@ -195,13 +206,14 @@ export function buildStarterTemplate(args: { goal: StarterGoal; tone: WriterTone
       case "upbeat":
         return {
           name: "Co-Market Partnership (upbeat)",
-          subject: `Excited about ${company} — exploring joint synergy!`,
+          subject: `Teaming up with ${company} — operational synergy!`,
           body: [
-            `Hi ${first}!`,
+            has("greetingLine") ? "{{greetingLine|Hi there!}}" : `Hi ${first}!`,
             "I’m reaching out from the Founder’s Office at FocusRealm on behalf of Sehej Sharma.",
-            `We’ve been following the fantastic work ${company} is doing across ${whatText}!`,
-            `{{partnerComplement|${defaultComplementUpbeat}}} That’s why we’re excited about the idea of teaming up around ${oppText} to offer a complete experience beyond the booking for selected properties.`,
-            "Would you be open to a quick 15-minute chat with Sehej to brainstorm what a collaboration could look like?",
+            `We love what ${company} is building across ${whatText}, and we see a great opportunity to team up!`,
+            `At FocusRealm, our Mise Hotel platform helps hotels verify daily service execution on the floor. ${partnerComplementUpbeat}`,
+            `We’d love to explore a joint ${oppText} initiative, combining your expertise with an operational pilot from FocusRealm for selected properties.`,
+            "Would you be open to a quick 15–20 minute chat with Sehej to explore what a pilot could look like?",
             `Cheers,\n${foundersSignOff}`,
           ].join("\n\n"),
           warnings: [],

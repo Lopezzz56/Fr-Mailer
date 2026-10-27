@@ -7,7 +7,10 @@ import { recoverInterruptedSends, SendWorker } from "./services/send-worker.js";
 import { InboxMonitor } from "./services/inbox-monitor.js";
 import { closeTransport } from "./services/mailer.js";
 
-const worker = new SendWorker();
+export const worker = new SendWorker();
+export function wakeWorker() {
+  worker.wake();
+}
 const inbox = new InboxMonitor();
 
 async function main() {

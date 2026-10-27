@@ -2,8 +2,7 @@
 // Apply changes with: npx prisma migrate dev --name <change>
 
 generator client {
-  provider = "prisma-client-js"
-  // native = your machine; rhel-openssl-3.0.x = Vercel's Node.js runtime
+  provider      = "prisma-client-js"
   binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 

@@ -33,11 +33,27 @@ export const contactInclude = {
 
 type ContactRow = Prisma.ContactGetPayload<{ include: typeof contactInclude }>;
 
+let cachedSuppressions: { map: Map<string, { reason: any; createdAt: Date }>; expiresAt: number } | null = null;
+const SUPPRESSIONS_CACHE_TTL_MS = 60_000;
+
+export function invalidateSuppressionsCache(): void {
+  cachedSuppressions = null;
+}
+
+export async function getSuppressionMap(): Promise<Map<string, { reason: any; createdAt: Date }>> {
+  const now = Date.now();
+  if (cachedSuppressions && cachedSuppressions.expiresAt > now) {
+    return cachedSuppressions.map;
+  }
+  const all = await prisma.suppressionEntry.findMany({ select: { email: true, reason: true, createdAt: true } });
+  const map = new Map(all.map((s) => [s.email.toLowerCase(), { reason: s.reason, createdAt: s.createdAt }]));
+  cachedSuppressions = { map, expiresAt: now + SUPPRESSIONS_CACHE_TTL_MS };
+  return map;
+}
+
 export async function toContactDtos(rows: ContactRow[]): Promise<ContactDto[]> {
-  const suppressions = rows.length
-    ? await prisma.suppressionEntry.findMany({ where: { email: { in: rows.map((r) => r.email) } } })
-    : [];
-  const byEmail = new Map(suppressions.map((s) => [s.email.toLowerCase(), s]));
+  if (!rows.length) return [];
+  const byEmail = await getSuppressionMap();
   return rows.map((c) => {
     const s = byEmail.get(c.email.toLowerCase());
     return {
@@ -117,6 +133,14 @@ export const campaignInclude = {
   _count: { select: { recipientOverrides: true } },
 } satisfies Prisma.CampaignInclude;
 
+export const campaignSummaryInclude = {
+  template: { select: { id: true, name: true, subject: true, version: true } },
+  contactList: { select: { id: true, name: true, _count: { select: { members: true } } } },
+  createdBy: userRef,
+  approvedByUser: userRef,
+} satisfies Prisma.CampaignInclude;
+
+export type CampaignSummaryRow = Prisma.CampaignGetPayload<{ include: typeof campaignSummaryInclude }>;
 type CampaignRow = Prisma.CampaignGetPayload<{ include: typeof campaignInclude }>;
 
 const emptyCounts = (): CampaignCounts => ({
@@ -136,29 +160,44 @@ export async function loadCampaignCounts(campaignIds: string[]): Promise<Map<str
   const map = new Map<string, CampaignCounts>(campaignIds.map((id) => [id, emptyCounts()]));
   if (!campaignIds.length) return map;
 
-  const [byStatus, engagement] = await Promise.all([
-    prisma.send.groupBy({ by: ["campaignId", "status"], where: { campaignId: { in: campaignIds } }, _count: { _all: true } }),
-    prisma.$queryRaw<{ campaignId: string; bounced: bigint; replied: bigint; unsubscribed: bigint }[]>`
-      SELECT "campaignId",
-             COUNT("bouncedAt") AS bounced,
-             COUNT("repliedAt") AS replied,
-             COUNT("unsubscribedAt") AS unsubscribed
-      FROM sends WHERE "campaignId" = ANY(${campaignIds}) GROUP BY "campaignId"`,
-  ]);
+  const rows = await prisma.$queryRaw<{
+    campaignId: string;
+    total: bigint;
+    pending: bigint;
+    sent: bigint;
+    failed: bigint;
+    unknown: bigint;
+    skipped: bigint;
+    cancelled: bigint;
+    bounced: bigint;
+    replied: bigint;
+    unsubscribed: bigint;
+  }[]>`
+    SELECT "campaignId",
+           COUNT(*) as total,
+           COUNT(*) FILTER (WHERE status IN ('PENDING', 'CLAIMED')) as pending,
+           COUNT(*) FILTER (WHERE status = 'SENT') as sent,
+           COUNT(*) FILTER (WHERE status = 'FAILED') as failed,
+           COUNT(*) FILTER (WHERE status = 'UNKNOWN') as unknown,
+           COUNT(*) FILTER (WHERE status = 'SKIPPED') as skipped,
+           COUNT(*) FILTER (WHERE status = 'CANCELLED') as cancelled,
+           COUNT("bouncedAt") as bounced,
+           COUNT("repliedAt") as replied,
+           COUNT("unsubscribedAt") as unsubscribed
+    FROM sends
+    WHERE "campaignId" = ANY(${campaignIds})
+    GROUP BY "campaignId"`;
 
-  for (const row of byStatus) {
-    const c = map.get(row.campaignId)!;
-    const n = row._count._all;
-    c.total += n;
-    if (row.status === "PENDING" || row.status === "CLAIMED") c.pending += n;
-    else if (row.status === "SENT") c.sent += n;
-    else if (row.status === "FAILED") c.failed += n;
-    else if (row.status === "UNKNOWN") c.unknown += n;
-    else if (row.status === "SKIPPED") c.skipped += n;
-    else if (row.status === "CANCELLED") c.cancelled += n;
-  }
-  for (const row of engagement) {
-    const c = map.get(row.campaignId)!;
+  for (const row of rows) {
+    const c = map.get(row.campaignId);
+    if (!c) continue;
+    c.total = Number(row.total);
+    c.pending = Number(row.pending);
+    c.sent = Number(row.sent);
+    c.failed = Number(row.failed);
+    c.unknown = Number(row.unknown);
+    c.skipped = Number(row.skipped);
+    c.cancelled = Number(row.cancelled);
     c.bounced = Number(row.bounced);
     c.replied = Number(row.replied);
     c.unsubscribed = Number(row.unsubscribed);
@@ -166,7 +205,7 @@ export async function loadCampaignCounts(campaignIds: string[]): Promise<Map<str
   return map;
 }
 
-export function toCampaignSummary(c: CampaignRow, counts: CampaignCounts): CampaignSummaryDto {
+export function toCampaignSummary(c: CampaignSummaryRow | CampaignRow, counts: CampaignCounts): CampaignSummaryDto {
   return {
     id: c.id,
     name: c.name,
@@ -185,7 +224,7 @@ export function toCampaignSummary(c: CampaignRow, counts: CampaignCounts): Campa
   };
 }
 
-export async function toCampaignSummaries(rows: CampaignRow[]): Promise<CampaignSummaryDto[]> {
+export async function toCampaignSummaries(rows: (CampaignSummaryRow | CampaignRow)[]): Promise<CampaignSummaryDto[]> {
   const counts = await loadCampaignCounts(rows.map((r) => r.id));
   return rows.map((r) => toCampaignSummary(r, counts.get(r.id)!));
 }

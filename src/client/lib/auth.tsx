@@ -25,24 +25,56 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 export const meQueryKey = ["auth", "me"] as const;
 
+const USER_STORAGE_KEY = "fr_auth_user";
+
+function getCachedUser(): SessionUser | null {
+  try {
+    const raw = localStorage.getItem(USER_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function setCachedUser(user: SessionUser | null) {
+  try {
+    if (user) localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
+    else localStorage.removeItem(USER_STORAGE_KEY);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 async function fetchMe(): Promise<SessionUser | null> {
   try {
-    return (await api.get<SessionUser>("/api/auth/me")).data;
+    const user = (await api.get<SessionUser>("/api/auth/me")).data;
+    setCachedUser(user);
+    return user;
   } catch (err) {
-    if (err instanceof ApiError && err.status === 401) return null;
+    if (err instanceof ApiError && err.status === 401) {
+      setCachedUser(null);
+      return null;
+    }
     throw err;
   }
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
-  const me = useQuery({ queryKey: meQueryKey, queryFn: fetchMe, staleTime: 60_000, retry: 1 });
+  const me = useQuery({
+    queryKey: meQueryKey,
+    queryFn: fetchMe,
+    initialData: () => getCachedUser() ?? undefined,
+    staleTime: 60_000,
+    retry: 1,
+  });
   const [signedOut, setSignedOut] = useState(false);
 
   const login = useMutation({
     mutationFn: (input: LoginInput) => api.post<SessionUser>("/api/auth/login", input),
     onSuccess: (res) => {
       setSignedOut(false);
+      setCachedUser(res.data);
       qc.setQueryData(meQueryKey, res.data);
     },
   });
@@ -50,6 +82,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     mutationFn: () => api.post("/api/auth/logout"),
     onSettled: () => {
       setSignedOut(true);
+      setCachedUser(null);
       qc.clear();
       qc.setQueryData(meQueryKey, null);
     },

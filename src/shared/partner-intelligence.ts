@@ -36,6 +36,9 @@ export interface PartnershipReasoning {
   complementaryAngle: string;
   partnershipProposal: string;
   initiativeHeadline: string;
+  partnerStrength: string;
+  partnerOutcome: string;
+  partnerOffering: string;
   isCautious: boolean;
   rationalSummary: string;
 }
@@ -208,7 +211,11 @@ export function understandRecipientCompany(contact: {
         coreActivity = "hospitality talent recruitment and job placement";
         break;
       case "marketing_agency":
-        coreActivity = "hospitality marketing, PR, content and guest acquisition";
+        if (/digital\s+marketing.*hotel[\s-]?operations/i.test(aboutText)) {
+          coreActivity = "hospitality marketing for independent hotels and resorts, combining digital marketing with hotel-operations experience";
+        } else {
+          coreActivity = "hospitality marketing, PR, content and guest acquisition";
+        }
         break;
       case "hotel_technology":
         coreActivity = "hospitality technology and system integrations";
@@ -298,10 +305,16 @@ export function reasonPartnershipOpportunity(
 
   let complementaryAngle = "";
   let partnershipProposal = "";
+  let partnerStrength = "specialized hospitality expertise";
+  let partnerOutcome = "deliver specialized services to properties";
+  let partnerOffering = `a specialized service assessment from ${company}`;
   let isCautious = false;
 
   switch (understanding.domain) {
     case "guest_analytics":
+      partnerStrength = "real-time guest sentiment and feedback intelligence";
+      partnerOutcome = "capture real-time guest sentiment and surface feedback gaps";
+      partnerOffering = `a guest sentiment audit from ${company}`;
       complementaryAngle =
         `At FocusRealm, our Mise Hotel platform helps properties verify frontline task execution on the floor. While ${company} captures real-time guest sentiment and surfaces feedback gaps, Mise Hotel ensures those insights immediately translate into assigned, verified operational tasks for frontline hotel teams.`;
       partnershipProposal =
@@ -310,6 +323,9 @@ export function reasonPartnershipOpportunity(
       break;
 
     case "revenue_management":
+      partnerStrength = "hotel revenue strategy and pricing optimization";
+      partnerOutcome = "optimize pricing, distribution and RevPAR";
+      partnerOffering = `a commercial revenue assessment from ${company}`;
       complementaryAngle =
         `At FocusRealm, we help hotels strengthen frontline service execution and operational consistency through our Mise Hotel platform. We see a strong opportunity to connect revenue-growth initiatives with operational consistency, helping hotel clients safeguard their guest ratings and commercial performance.`;
       partnershipProposal =
@@ -318,6 +334,9 @@ export function reasonPartnershipOpportunity(
       break;
 
     case "staff_training":
+      partnerStrength = "hospitality service training and staff development";
+      partnerOutcome = "equip frontline teams with essential service standards";
+      partnerOffering = `a service standards assessment from ${company}`;
       complementaryAngle =
         `At FocusRealm, our Mise Hotel platform focuses on verified daily service execution. While your programs equip frontline teams with essential service standards, Mise Hotel provides the mobile execution platform to verify daily task execution and accountability across properties.`;
       partnershipProposal =
@@ -326,6 +345,9 @@ export function reasonPartnershipOpportunity(
       break;
 
     case "talent_recruitment":
+      partnerStrength = "hospitality talent recruitment and staffing";
+      partnerOutcome = "recruit and place qualified hospitality talent";
+      partnerOffering = `a talent placement review from ${company}`;
       complementaryAngle =
         `At FocusRealm, our Mise Hotel platform helps hotel teams execute brand standards consistently. While ${company} helps properties recruit and place great hospitality talent, Mise Hotel provides newly placed teams with clear mobile SOP workflows to ensure consistent service execution from day one.`;
       partnershipProposal =
@@ -334,14 +356,20 @@ export function reasonPartnershipOpportunity(
       break;
 
     case "marketing_agency":
+      partnerStrength = "hotel marketing and direct-booking growth";
+      partnerOutcome = "attract guests and increase direct bookings";
+      partnerOffering = `a direct-booking audit from ${company}`;
       complementaryAngle =
         `At FocusRealm, we're focused on helping hotels improve frontline service execution and operational consistency. While your work helps hotels strengthen their visibility and guest acquisition, we could potentially help those same properties deliver a more consistent guest experience once guests arrive.`;
       partnershipProposal =
         initiativeHeadline ||
-        '"Guest Experience Beyond the Booking", combining hospitality marketing with operational readiness for selected hotel clients';
+        '"More Bookings, Better Operations", combining a direct-booking audit from ' + company + ' with an operational execution pilot from FocusRealm';
       break;
 
     case "hotel_technology":
+      partnerStrength = "hotel technology solutions and system workflows";
+      partnerOutcome = "power core hotel management systems";
+      partnerOffering = `a system workflow evaluation from ${company}`;
       complementaryAngle =
         `At FocusRealm, we developed Mise Hotel as a frontline task execution platform. We see an interesting opportunity to explore a potential integration or complementary offering combining your technology solutions with our mobile frontline task execution platform.`;
       partnershipProposal =
@@ -350,6 +378,9 @@ export function reasonPartnershipOpportunity(
       break;
 
     case "operations_consulting":
+      partnerStrength = "hospitality quality audits and operational consulting";
+      partnerOutcome = "identify operational gaps and audit requirements";
+      partnerOffering = `an operational quality audit from ${company}`;
       complementaryAngle =
         `At FocusRealm, our Mise Hotel platform helps properties translate quality standards into daily floor execution. While ${company} identifies operational gaps and audit requirements, Mise Hotel helps hotels track corrective actions and verify daily completion.`;
       partnershipProposal =
@@ -359,6 +390,9 @@ export function reasonPartnershipOpportunity(
 
     default:
       isCautious = true;
+      partnerStrength = "specialized hospitality expertise";
+      partnerOutcome = "deliver specialized domain expertise to properties";
+      partnerOffering = `a specialized service audit from ${company}`;
       complementaryAngle =
         `At FocusRealm, our Mise Hotel platform is dedicated to helping hospitality teams translate operational standards into verified daily tasks. Given ${company}'s presence in the industry, we see an opportunity to explore whether our frontline execution platform could complement what you deliver to clients without any operational overlap.`;
       partnershipProposal =
@@ -371,7 +405,10 @@ export function reasonPartnershipOpportunity(
     domain: understanding.domain,
     complementaryAngle,
     partnershipProposal,
-    initiativeHeadline: initiativeHeadline || partnershipProposal,
+    initiativeHeadline: initiativeHeadline || (understanding.domain === "marketing_agency" ? '"More Bookings, Better Operations"' : partnershipProposal),
+    partnerStrength,
+    partnerOutcome,
+    partnerOffering,
     isCautious,
     rationalSummary: `${understanding.companyName} (${understanding.domainLabel}) complements FocusRealm via: ${complementaryAngle.slice(0, 100)}...`,
   };
@@ -406,6 +443,8 @@ export function synthesizeRecipientPersonalization(
       ? (contact.customFields as Record<string, unknown>)
       : {};
 
+  const greetingLine = normFirst ? `Hi ${normFirst},` : `Dear ${understanding.companyName || "Team"} Team,`;
+
   const mergeData: MergeData = {
     ...custom,
     email: contact.email,
@@ -419,9 +458,14 @@ export function synthesizeRecipientPersonalization(
     contactPersona: contact.contactPersona ?? undefined,
 
     // High-fidelity synthesized fields:
+    greetingLine,
     whatItDoes: understanding.coreActivity,
     aboutCompany: understanding.coreActivity,
     servicesProvided: understanding.coreActivity,
+    partnerStrength: reasoning.partnerStrength,
+    partnerOutcome: reasoning.partnerOutcome,
+    partnerOffering: reasoning.partnerOffering,
+    initiativeHeadline: reasoning.initiativeHeadline,
     partnerComplement: reasoning.complementaryAngle,
     partnerProposal: reasoning.partnershipProposal,
     partnershipOpportunity: reasoning.partnershipProposal,

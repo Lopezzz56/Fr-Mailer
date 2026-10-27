@@ -7,7 +7,7 @@ import { asyncHandler, AppError } from "../middleware/error-handler.js";
 import { requirePermission } from "../middleware/session.js";
 import { audit } from "../lib/audit.js";
 import { ok, okPage, searchParam, skipTake } from "../lib/http.js";
-import { campaignInclude, toCampaignDetail, toCampaignSummaries, toSendDto } from "../lib/serialize.js";
+import { campaignInclude, campaignSummaryInclude, toCampaignDetail, toCampaignSummaries, toSendDto } from "../lib/serialize.js";
 import {
   approveCampaign,
   assertEditable,
@@ -79,7 +79,7 @@ router.get(
       ...(status ? { status } : {}),
       ...(search ? { name: { contains: search, mode: "insensitive" } } : {}),
     };
-    const campaigns = await prisma.campaign.findMany({ where, include: campaignInclude, orderBy: { updatedAt: "desc" }, take: 200 });
+    const campaigns = await prisma.campaign.findMany({ where, include: campaignSummaryInclude, orderBy: { updatedAt: "desc" }, take: 200 });
     ok(res, await toCampaignSummaries(campaigns));
   })
 );

@@ -6,32 +6,54 @@ import { asyncHandler, AppError } from "../middleware/error-handler.js";
 import { requirePermission } from "../middleware/session.js";
 import { ok, okPage, skipTake } from "../lib/http.js";
 import { summarize } from "../lib/activity.js";
-import { campaignInclude, toCampaignSummaries } from "../lib/serialize.js";
+import { campaignSummaryInclude, toCampaignSummaries } from "../lib/serialize.js";
 import { sentInLast24h } from "../services/send-worker.js";
 import { verifyMailbox } from "../services/mailer.js";
 import { checkInbox, getImapState } from "../services/inbox-monitor.js";
 import { PaginationQuerySchema, type ActivityDto, type MailboxStatusDto, type OverviewDto } from "../../shared/types.js";
+
+let cachedOverview: { data: OverviewDto; expiresAt: number } | null = null;
+const OVERVIEW_CACHE_TTL_MS = 15_000;
+
+export function invalidateOverviewCache(): void {
+  cachedOverview = null;
+}
 
 export const overviewRouter = Router();
 
 overviewRouter.get(
   "/",
   asyncHandler(async (_req, res) => {
-    const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const [contacts, lists, templates, suppressed, sent24h, active, recent, attention, last30] = await Promise.all([
-      prisma.contact.count(),
-      prisma.contactList.count(),
-      prisma.template.count(),
-      prisma.suppressionEntry.count(),
+    const now = Date.now();
+    if (cachedOverview && cachedOverview.expiresAt > now) {
+      return ok(res, cachedOverview.data);
+    }
+
+    const since30 = new Date(now - 30 * 24 * 60 * 60 * 1000);
+    const [countsRaw, sent24h, active, recent, attention, last30] = await Promise.all([
+      prisma.$queryRaw<{ contacts: bigint; lists: bigint; templates: bigint; suppressed: bigint }[]>`
+        SELECT
+          (SELECT COUNT(*) FROM contacts) AS contacts,
+          (SELECT COUNT(*) FROM contact_lists) AS lists,
+          (SELECT COUNT(*) FROM templates) AS templates,
+          (SELECT COUNT(*) FROM suppression_entries) AS suppressed`,
       sentInLast24h(),
-      prisma.campaign.findMany({ where: { status: { in: ["PENDING_APPROVAL", "APPROVED", "SENDING", "PAUSED"] } }, include: campaignInclude, orderBy: { updatedAt: "desc" } }),
-      prisma.campaign.findMany({ where: { status: { in: ["DRAFT", "COMPLETED", "CANCELLED"] } }, include: campaignInclude, orderBy: { updatedAt: "desc" }, take: 5 }),
+      prisma.campaign.findMany({ where: { status: { in: ["PENDING_APPROVAL", "APPROVED", "SENDING", "PAUSED"] } }, include: campaignSummaryInclude, orderBy: { updatedAt: "desc" } }),
+      prisma.campaign.findMany({ where: { status: { in: ["DRAFT", "COMPLETED", "CANCELLED"] } }, include: campaignSummaryInclude, orderBy: { updatedAt: "desc" }, take: 5 }),
       prisma.send.groupBy({ by: ["campaignId", "status"], where: { status: { in: ["FAILED", "UNKNOWN"] } }, _count: { _all: true } }),
       prisma.$queryRaw<{ sent: bigint; bounced: bigint; replied: bigint; unsubscribed: bigint }[]>`
         SELECT COUNT(*) FILTER (WHERE status = 'SENT') AS sent, COUNT("bouncedAt") AS bounced,
                COUNT("repliedAt") AS replied, COUNT("unsubscribedAt") AS unsubscribed
         FROM sends WHERE "sentAt" > ${since30}`,
     ]);
+
+    const countsRow = countsRaw[0] ?? { contacts: 0n, lists: 0n, templates: 0n, suppressed: 0n };
+    const counts = {
+      contacts: Number(countsRow.contacts),
+      lists: Number(countsRow.lists),
+      templates: Number(countsRow.templates),
+      suppressed: Number(countsRow.suppressed),
+    };
 
     const activeSummaries = await toCampaignSummaries(active);
     const issueByCampaign = new Map<string, { failed: number; unknown: number }>();
@@ -45,7 +67,7 @@ overviewRouter.get(
 
     const t = last30[0];
     const data: OverviewDto = {
-      counts: { contacts, lists, templates, suppressed },
+      counts,
       mailbox: { smtpConfigured, liveSendingEnabled: !liveSendingBlocker(), liveSendingBlocker: liveSendingBlocker(), dailyLimit: env.DAILY_SEND_LIMIT, sentLast24h: sent24h },
       awaitingApproval: activeSummaries.filter((c) => c.status === "PENDING_APPROVAL"),
       inProgress: activeSummaries.filter((c) => c.status !== "PENDING_APPROVAL"),
@@ -53,6 +75,8 @@ overviewRouter.get(
       recent: await toCampaignSummaries(recent),
       last30Days: { sent: Number(t?.sent ?? 0), bounced: Number(t?.bounced ?? 0), replied: Number(t?.replied ?? 0), unsubscribed: Number(t?.unsubscribed ?? 0) },
     };
+
+    cachedOverview = { data, expiresAt: now + OVERVIEW_CACHE_TTL_MS };
     ok(res, data);
   })
 );

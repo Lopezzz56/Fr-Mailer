@@ -11,6 +11,7 @@ import { ok, okPage, searchParam, skipTake } from "../lib/http.js";
 import { contactInclude, toContactDtos, toSendDto } from "../lib/serialize.js";
 import { parseWorkbook, planImport, runImport, selectSheet, suggestMapping, validateMapping } from "../services/contact-import.js";
 import { computeImportQuality, detectProspectListType } from "../services/classification.js";
+import { invalidateOverviewCache } from "./overview.js";
 import {
   ALL_SHEETS,
   ContactInputSchema,
@@ -32,6 +33,15 @@ function requireFile(file: Express.Multer.File | undefined): Express.Multer.File
 
 // ---------------------------------------------------------------------------
 // List & search
+let cachedDefaultContacts: { data: any[]; total: number; expiresAt: number } | null = null;
+let cachedContactFields: { data: { name: string; count: number }[]; expiresAt: number } | null = null;
+const CONTACTS_CACHE_TTL_MS = 20_000;
+
+export function invalidateContactsCache(): void {
+  cachedDefaultContacts = null;
+  cachedContactFields = null;
+}
+
 // ---------------------------------------------------------------------------
 
 router.get(
@@ -41,6 +51,12 @@ router.get(
     const search = searchParam(req.query.search);
     const listId = searchParam(req.query.listId);
     const filter = searchParam(req.query.filter); // "suppressed" | "no_list"
+
+    const isDefaultQuery = !search && !listId && !filter && page === 1 && pageSize === 25;
+    const now = Date.now();
+    if (isDefaultQuery && cachedDefaultContacts && cachedDefaultContacts.expiresAt > now) {
+      return okPage(res, cachedDefaultContacts.data, page, pageSize, cachedDefaultContacts.total);
+    }
 
     const where: Prisma.ContactWhereInput = {};
     if (search) {
@@ -57,7 +73,11 @@ router.get(
       prisma.contact.findMany({ where, include: contactInclude, orderBy: { importedAt: "desc" }, ...skipTake(page, pageSize) }),
       prisma.contact.count({ where }),
     ]);
-    okPage(res, await toContactDtos(rows), page, pageSize, total);
+    const dtos = await toContactDtos(rows);
+    if (isDefaultQuery) {
+      cachedDefaultContacts = { data: dtos, total, expiresAt: now + CONTACTS_CACHE_TTL_MS };
+    }
+    okPage(res, dtos, page, pageSize, total);
   })
 );
 
@@ -65,10 +85,16 @@ router.get(
 router.get(
   "/fields",
   asyncHandler(async (_req, res) => {
+    const now = Date.now();
+    if (cachedContactFields && cachedContactFields.expiresAt > now) {
+      return ok(res, cachedContactFields.data);
+    }
     const rows = await prisma.$queryRaw<{ key: string; count: bigint }[]>`
       SELECT key, COUNT(*) AS count FROM contacts, jsonb_object_keys("customFields") AS key
       GROUP BY key ORDER BY count DESC, key LIMIT 100`;
-    ok(res, rows.map((r) => ({ name: r.key, count: Number(r.count) })));
+    const data = rows.map((r) => ({ name: r.key, count: Number(r.count) }));
+    cachedContactFields = { data, expiresAt: now + 60_000 };
+    ok(res, data);
   })
 );
 

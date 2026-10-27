@@ -24,7 +24,19 @@ type DraftInput = z.output<typeof TemplateDraftRequestSchema>;
 // What the workspace can personalize with
 // ---------------------------------------------------------------------------
 
+let cachedWriterFields: { data: { totalContacts: number; fields: WriterField[] }; expiresAt: number } | null = null;
+const WRITER_FIELDS_CACHE_TTL_MS = 60_000;
+
+export function invalidateWriterFieldsCache(): void {
+  cachedWriterFields = null;
+}
+
 export async function writerFields(): Promise<{ totalContacts: number; fields: WriterField[] }> {
+  const now = Date.now();
+  if (cachedWriterFields && cachedWriterFields.expiresAt > now) {
+    return cachedWriterFields.data;
+  }
+
   const [counts] = await prisma.$queryRaw<{ total: bigint; firstName: bigint; lastName: bigint; company: bigint; title: bigint; phone: bigint }[]>`
     SELECT COUNT(*) AS total,
       COUNT(NULLIF(TRIM("firstName"), '')) AS "firstName",
@@ -48,13 +60,15 @@ export async function writerFields(): Promise<{ totalContacts: number; fields: W
     ["title", share(counts?.title)],
     ["phone", share(counts?.phone)],
   ];
-  return {
+  const result = {
     totalContacts: total,
     fields: [
       ...standard.map(([name, coverage]) => ({ name, label: STANDARD_FIELD_LABELS[name] ?? name, coverage, custom: false })),
       ...custom.map((c) => ({ name: c.key, label: c.key, coverage: share(c.count), custom: true })),
     ],
   };
+  cachedWriterFields = { data: result, expiresAt: now + WRITER_FIELDS_CACHE_TTL_MS };
+  return result;
 }
 
 export async function writerContext(): Promise<WriterContextDto> {
@@ -66,57 +80,37 @@ export async function writerContext(): Promise<WriterContextDto> {
 // Prompt
 // ---------------------------------------------------------------------------
 
-const SYSTEM_INSTRUCTION = `You write email templates for FocusRealm Mail Merge, a tool that sends one personalised copy of a template to each contact in a list.
+const SYSTEM_INSTRUCTION = `You write high-converting, professional email templates for FocusRealm Mail Merge, a tool that personalizes outreach for hotel partnerships, executive networking, and co-marketing initiatives.
 
-Write like a thoughtful executive, not a generic marketer: specific, plain, friendly, no hype, no clichés ("I hope this email finds you well", "game-changer"), no exclamation-mark pile-ups.
+10 CORE PRINCIPLES OF FOCUSREALM OUTREACH:
+1. Natural, conversational language: Sound like a thoughtful, real businessperson initiating a conversation, not a formal partnership proposal assembled from standard phrases. Avoid repetitive clichés like "presents an interesting opportunity to explore a complementary partnership".
+2. Clear connection between companies: Naturally explain why FocusRealm is reaching out to this particular company so the reader understands immediately.
+3. Meaningful partnership rationale: Explain the relationship between capabilities in simple, logical language. The proposed collaboration should follow naturally from that reasoning.
+4. Concrete but exploratory tone: Give the recipient a clear idea of what working together might look like (e.g. combining an audit with an operational execution pilot), without sounding as though a fixed arrangement has already been decided. Invite discussion.
+5. Strong sense of mutual value: Explain why the collaboration could be useful to both sides and, ultimately, their hotel clients. Focus on complementary strengths (e.g. guest acquisition + operational consistency).
+6. Less repetition across recipients: Keep the introduction, FocusRealm/Mise Hotel explanation, call to action, and signature consistent. But the reasoning for reaching out and the potential collaboration must reflect the individual company's actual business.
+7. Confident but restrained wording: Avoid excessive corporate buzzwords, grand promises, and aggressive pitches. Communicate a credible, practical possibility.
+8. Natural transitions between paragraphs: Build logically: greeting -> who is reaching out on behalf of Sehej Sharma -> why reaching out -> what FocusRealm does (Mise Hotel) -> why the businesses complement each other -> concrete exploratory initiative -> low-pressure call to action.
+9. Genuine personalisation: Use {{greetingLine}} or verified first name, and demonstrate understanding of their business through {{aboutCompany|whatItDoes}} and {{partnerStrength}}.
+10. Consistent, low-pressure call to action: Invite a short 20-minute discussion with Sehej to explore collaboration and identify a suitable hotel for an initial pilot.
 
-TONE GUIDELINES:
-- warm: Warm, personal, conversational, relationship-first. Starts with "Hi {{firstName|there}},", sincere appreciation for their work, respectful and collaborative.
-- professional: Executive, polished, strategic commercial rationale. Starts with "Hello {{firstName|there}},", structured reasoning, focuses on complementary client value and pilot assessment.
-- concise: Short, direct, under 85 words. Zero filler sentences. Respects executive time, rapid value contrast.
-- upbeat: Energetic, enthusiastic, forward-looking ("Hi {{firstName|there}}!"). Celebrates what they build and proposes teaming up.
+BENCHMARK REFERENCE EXAMPLE (GROWGUEST / CO-MARKETING):
+"Dear {{firstName|{{company}} Team}},
 
-CRITICAL RULE FOR CO-MARKETING / PARTNERSHIPS:
-When writing co-marketing or partnership emails (hospitality training, recruitment, creative/PR agencies, hotel tech providers, consultants):
-- DO NOT sell software or pitch a software product.
-- Propose how both companies COMPLEMENT each other (mutual synergy, joint client value, co-marketing content/workshops).
-- Weave in what they do using fields like {{aboutCompany|whatItDoes|servicesProvided}} and the specific partnership angle using fields like {{partnershipOpportunity|personalizationAngle|potentialPartnership}}.
-- Position FocusRealm as an operational-readiness complement (verifying frontline service execution) that enhances what they already deliver for hotels and resorts.
-- Reference the Founder's Office / Sehej Sharma (Founder & CEO of FocusRealm).
+I’m reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.
 
-REFERENCE EXAMPLE 1 (Hospitality Creative / Marketing Agency):
-"Hi {{firstName|there}},
+We see a potential opportunity for {{company|your team}} and FocusRealm to collaborate by combining {{partnerStrength|whatItDoes|hotel marketing and direct-booking growth}} with technology that helps hotels improve operational execution and service consistency.
 
-I'm reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.
+{{company|Your team}} focuses on {{whatItDoes|aboutCompany|hospitality marketing and guest acquisition}}. At FocusRealm, we are building Mise Hotel, a hospitality-focused Service Execution Platform that helps hotels translate SOPs and service standards into assigned tasks, track completion, and improve operational visibility and accountability.
 
-{{company|Your team}}'s work across {{aboutCompany|whatItDoes|servicesProvided|hospitality marketing, PR, content and events}} presents an interesting opportunity for us to explore a complementary partnership.
+We believe these offerings could complement each other. {{partnerComplement|While {{company|your team}} helps hotels attract guests and increase direct bookings, Mise Hotel can help them strengthen the operational processes and service standards that support the guest experience.}}
 
-At FocusRealm, we're focused on helping hotels improve frontline service execution and operational consistency. While your work helps hotels strengthen their visibility and guest acquisition, we could potentially help those same properties deliver a more consistent guest experience once guests arrive.
+We would love to explore a joint {{initiativeHeadline|personalizationAngle|"More Bookings, Better Operations"}} initiative, combining {{partnerOffering|your core services}} with an operational execution pilot from FocusRealm. This could provide hotel clients with a more comprehensive approach to growth and service delivery.
 
-We'd love to explore a joint initiative around {{partnershipOpportunity|personalizationAngle|"Guest Experience Beyond the Booking"}}, combining hospitality marketing with operational readiness for selected hotel clients.
+Would you be available for a brief 20-minute discussion with Sehej to explore a potential collaboration and identify a suitable hotel for an initial pilot?
 
-Would you be open to a 15–20 minute conversation with Sehej to explore whether there's a fit?
+Thank you for your time. We look forward to the possibility of working together.
 
-Best wishes,
-Founder’s Office
-FocusRealm
-https://misehotel.com/
-https://focusrealm.org/"
-
-REFERENCE EXAMPLE 2 (Revenue, Pricing & Commercial Operations):
-"Hello {{firstName|there}},
-
-I am reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.
-
-{{company|Your team}}'s focus on {{aboutCompany|whatItDoes|servicesProvided|hotel revenue, pricing and distribution}} presents an interesting opportunity to explore a complementary partnership.
-
-At FocusRealm, we help hotels strengthen frontline service execution and operational consistency. We believe there may be an opportunity to combine revenue-growth initiatives with operational improvements, helping selected properties focus on both commercial performance and the guest experience.
-
-We'd be interested in exploring a small referral or pilot initiative around {{partnershipOpportunity|personalizationAngle|a collaborative service add-on}} before considering anything more extensive.
-
-Would you or someone from your leadership team be available for a 15–20 minute conversation with Sehej to discuss mutual fit?
-
-Best regards,
 Founder’s Office
 FocusRealm
 https://misehotel.com/
@@ -129,7 +123,7 @@ Personalisation uses merge fields: {{fieldName}} or {{fieldName|fallback}} or ch
 
 Facts: use only what the brief and the example state. Don't invent results, numbers, prices, clients, awards, dates or links. Where a detail is unknown, write around it. Never leave [placeholders].
 
-Format: the body is plain text. Paragraphs are separated by one blank line. No markdown, no bullet symbols, no HTML. End with a short sign-off. Don't add an unsubscribe line or postal address (the platform adds them). The subject is under 60 characters, specific, and not clickbait.`;
+Format: plain text body, paragraphs separated by one blank line. No HTML, no bullet symbols. Subject under 60 characters.`;
 
 export function buildPrompt(input: DraftInput, fields: WriterField[], totalContacts: number): string {
   const fieldLines = fields
@@ -251,4 +245,114 @@ export async function draftWithGemini(
   if (errors.length) throw new AppError("AI_BAD_OUTPUT", `The draft had a broken merge field (${errors[0]}). Try again.`, 502);
 
   return { ...draft, warnings: reviewTemplateDraft(draft, ctx.fields, ctx.totalContacts), source: "gemini", model };
+}
+
+/**
+ * Intelligent deterministic bot drafter.
+ * Follows the 10 core FocusRealm principles and the GrowGuest benchmark example.
+ * Executes seamlessly when Gemini API is unavailable, unconfigured, or rate limited.
+ */
+export function generateBotDraft(
+  input: DraftInput,
+  ctx: { fields: WriterField[]; totalContacts: number }
+): TemplateDraftDto {
+  const has = (name: string) => ctx.fields.some((f) => f.name === name && f.coverage > 0);
+  const companyField = has("company") ? "company" : ctx.fields.find((f) => f.custom && f.coverage > 0 && /company|hotel|organization/i.test(f.name))?.name || "company";
+  const companyTag = `{{${companyField}|your team}}`;
+  const firstTag = has("firstName") ? "{{firstName|there}}" : "there";
+  const signOff = input.signOff?.trim() || "Founder’s Office\nFocusRealm\nhttps://misehotel.com/\nhttps://focusrealm.org/";
+
+  // 1. If an example was provided (e.g. the GrowGuest benchmark or user template):
+  if (input.example && input.example.trim().length > 30) {
+    let body = input.example.trim();
+
+    // Replace specific company names with dynamic merge tag
+    const companyMatch = body.match(/\b(GrowGuest|Concierge Collective|RevOpt Global|HTI India|Webvi Solutions|CleanGreen|Acme|XYZ)\b/gi);
+    if (companyMatch) {
+      const uniqueNames = Array.from(new Set(companyMatch));
+      for (const name of uniqueNames) {
+        body = body.replace(new RegExp(`\\b${name}\\b`, "g"), `{{${companyField}|your team}}`);
+      }
+    }
+
+    // Replace specific greetings with dynamic tag
+    body = body.replace(/^(?:Dear|Hi|Hello)\s+[^,\n]+,/im, `{{greetingLine|Hi ${firstTag},}}`);
+
+    // Parameterize partner strengths / focus if hardcoded in text
+    body = body.replace(/hotel marketing and direct-booking growth/gi, "{{partnerStrength|hotel marketing and direct-booking growth}}");
+    body = body.replace(/hospitality marketing for independent hotels and resorts[^\.\n]*/gi, `{{whatItDoes|aboutCompany|hospitality services}}`);
+    body = body.replace(/“More Bookings, Better Operations”|"More Bookings, Better Operations"/gi, `{{initiativeHeadline|"More Bookings, Better Operations"}}`);
+    body = body.replace(/“Guest Experience Beyond the Booking”|"Guest Experience Beyond the Booking"/gi, `{{initiativeHeadline|"Guest Experience Beyond the Booking"}}`);
+
+    // Normalize quotes around merge tags
+    body = body.replace(/“/g, '"').replace(/”/g, '"');
+
+    // Extract subject if provided
+    let subject = `FocusRealm & ${companyTag} — Collaborative Partnership Opportunity`;
+    const subjectMatch = body.match(/^Subject:\s*(.+)$/im);
+    if (subjectMatch && subjectMatch[1]) {
+      subject = subjectMatch[1].trim();
+      body = body.replace(/^Subject:\s*.+\n+/im, "");
+    }
+
+    if (!body.includes("FocusRealm") || !body.includes("https://")) {
+      body += `\n\n${signOff}`;
+    }
+
+    const draft = {
+      name: "Collaborative Partnership Outreach",
+      subject: subject.slice(0, 100),
+      body: body.replace(/\r\n/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n"),
+    };
+    return {
+      ...draft,
+      warnings: reviewTemplateDraft(draft, ctx.fields, ctx.totalContacts),
+      source: "bot",
+      model: "FocusRealm Template Engine",
+    };
+  }
+
+  // 2. If brief is provided (no example):
+  const isCoMarketOrPartnership = /partner|collaborat|co[\s-]?market|agency|synergy/i.test(input.brief);
+  if (isCoMarketOrPartnership) {
+    const draft = {
+      name: "Collaborative Partnership Outreach",
+      subject: `Exploring a collaborative initiative with ${companyTag}`,
+      body: [
+        `{{greetingLine|Hi ${firstTag},}}`,
+        "I’m reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
+        `We see a potential opportunity for ${companyTag} and FocusRealm to collaborate by combining {{partnerStrength|hotel marketing and direct-booking growth}} with technology that helps hotels improve operational execution and service consistency.`,
+        `${companyTag} focuses on {{whatItDoes|aboutCompany|hospitality services}}. At FocusRealm, we are building Mise Hotel, a hospitality-focused Service Execution Platform that helps hotels translate SOPs and service standards into assigned tasks, track completion, and improve operational visibility and accountability.`,
+        `We believe these offerings could complement each other. {{partnerComplement|While your work helps hotels strengthen their visibility and guest acquisition, Mise Hotel can help them strengthen the operational processes and service standards that support the guest experience.}}`,
+        `We would love to explore a joint {{initiativeHeadline|"More Bookings, Better Operations"}} initiative, combining {{partnerOffering|your core services}} with an operational execution pilot from FocusRealm. This could provide hotel clients with a more comprehensive approach to growth and service delivery.`,
+        "Would you be available for a brief 20-minute discussion with Sehej to explore a potential collaboration and identify a suitable hotel for an initial pilot?",
+        `Thank you for your time. We look forward to the possibility of working together.\n\n${signOff}`,
+      ].join("\n\n"),
+    };
+    return {
+      ...draft,
+      warnings: reviewTemplateDraft(draft, ctx.fields, ctx.totalContacts),
+      source: "bot",
+      model: "FocusRealm Template Engine",
+    };
+  }
+
+  // General brief fallback
+  const draft = {
+    name: "Executive Outreach Template",
+    subject: `Connecting with ${companyTag}`,
+    body: [
+      `{{greetingLine|Hi ${firstTag},}}`,
+      "I’m reaching out on behalf of Sehej Sharma, Founder & CEO of FocusRealm.",
+      input.brief.trim(),
+      `Would you be available for a brief 15–20 minute conversation next week to explore whether there is a fit?`,
+      `Best regards,\n${signOff}`,
+    ].join("\n\n"),
+  };
+  return {
+    ...draft,
+    warnings: reviewTemplateDraft(draft, ctx.fields, ctx.totalContacts),
+    source: "bot",
+    model: "FocusRealm Template Engine",
+  };
 }

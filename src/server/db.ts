@@ -14,11 +14,14 @@ export const prisma =
         : ["error"],
   });
 
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+// Always preserve singleton across serverless requests and hot reloads
+globalForPrisma.prisma = prisma;
 
-// Graceful shutdown
-process.on("beforeExit", async () => {
-  await prisma.$disconnect();
-});
+// Graceful shutdown — avoid on serverless where beforeExit fires on idle event loops
+if (process.env.VERCEL !== "1" && !process.env.AWS_LAMBDA_FUNCTION_NAME) {
+  process.on("beforeExit", async () => {
+    await prisma.$disconnect().catch(() => undefined);
+  });
+}
 
 export default prisma;

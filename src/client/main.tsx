@@ -20,9 +20,10 @@ const queryClient = new QueryClient({
   mutationCache: new MutationCache({ onError: onApiError }),
   defaultOptions: {
     queries: {
-      staleTime: 30_000,
-      refetchOnWindowFocus: true,
+      staleTime: 60_000,
+      refetchOnWindowFocus: false,
       retry: (count, err) => !(err instanceof ApiError && err.status >= 400 && err.status < 500) && count < 2,
+      retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 4000),
     },
   },
 });

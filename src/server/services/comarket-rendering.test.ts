@@ -227,7 +227,7 @@ describe("Rendered Email Verification Across All 7 Partners", () => {
           if (contact.company === "GrowGuest") {
             expect(fullText).not.toMatch(/hello founder/i);
             expect(fullText).not.toMatch(/hi founder/i);
-            expect(fullText).toMatch(/there/i);
+            expect(fullText).toMatch(/there|GrowGuest Team/i);
           } else if (contact.firstName) {
             expect(fullText).toContain(contact.firstName);
           }

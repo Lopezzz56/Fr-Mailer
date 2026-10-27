@@ -12,7 +12,7 @@ import { validateTemplate } from "../../shared/merge.js";
 import { IdSchema, TemplateInputSchema } from "../../shared/types.js";
 import { TemplateDraftRequestSchema } from "../../shared/template-writer.js";
 import { env } from "../config.js";
-import { draftWithGemini, writerContext, writerFields } from "../services/template-ai.js";
+import { draftWithGemini, generateBotDraft, writerContext, writerFields } from "../services/template-ai.js";
 
 const router = Router();
 const withCount = { _count: { select: { campaigns: true } } } as const;
@@ -64,11 +64,19 @@ router.post(
     if (mine >= AI_DRAFTS_PER_HOUR_PER_PERSON) throw new AppError("AI_LIMIT", `You've made ${mine} AI drafts in the last hour. Try again later, or use a starter template.`, 429);
     if (all >= AI_DRAFTS_PER_DAY) throw new AppError("AI_LIMIT", "The workspace reached today's AI draft limit. Try again tomorrow, or use a starter template.", 429);
 
-    const draft = await draftWithGemini(input, await writerFields());
+    const fields = await writerFields();
+    let draft;
+    try {
+      draft = await draftWithGemini(input, fields);
+    } catch (err) {
+      console.warn("[templates] Gemini drafting failed; falling back to intelligent template engine:", (err as Error).message);
+      draft = generateBotDraft(input, fields);
+    }
+
     await audit(req, {
       action: "template.ai_draft",
       entityType: "Template",
-      metadata: { model: env.GEMINI_MODEL, tone: input.tone, length: input.length, briefChars: input.brief.length, withExample: Boolean(input.example), warnings: draft.warnings.length },
+      metadata: { model: draft.model || env.GEMINI_MODEL, tone: input.tone, length: input.length, briefChars: input.brief.length, withExample: Boolean(input.example), warnings: draft.warnings.length },
     });
     ok(res, draft);
   })

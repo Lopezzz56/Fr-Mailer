@@ -166,6 +166,7 @@ export class SendWorker {
   private running = false;
   private loop: Promise<void> | null = null;
   private readonly lastSentAt = new Map<string, number>();
+  private wakeResolve: (() => void) | null = null;
 
   start() {
     if (this.running) return;
@@ -175,19 +176,42 @@ export class SendWorker {
 
   async stop() {
     this.running = false;
+    this.wake();
     await this.loop;
+  }
+
+  wake() {
+    if (this.wakeResolve) {
+      const res = this.wakeResolve;
+      this.wakeResolve = null;
+      res();
+    }
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      let timer: NodeJS.Timeout | null = null;
+      this.wakeResolve = () => {
+        if (timer) clearTimeout(timer);
+        resolve();
+      };
+      timer = setTimeout(() => {
+        this.wakeResolve = null;
+        resolve();
+      }, ms);
+    });
   }
 
   private async run() {
     while (this.running) {
-      let delay = IDLE_DELAY_MS;
+      let delay = 15_000;
       try {
         const result = await this.tick();
-        delay = result === "worked" ? 0 : result === "waiting" ? 250 : result === "limit" ? 30_000 : IDLE_DELAY_MS;
+        delay = result === "worked" ? 0 : result === "waiting" ? 250 : result === "limit" ? 30_000 : 15_000;
       } catch (err) {
         console.error("[worker] tick failed:", (err as Error).message);
       }
-      if (delay) await new Promise((r) => setTimeout(r, delay));
+      if (delay && this.running) await this.sleep(delay);
     }
   }
 

@@ -31,7 +31,7 @@ const EnvSchema = z.object({
         ? `https://${process.env.VERCEL_URL.trim().replace(/\/+$/, "")}`
         : process.env.VERCEL
         ? "https://fr-mailer.vercel.app"
-        : "http://localhost:5173"
+        : "https://fr-mailer.vercel.app"
     ),
   // Signs unsubscribe links. Generate with: openssl rand -hex 32
   APP_SECRET: z.string().min(32, "APP_SECRET must be at least 32 characters"),
@@ -65,7 +65,7 @@ const EnvSchema = z.object({
   // Optional: Google Gemini drafts templates from a brief. Only the brief, an optional example email and
   // merge-field names are sent — never contact data. Get a key at https://aistudio.google.com/apikey
   GEMINI_API_KEY: optionalString,
-  GEMINI_MODEL: z.string().regex(/^[a-z0-9.-]+$/, "GEMINI_MODEL must be a model id like gemini-3.6-flash").default("gemini-3.6-flash"),
+  GEMINI_MODEL: z.string().regex(/^[a-z0-9.-]+$/, "GEMINI_MODEL must be a model id like gemini-1.5-flash").default("gemini-1.5-flash"),
   /** Override only for a proxy or a local test double */
   GEMINI_BASE_URL: z.string().url().default("https://generativelanguage.googleapis.com"),
 });
