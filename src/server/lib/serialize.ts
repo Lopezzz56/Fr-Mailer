@@ -130,6 +130,10 @@ export const campaignInclude = {
     include: { template: { select: { id: true, name: true } } },
     orderBy: { priority: "asc" },
   },
+  sequenceSteps: {
+    include: { template: { select: { id: true, name: true, subject: true } } },
+    orderBy: { stepIndex: "asc" },
+  },
   _count: { select: { recipientOverrides: true } },
 } satisfies Prisma.CampaignInclude;
 
@@ -283,6 +287,23 @@ export async function toCampaignDetail(c: CampaignRow): Promise<CampaignDetailDt
     cancelledAt: iso(c.cancelledAt),
     snapshot: c.subject && c.bodyHtml ? { subject: c.subject, bodyHtml: c.bodyHtml, bodyText: c.bodyText } : null,
     liveSendingBlocker: liveSendingBlocker(),
+    automationMode: c.automationMode,
+    sequenceSteps: c.sequenceSteps.map((st) => ({
+      id: st.id,
+      campaignId: st.campaignId,
+      stepIndex: st.stepIndex,
+      purpose: st.purpose,
+      delayDays: st.delayDays,
+      delayBusinessDaysOnly: st.delayBusinessDaysOnly,
+      subjectMode: st.subjectMode as "THREADED" | "STANDALONE",
+      customSubject: st.customSubject,
+      templateId: st.templateId,
+      templateName: st.template.name,
+      templateSubject: st.template.subject,
+      promptInstructions: st.promptInstructions,
+      createdAt: st.createdAt.toISOString(),
+      updatedAt: st.updatedAt.toISOString(),
+    })),
     templates,
     rules,
     overridesCount: c._count.recipientOverrides,
@@ -293,6 +314,7 @@ export function toSendDto(s: {
   id: string;
   email: string;
   contactId: string | null;
+  subject?: string | null;
   status: SendDto["status"];
   skipReason: string | null;
   attempts: number;
@@ -305,11 +327,17 @@ export function toSendDto(s: {
   templateId?: string | null;
   templateVersion?: number | null;
   assignmentReason?: string | null;
+  stepIndex?: number;
+  scheduledFor?: Date | null;
+  approvedAt?: Date | null;
+  inReplyToId?: string | null;
+  isCustom?: boolean;
 }): SendDto {
   return {
     id: s.id,
     email: s.email,
     contactId: s.contactId,
+    subject: s.subject ?? null,
     status: s.status,
     skipReason: s.skipReason,
     attempts: s.attempts,
@@ -322,6 +350,11 @@ export function toSendDto(s: {
     templateId: s.templateId ?? null,
     templateVersion: s.templateVersion ?? null,
     assignmentReason: s.assignmentReason ?? null,
+    stepIndex: s.stepIndex ?? 0,
+    scheduledFor: iso(s.scheduledFor),
+    approvedAt: iso(s.approvedAt),
+    inReplyToId: s.inReplyToId ?? null,
+    isCustom: Boolean(s.isCustom),
   };
 }
 

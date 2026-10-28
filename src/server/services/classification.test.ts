@@ -17,6 +17,10 @@ describe("classification service", () => {
       expect(normalizeHotelSegment("Beach Resort & Spa")).toBe("RESORT");
       expect(normalizeHotelSegment("Extended Stay Suites")).toBe("EXTENDED_STAY");
       expect(normalizeHotelSegment("Budget Motel")).toBe("BUDGET");
+      expect(normalizeHotelSegment("Institute")).toBe("INSTITUTE");
+      expect(normalizeHotelSegment("University")).toBe("INSTITUTE");
+      expect(normalizeHotelSegment("Co-Partnership")).toBe("CO_PARTNERSHIP");
+      expect(normalizeHotelSegment("Brand Partner")).toBe("CO_PARTNERSHIP");
       expect(normalizeHotelSegment("Random Unknown Name")).toBe("UNKNOWN");
       expect(normalizeHotelSegment(null)).toBe("UNKNOWN");
     });
@@ -32,6 +36,11 @@ describe("classification service", () => {
       expect(normalizeContactPersona("Hotel Tech Manager")).toBe("IT_DIRECTOR");
       expect(normalizeContactPersona("Hotel Owner")).toBe("OWNER_OPERATOR");
       expect(normalizeContactPersona("Financial Controller")).toBe("FINANCE_PROCUREMENT");
+      expect(normalizeContactPersona("Placement Officer")).toBe("PLACEMENT_OFFICER");
+      expect(normalizeContactPersona("Training & Placement Officer")).toBe("PLACEMENT_OFFICER");
+      expect(normalizeContactPersona("TPO")).toBe("PLACEMENT_OFFICER");
+      expect(normalizeContactPersona("Dean of Academics")).toBe("DEAN_DIRECTOR");
+      expect(normalizeContactPersona("Director of Strategic Partnerships")).toBe("PARTNERSHIP_DIRECTOR");
       expect(normalizeContactPersona("Housekeeping Lead")).toBe("UNKNOWN");
     });
   });
@@ -47,6 +56,16 @@ describe("classification service", () => {
       expect(rev.value).toBe("REVENUE_MANAGER");
       expect(rev.status).toBe("GUESSED");
       expect(rev.confidence).toBeGreaterThanOrEqual(0.8);
+
+      const tpo = inferPersonaFromTitle("Head of Training & Placement");
+      expect(tpo.value).toBe("PLACEMENT_OFFICER");
+      expect(tpo.status).toBe("GUESSED");
+
+      const dean = inferPersonaFromTitle("Dean of Hospitality Management");
+      expect(dean.value).toBe("DEAN_DIRECTOR");
+
+      const partner = inferPersonaFromTitle("Head of Brand Alliances & Partnerships");
+      expect(partner.value).toBe("PARTNERSHIP_DIRECTOR");
 
       const unk = inferPersonaFromTitle("");
       expect(unk.value).toBe("UNKNOWN");
@@ -72,6 +91,16 @@ describe("classification service", () => {
 
       const suites = inferSegmentFromCompany("Downtown Extended Stay Suites");
       expect(suites.value).toBe("EXTENDED_STAY");
+
+      const institute = inferSegmentFromCompany("Institute of Hotel Management, Pusa");
+      expect(institute.value).toBe("INSTITUTE");
+      expect(institute.status).toBe("GUESSED");
+
+      const college = inferSegmentFromCompany("Oxford College of Hospitality and Tourism");
+      expect(college.value).toBe("INSTITUTE");
+
+      const partner = inferSegmentFromCompany("Global Tech & Co-Partnerships Inc");
+      expect(partner.value).toBe("CO_PARTNERSHIP");
 
       const unk = inferSegmentFromCompany("XYZ Global Holdings");
       expect(unk.value).toBe("UNKNOWN");

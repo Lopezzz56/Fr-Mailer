@@ -77,12 +77,14 @@ export function classifyIncoming(m: IncomingMessage, ourDomain: string): Classif
   return { type: "reply", messageIds: referenced, snippet };
 }
 
-export type ReplySentiment = "POSITIVE" | "NEGATIVE" | "OUT_OF_OFFICE" | "NEUTRAL";
+export type ReplySentiment = "POSITIVE" | "NEGATIVE" | "OBJECTION" | "OUT_OF_OFFICE" | "UNSUBSCRIBE" | "UNCERTAIN" | "NEUTRAL";
 
 export interface ReplyClassificationResult {
   sentiment: ReplySentiment;
+  category?: "POSITIVE" | "NEGATIVE" | "OBJECTION" | "OUT_OF_OFFICE" | "UNSUBSCRIBE" | "UNCERTAIN";
   confidence: number;
   matchedKeywords: string[];
+  isUnsubscribe?: boolean;
 }
 
 const OUT_OF_OFFICE_PATTERNS = [
@@ -100,21 +102,41 @@ const OUT_OF_OFFICE_PATTERNS = [
   /\bauto-generated\b/i,
 ];
 
-const NEGATIVE_PATTERNS = [
+const UNSUBSCRIBE_PATTERNS = [
   /\bunsubscribe\b/i,
   /\bremove (me|us|my email|this address)\b/i,
   /\bplease remove\b/i,
   /\btake (me|us) off\b/i,
-  /\bnot interested\b/i,
-  /\bno thank(s)?\b/i,
   /\bstop (emailing|contacting|sending|reaching out)\b/i,
   /\bdo not contact\b/i,
+  /\bcease and desist\b/i,
+  /\blose my email\b/i,
+  /\bopt out\b/i,
+];
+
+const OBJECTION_PATTERNS = [
+  /\b(no|lack of|don't have) budget\b/i,
+  /\btoo expensive\b/i,
+  /\balready (using|have|working with|contracted)\b/i,
+  /\bhave an existing (vendor|partner|solution|system)\b/i,
+  /\bnot right now\b/i,
+  /\bbad timing\b/i,
+  /\btiming (is|isn't) (good|right)\b/i,
+  /\bcheck back (in|next) (month|quarter|year|q[1-4])\b/i,
+  /\breach back out\b/i,
+  /\bfocusing on other (priorities|initiatives)\b/i,
+  /\bhappy with our current\b/i,
+];
+
+const NEGATIVE_PATTERNS = [
+  /\bnot interested\b/i,
+  /\bno thank(s)?\b/i,
   /\bwrong person\b/i,
   /\bspam\b/i,
-  /\bcease and desist\b/i,
   /\bnot a good fit\b/i,
   /\bunsolicited\b/i,
-  /\blose my email\b/i,
+  /\bpass on this\b/i,
+  /\bno need\b/i,
 ];
 
 const POSITIVE_PATTERNS = [
@@ -138,54 +160,60 @@ const POSITIVE_PATTERNS = [
 
 export function classifyReplySentiment(text: string, subject = ""): ReplyClassificationResult {
   const combined = `${subject} ${text}`.toLowerCase();
-  const matchedKeywords: string[] = [];
 
   // 1. Check out of office
-  for (const pat of OUT_OF_OFFICE_PATTERNS) {
-    const match = combined.match(pat);
-    if (match) {
-      matchedKeywords.push(match[0]);
-    }
-  }
-  if (matchedKeywords.length > 0) {
+  const oooMatches = OUT_OF_OFFICE_PATTERNS.filter((p) => p.test(combined)).map((p) => combined.match(p)![0]);
+  if (oooMatches.length > 0) {
     return {
       sentiment: "OUT_OF_OFFICE",
       confidence: 0.95,
-      matchedKeywords,
+      matchedKeywords: oooMatches,
     };
   }
 
-  // 2. Check negative opt-outs
-  for (const pat of NEGATIVE_PATTERNS) {
-    const match = combined.match(pat);
-    if (match) {
-      matchedKeywords.push(match[0]);
-    }
+  // 2. Check explicit unsubscribe
+  const unsubMatches = UNSUBSCRIBE_PATTERNS.filter((p) => p.test(combined)).map((p) => combined.match(p)![0]);
+  if (unsubMatches.length > 0) {
+    return {
+      sentiment: "NEGATIVE",
+      category: "UNSUBSCRIBE",
+      isUnsubscribe: true,
+      confidence: 0.98,
+      matchedKeywords: unsubMatches,
+    };
   }
-  if (matchedKeywords.length > 0) {
+
+  // 3. Check objections (timing, budget, existing vendor)
+  const objectionMatches = OBJECTION_PATTERNS.filter((p) => p.test(combined)).map((p) => combined.match(p)![0]);
+  if (objectionMatches.length > 0) {
+    return {
+      sentiment: "OBJECTION",
+      confidence: 0.88,
+      matchedKeywords: objectionMatches,
+    };
+  }
+
+  // 4. Check negative rejection
+  const negativeMatches = NEGATIVE_PATTERNS.filter((p) => p.test(combined)).map((p) => combined.match(p)![0]);
+  if (negativeMatches.length > 0) {
     return {
       sentiment: "NEGATIVE",
       confidence: 0.9,
-      matchedKeywords,
+      matchedKeywords: negativeMatches,
     };
   }
 
-  // 3. Check positive interest
-  for (const pat of POSITIVE_PATTERNS) {
-    const match = combined.match(pat);
-    if (match) {
-      matchedKeywords.push(match[0]);
-    }
-  }
-  if (matchedKeywords.length > 0) {
+  // 5. Check positive interest
+  const positiveMatches = POSITIVE_PATTERNS.filter((p) => p.test(combined)).map((p) => combined.match(p)![0]);
+  if (positiveMatches.length > 0) {
     return {
       sentiment: "POSITIVE",
       confidence: 0.85,
-      matchedKeywords,
+      matchedKeywords: positiveMatches,
     };
   }
 
-  // 4. Default Neutral
+  // 6. Default Neutral / Uncertain
   return {
     sentiment: "NEUTRAL",
     confidence: 0.6,

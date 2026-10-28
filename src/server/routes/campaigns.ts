@@ -26,11 +26,13 @@ import { sentInLast24h } from "../services/send-worker.js";
 import { kickBackground } from "../services/background.js";
 import { getCampaignAnalytics, recordSendOutcome } from "../services/analytics-service.js";
 import { selectTemplateForRecipient, type EligibleTemplate, type SelectionContext } from "../services/template-selection.js";
+import { inferPersonaFromTitle, inferSegmentFromCompany } from "../services/classification.js";
 import { contactMergeData, htmlToText, renderEmail, type TemplateParts } from "../../shared/merge.js";
 import { synthesizeRecipientPersonalization } from "../../shared/partner-intelligence.js";
 import { env } from "../config.js";
 import {
   ApproveInputSchema,
+  CampaignAutomationModeSchema,
   CampaignInputSchema,
   CampaignRecipientOverrideInputSchema,
   CampaignRuleInputSchema,
@@ -38,8 +40,19 @@ import {
   CampaignTemplateInputSchema,
   IdSchema,
   PaginationQuerySchema,
+  SequenceStepInputSchema,
   TestSendInputSchema,
 } from "../../shared/types.js";
+import {
+  approveFollowUpSend,
+  approveAllPendingFollowUps,
+  pauseRecipientSequence,
+  resumeRecipientSequence,
+  stopSequenceForRecipient,
+  stopAllPendingFollowUps,
+  getRecipientSequenceDetails,
+  aiDraftFollowUp,
+} from "../services/sequence-service.js";
 
 const router = Router();
 
@@ -171,6 +184,57 @@ router.post(
     let readyCount = 0;
 
     for (const { contact } of list.members) {
+      const customMap =
+        typeof contact.customFields === "object" && contact.customFields !== null
+          ? (contact.customFields as Record<string, string>)
+          : {};
+
+      let effectiveSegment = contact.hotelSegment;
+      let effectiveSegmentConfidence = contact.hotelSegmentConfidence;
+      let effectiveSegmentStatus = contact.hotelSegmentStatus;
+
+      if (!effectiveSegment || effectiveSegment === "UNKNOWN") {
+        const segInferred = inferSegmentFromCompany(contact.company, customMap, contact.email);
+        if (segInferred && segInferred.value !== "UNKNOWN") {
+          effectiveSegment = segInferred.value;
+          effectiveSegmentConfidence = segInferred.confidence;
+          effectiveSegmentStatus = segInferred.status;
+          prisma.contact
+            .update({
+              where: { id: contact.id },
+              data: {
+                hotelSegment: segInferred.value,
+                hotelSegmentStatus: segInferred.status,
+                hotelSegmentConfidence: segInferred.confidence,
+              },
+            })
+            .catch(() => {});
+        }
+      }
+
+      let effectivePersona = contact.contactPersona;
+      let effectivePersonaConfidence = contact.contactPersonaConfidence;
+      let effectivePersonaStatus = contact.contactPersonaStatus;
+
+      if (!effectivePersona || effectivePersona === "UNKNOWN") {
+        const perInferred = inferPersonaFromTitle(contact.title);
+        if (perInferred && perInferred.value !== "UNKNOWN") {
+          effectivePersona = perInferred.value;
+          effectivePersonaConfidence = perInferred.confidence;
+          effectivePersonaStatus = perInferred.status;
+          prisma.contact
+            .update({
+              where: { id: contact.id },
+              data: {
+                contactPersona: perInferred.value,
+                contactPersonaStatus: perInferred.status,
+                contactPersonaConfidence: perInferred.confidence,
+              },
+            })
+            .catch(() => {});
+        }
+      }
+
       const selection = selectTemplateForRecipient(
         {
           id: contact.id,
@@ -179,16 +243,13 @@ router.post(
           lastName: contact.lastName,
           company: contact.company,
           title: contact.title,
-          hotelSegment: contact.hotelSegment,
-          hotelSegmentConfidence: contact.hotelSegmentConfidence,
-          hotelSegmentStatus: contact.hotelSegmentStatus,
-          contactPersona: contact.contactPersona,
-          contactPersonaConfidence: contact.contactPersonaConfidence,
-          contactPersonaStatus: contact.contactPersonaStatus,
-          customFields:
-            typeof contact.customFields === "object" && contact.customFields !== null
-              ? (contact.customFields as Record<string, string>)
-              : {},
+          hotelSegment: effectiveSegment,
+          hotelSegmentConfidence: effectiveSegmentConfidence,
+          hotelSegmentStatus: effectiveSegmentStatus,
+          contactPersona: effectivePersona,
+          contactPersonaConfidence: effectivePersonaConfidence,
+          contactPersonaStatus: effectivePersonaStatus,
+          customFields: customMap,
         },
         selectionContext
       );
@@ -239,8 +300,8 @@ router.post(
           firstName: contact.firstName,
           lastName: contact.lastName,
           company: contact.company,
-          hotelSegment: contact.hotelSegment,
-          contactPersona: contact.contactPersona,
+          hotelSegment: effectiveSegment,
+          contactPersona: effectivePersona,
           subject: rendered.subject,
           html: rendered.html,
           text: rendered.text,
@@ -294,9 +355,47 @@ router.post(
           fromName: input.fromName,
           replyTo: input.replyTo,
           sendRatePerMinute: input.sendRatePerMinute,
+          automationMode: input.automationMode ?? "APPROVAL_REQUIRED",
           createdById: req.user!.id,
         },
       });
+
+      const stepsToInsert = input.sequenceSteps?.length
+        ? input.sequenceSteps
+        : [
+            {
+              stepIndex: 0,
+              purpose: "Initial Outreach",
+              delayDays: 0,
+              delayBusinessDaysOnly: true,
+              subjectMode: "STANDALONE" as const,
+              templateId: input.templateId,
+            },
+            {
+              stepIndex: 1,
+              purpose: "Follow-up 1 — Add value & relevance",
+              delayDays: 3,
+              delayBusinessDaysOnly: true,
+              subjectMode: "THREADED" as const,
+              templateId: input.templateId,
+            },
+          ];
+
+      for (const st of stepsToInsert) {
+        await tx.campaignSequenceStep.create({
+          data: {
+            campaignId: created.id,
+            stepIndex: st.stepIndex,
+            purpose: st.purpose,
+            delayDays: st.delayDays ?? (st.stepIndex === 0 ? 0 : 3),
+            delayBusinessDaysOnly: st.delayBusinessDaysOnly ?? true,
+            subjectMode: st.subjectMode ?? (st.stepIndex === 0 ? "STANDALONE" : "THREADED"),
+            customSubject: st.customSubject,
+            templateId: st.templateId,
+            promptInstructions: st.promptInstructions,
+          },
+        });
+      }
 
       const templatesToInsert = input.templates?.length
         ? input.templates
@@ -352,8 +451,27 @@ router.patch(
     await assertReferences(input.templateId ?? current.templateId, input.contactListId ?? current.contactListId);
 
     await prisma.$transaction(async (tx) => {
-      const { templates, rules, ...baseData } = input;
+      const { templates, rules, sequenceSteps, ...baseData } = input;
       await tx.campaign.update({ where: { id }, data: baseData });
+
+      if (sequenceSteps) {
+        await tx.campaignSequenceStep.deleteMany({ where: { campaignId: id } });
+        for (const st of sequenceSteps) {
+          await tx.campaignSequenceStep.create({
+            data: {
+              campaignId: id,
+              stepIndex: st.stepIndex,
+              purpose: st.purpose,
+              delayDays: st.delayDays,
+              delayBusinessDaysOnly: st.delayBusinessDaysOnly,
+              subjectMode: st.subjectMode,
+              customSubject: st.customSubject,
+              templateId: st.templateId,
+              promptInstructions: st.promptInstructions,
+            },
+          });
+        }
+      }
 
       if (templates) {
         await tx.campaignTemplate.deleteMany({ where: { campaignId: id } });
@@ -692,6 +810,25 @@ router.get(
         ];
 
     const fallback = eligibleTemplates.find((t) => t.isFallback) ?? eligibleTemplates[0]!;
+    const customMap =
+      typeof contact.customFields === "object" && contact.customFields !== null
+        ? (contact.customFields as Record<string, string>)
+        : {};
+
+    const segInferred = (!contact.hotelSegment || contact.hotelSegment === "UNKNOWN")
+      ? inferSegmentFromCompany(contact.company, customMap, contact.email)
+      : null;
+    const effectiveSegment = contact.hotelSegment && contact.hotelSegment !== "UNKNOWN"
+      ? contact.hotelSegment
+      : (segInferred && segInferred.value !== "UNKNOWN" ? segInferred.value : null);
+
+    const perInferred = (!contact.contactPersona || contact.contactPersona === "UNKNOWN")
+      ? inferPersonaFromTitle(contact.title)
+      : null;
+    const effectivePersona = contact.contactPersona && contact.contactPersona !== "UNKNOWN"
+      ? contact.contactPersona
+      : (perInferred && perInferred.value !== "UNKNOWN" ? perInferred.value : null);
+
     const selection = selectTemplateForRecipient(
       {
         id: contact.id,
@@ -700,16 +837,13 @@ router.get(
         lastName: contact.lastName,
         company: contact.company,
         title: contact.title,
-        hotelSegment: contact.hotelSegment,
-        hotelSegmentConfidence: contact.hotelSegmentConfidence,
-        hotelSegmentStatus: contact.hotelSegmentStatus,
-        contactPersona: contact.contactPersona,
-        contactPersonaConfidence: contact.contactPersonaConfidence,
-        contactPersonaStatus: contact.contactPersonaStatus,
-        customFields:
-          typeof contact.customFields === "object" && contact.customFields !== null
-            ? (contact.customFields as Record<string, string>)
-            : {},
+        hotelSegment: effectiveSegment,
+        hotelSegmentConfidence: contact.hotelSegmentConfidence ?? segInferred?.confidence,
+        hotelSegmentStatus: contact.hotelSegmentStatus ?? segInferred?.status,
+        contactPersona: effectivePersona,
+        contactPersonaConfidence: contact.contactPersonaConfidence ?? perInferred?.confidence,
+        contactPersonaStatus: contact.contactPersonaStatus ?? perInferred?.status,
+        customFields: customMap,
       },
       {
         templates: eligibleTemplates,
@@ -904,6 +1038,8 @@ const SEND_FILTERS: Record<string, Prisma.SendWhereInput> = {
   bounced: { bouncedAt: { not: null } },
   replied: { repliedAt: { not: null } },
   unsubscribed: { unsubscribedAt: { not: null } },
+  scheduled: { status: "PENDING", stepIndex: { gt: 0 }, approvedAt: { not: null } },
+  awaiting_approval: { status: "PENDING", stepIndex: { gt: 0 }, approvedAt: null },
 };
 
 router.get(
@@ -913,10 +1049,12 @@ router.get(
     const { page, pageSize } = PaginationQuerySchema.parse(req.query);
     const filter = searchParam(req.query.filter);
     const search = searchParam(req.query.search);
+    const step = req.query.step !== undefined ? Number(req.query.step) : undefined;
     const where: Prisma.SendWhereInput = {
       campaignId: id,
       ...(filter && SEND_FILTERS[filter] ? SEND_FILTERS[filter] : {}),
       ...(search ? { email: { contains: search, mode: "insensitive" } } : {}),
+      ...(step !== undefined && !isNaN(step) ? { stepIndex: step } : {}),
     };
     const [rows, total] = await Promise.all([
       prisma.send.findMany({ where, orderBy: [{ updatedAt: "desc" }, { id: "asc" }], ...skipTake(page, pageSize) }),
@@ -964,6 +1102,223 @@ router.get(
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${safeName}-recipients.csv"`);
     res.send("﻿" + [header.map(cell).join(","), ...lines].join("\r\n"));
+  })
+);
+
+// ---------------------------------------------------------------------------
+// Follow-up Sequence Controls & Approvals
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/:id/sequence",
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    const campaign = await prisma.campaign.findUnique({
+      where: { id },
+      include: {
+        sequenceSteps: {
+          include: { template: { select: { id: true, name: true, subject: true } } },
+          orderBy: { stepIndex: "asc" },
+        },
+      },
+    });
+    if (!campaign) throw AppError.notFound("CAMPAIGN_NOT_FOUND", "Campaign not found.");
+    ok(res, {
+      automationMode: campaign.automationMode,
+      sequenceSteps: campaign.sequenceSteps.map((st) => ({
+        id: st.id,
+        campaignId: st.campaignId,
+        stepIndex: st.stepIndex,
+        purpose: st.purpose,
+        delayDays: st.delayDays,
+        delayBusinessDaysOnly: st.delayBusinessDaysOnly,
+        subjectMode: st.subjectMode,
+        customSubject: st.customSubject,
+        templateId: st.templateId,
+        templateName: st.template.name,
+        templateSubject: st.template.subject,
+        promptInstructions: st.promptInstructions,
+        createdAt: st.createdAt.toISOString(),
+        updatedAt: st.updatedAt.toISOString(),
+      })),
+    });
+  })
+);
+
+router.put(
+  "/:id/sequence",
+  requirePermission("campaigns.manage"),
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    const campaign = await prisma.campaign.findUnique({ where: { id } });
+    if (!campaign) throw AppError.notFound("CAMPAIGN_NOT_FOUND", "Campaign not found.");
+    if (campaign.status !== "DRAFT" && campaign.status !== "PAUSED" && campaign.status !== "SENDING") {
+      throw AppError.conflict("INVALID_STATUS", "Sequence configuration can only be modified for active, paused, or draft campaigns.");
+    }
+
+    const { automationMode, sequenceSteps } = z
+      .object({
+        automationMode: CampaignAutomationModeSchema.optional(),
+        sequenceSteps: z.array(SequenceStepInputSchema).min(1, "At least one step required"),
+      })
+      .parse(req.body);
+
+    for (const st of sequenceSteps) {
+      const exists = await prisma.template.findUnique({ where: { id: st.templateId } });
+      if (!exists) throw AppError.badRequest("TEMPLATE_NOT_FOUND", `Template ${st.templateId} not found.`);
+    }
+
+    await prisma.$transaction(async (tx) => {
+      if (automationMode) {
+        await tx.campaign.update({ where: { id }, data: { automationMode } });
+      }
+      await tx.campaignSequenceStep.deleteMany({ where: { campaignId: id } });
+      for (const st of sequenceSteps) {
+        await tx.campaignSequenceStep.create({
+          data: {
+            campaignId: id,
+            stepIndex: st.stepIndex,
+            purpose: st.purpose,
+            delayDays: st.delayDays,
+            delayBusinessDaysOnly: st.delayBusinessDaysOnly,
+            subjectMode: st.subjectMode,
+            customSubject: st.customSubject,
+            templateId: st.templateId,
+            promptInstructions: st.promptInstructions,
+          },
+        });
+      }
+    });
+
+    await audit(req, { action: "campaign.sequence.update", entityType: "Campaign", entityId: id, metadata: { stepsCount: sequenceSteps.length, automationMode } });
+    ok(res, await loadDetail(id));
+  })
+);
+
+router.post(
+  "/:id/sends/:sendId/approve",
+  requirePermission("campaigns.control"),
+  asyncHandler(async (req, res) => {
+    const campaignId = IdSchema.parse(req.params.id);
+    const sendId = IdSchema.parse(req.params.sendId);
+    await approveFollowUpSend(campaignId, sendId);
+    await audit(req, { action: "campaign.followup.approve", entityType: "Send", entityId: sendId, metadata: { campaignId } });
+    ok(res, { approved: true });
+  })
+);
+
+router.post(
+  "/:id/sends/approve-all",
+  requirePermission("campaigns.control"),
+  asyncHandler(async (req, res) => {
+    const campaignId = IdSchema.parse(req.params.id);
+    const count = await approveAllPendingFollowUps(campaignId);
+    await audit(req, { action: "campaign.followup.approve_all", entityType: "Campaign", entityId: campaignId, metadata: { count } });
+    ok(res, { approvedCount: count });
+  })
+);
+
+router.get(
+  "/:id/recipients/:email/sequence",
+  asyncHandler(async (req, res) => {
+    const campaignId = IdSchema.parse(req.params.id);
+    const email = String(req.params.email).toLowerCase().trim();
+    const recipient = await getRecipientSequenceDetails(campaignId, email);
+    if (!recipient) throw AppError.notFound("RECIPIENT_NOT_FOUND", "Recipient state not found in this campaign.");
+
+    const rawSends = await prisma.send.findMany({
+      where: { campaignId, email },
+      orderBy: { stepIndex: "asc" },
+    });
+    const sends = rawSends.map(toSendDto);
+    const pendingFollowUp = sends.find((s) => s.stepIndex > 0 && s.status === "PENDING") ?? null;
+    const isTerminal = ["REPLY_RECEIVED", "BOUNCED", "SUPPRESSED", "CANCELLED", "COMPLETED"].includes(recipient.state);
+
+    ok(res, {
+      ...recipient,
+      recipient,
+      sends,
+      pendingFollowUp,
+      canApprove: Boolean(pendingFollowUp && !pendingFollowUp.approvedAt && recipient.state === "AWAITING_APPROVAL"),
+      canPause: !isTerminal && recipient.state !== "PAUSED",
+      canResume: recipient.state === "PAUSED",
+      canStop: !isTerminal,
+    });
+  })
+);
+
+router.post(
+  "/:id/recipients/:email/pause",
+  requirePermission("campaigns.control"),
+  asyncHandler(async (req, res) => {
+    const campaignId = IdSchema.parse(req.params.id);
+    const email = String(req.params.email).toLowerCase().trim();
+    const reason = typeof req.body?.reason === "string" ? req.body.reason : "Paused by user";
+    await pauseRecipientSequence(campaignId, email, reason);
+    await audit(req, { action: "campaign.recipient.pause", entityType: "Campaign", entityId: campaignId, metadata: { email, reason } });
+    ok(res, { paused: true });
+  })
+);
+
+router.post(
+  "/:id/recipients/:email/resume",
+  requirePermission("campaigns.control"),
+  asyncHandler(async (req, res) => {
+    const campaignId = IdSchema.parse(req.params.id);
+    const email = String(req.params.email).toLowerCase().trim();
+    await resumeRecipientSequence(campaignId, email);
+    await audit(req, { action: "campaign.recipient.resume", entityType: "Campaign", entityId: campaignId, metadata: { email } });
+    ok(res, { resumed: true });
+  })
+);
+
+router.post(
+  "/:id/recipients/:email/stop",
+  requirePermission("campaigns.control"),
+  asyncHandler(async (req, res) => {
+    const campaignId = IdSchema.parse(req.params.id);
+    const email = String(req.params.email).toLowerCase().trim();
+    const reason = typeof req.body?.reason === "string" ? req.body.reason : "Stopped by user";
+    const cancelledCount = await stopSequenceForRecipient(campaignId, email, reason, "CANCELLED");
+    await audit(req, { action: "campaign.recipient.stop", entityType: "Campaign", entityId: campaignId, metadata: { email, reason, cancelledCount } });
+    ok(res, { stopped: true, cancelledCount });
+  })
+);
+
+router.post(
+  "/:id/sequence/stop-all",
+  requirePermission("campaigns.control"),
+  asyncHandler(async (req, res) => {
+    const campaignId = IdSchema.parse(req.params.id);
+    const reason = typeof req.body?.reason === "string" ? req.body.reason : "All follow-ups stopped by user";
+    const cancelledCount = await stopAllPendingFollowUps(campaignId, reason);
+    await audit(req, { action: "campaign.sequence.stop_all", entityType: "Campaign", entityId: campaignId, metadata: { reason, cancelledCount } });
+    ok(res, { cancelledCount, cancelledSendsCount: cancelledCount });
+  })
+);
+
+router.post(
+  "/:id/sequence/ai-draft",
+  requirePermission("campaigns.manage"),
+  asyncHandler(async (req, res) => {
+    const { stepIndex, purpose, previousSubject, previousBody, instructions } = z
+      .object({
+        stepIndex: z.coerce.number().int().min(1),
+        purpose: z.string().optional(),
+        previousSubject: z.string().optional(),
+        previousBody: z.string().optional(),
+        instructions: z.string().optional(),
+      })
+      .parse(req.body);
+
+    const draft = await aiDraftFollowUp({
+      stepIndex,
+      purpose,
+      previousSubject,
+      previousBody,
+      instructions,
+    });
+    ok(res, { ...draft, body: draft.bodyText });
   })
 );
 

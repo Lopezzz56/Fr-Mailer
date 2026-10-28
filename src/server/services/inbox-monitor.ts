@@ -7,6 +7,7 @@ import prisma from "../db.js";
 import { env, imapConfigured } from "../config.js";
 import { messageIdDomain } from "./mailer.js";
 import { classifyIncoming, classifyReplySentiment, type IncomingMessage } from "./inbox-classifier.js";
+import { stopSequenceForRecipient } from "./sequence-service.js";
 
 const STATE_KEY = "imap.state";
 const FIRST_RUN_LOOKBACK_DAYS = 14;
@@ -110,14 +111,15 @@ async function applyClassification(message: IncomingMessage, domain: string): Pr
             update: {},
             create: { email: send.email, reason: "HARD_BOUNCE", source: "bounce-report", campaignId: send.campaignId, metadata: { diagnostic: result.diagnostic } },
           });
+          await stopSequenceForRecipient(send.campaignId, send.email, `Hard bounce: ${result.diagnostic}`, "BOUNCED", tx);
         }
       });
     } else {
       const already = await prisma.sendEvent.findFirst({ where: { sendId: send.id, type: "REPLY" } });
       if (already) continue;
       const sentiment = classifyReplySentiment(result.snippet || message.text, message.subject);
-      await prisma.$transaction([
-        prisma.sendEvent.create({
+      await prisma.$transaction(async (tx) => {
+        await tx.sendEvent.create({
           data: {
             sendId: send.id,
             type: "REPLY",
@@ -132,12 +134,39 @@ async function applyClassification(message: IncomingMessage, domain: string): Pr
               meetingBooked: false,
             },
           },
-        }),
-        prisma.send.update({ where: { id: send.id }, data: { repliedAt: send.repliedAt ?? message.date } }),
-      ]);
+        });
+        await tx.send.update({ where: { id: send.id }, data: { repliedAt: send.repliedAt ?? message.date } });
+        if (sentiment.sentiment === "UNSUBSCRIBE") {
+          await tx.suppressionEntry.upsert({
+            where: { email: send.email },
+            update: {},
+            create: { email: send.email, reason: "UNSUBSCRIBE", source: "reply-unsubscribe", campaignId: send.campaignId, metadata: { snippet: result.snippet } },
+          });
+          await stopSequenceForRecipient(send.campaignId, send.email, "Unsubscribe requested in reply", "SUPPRESSED", tx);
+        } else {
+          await stopSequenceForRecipient(send.campaignId, send.email, "Reply received — automated outreach stopped", "REPLY_RECEIVED", tx);
+        }
+      });
     }
   }
   return targets.length ? result.type : null;
+}
+
+export async function isInboxMonitoringSafe(): Promise<{ safe: boolean; reason?: string }> {
+  if (!imapConfigured || !env.IMAP_POLL_ENABLED) return { safe: true };
+  const state = await getImapState();
+  if (state.lastError) {
+    return { safe: false, reason: `Inbox monitoring error: ${state.lastError}` };
+  }
+  if (!state.lastCheckedAt) {
+    return { safe: false, reason: "Inbox monitoring has not executed yet" };
+  }
+  const ageMs = Date.now() - new Date(state.lastCheckedAt).getTime();
+  const maxStaleMs = (env.IMAP_POLL_INTERVAL_SECONDS * 4 + 180) * 1000;
+  if (ageMs > maxStaleMs) {
+    return { safe: false, reason: `Inbox monitoring is delayed (last sync ${Math.round(ageMs / 60000)}m ago)` };
+  }
+  return { safe: true };
 }
 
 export async function checkInbox(): Promise<ImapState> {

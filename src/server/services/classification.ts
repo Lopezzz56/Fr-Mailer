@@ -18,7 +18,28 @@ const SEGMENT_SYNONYMS: Record<HotelSegment, string[]> = {
   BUDGET: ["budget", "economy", "motel", "hostel", "inn", "lodge", "1 star", "2 star", "roadside"],
   RESORT: ["resort", "destination", "spa resort", "beach resort", "golf resort", "ski resort", "retreat"],
   EXTENDED_STAY: ["extended stay", "aparthotel", "residence", "serviced apartments", "suites", "kitchenette"],
-  INDEPENDENT: ["independent", "unbranded", "private hotel", "owner operated", "single property"],
+  INDEPENDENT: ["independent", "unbranded", "private hotel", "owner operated", "single property", "hotel", "hotels", "htl", "hospitality"],
+  CO_PARTNERSHIP: [
+    "co-partnership",
+    "co partnership",
+    "partnership",
+    "partner",
+    "co-marketing",
+    "co marketing",
+    "brand partner",
+    "strategic alliance",
+    "vendor",
+    "software partner",
+    "tech partner",
+    "concierge",
+    "collective",
+    "concierge collective",
+    "lifestyle management",
+    "agency",
+    "consultancy",
+    "services partner",
+  ],
+  INSTITUTE: ["institute", "college", "university", "academy", "ihm", "campus", "hiring", "school", "hospitality institute", "management institute"],
   UNKNOWN: ["unknown", "unclassified", "other", "n/a", "none"],
 };
 
@@ -83,12 +104,57 @@ const PERSONA_SYNONYMS: Record<ContactPersona, string[]> = {
     "chief financial officer",
     "cfo",
   ],
+  PARTNERSHIP_DIRECTOR: [
+    "strategic partnerships",
+    "strategic partnership",
+    "director of strategic partnerships",
+    "partnership director",
+    "director of partnerships",
+    "head of partnerships",
+    "head of brand alliances",
+    "brand partnerships",
+    "brand alliances",
+    "alliance manager",
+    "alliances director",
+    "vp alliances",
+    "co marketing manager",
+    "partner lead",
+  ],
+  PLACEMENT_OFFICER: [
+    "placement officer",
+    "training and placement officer",
+    "tpo",
+    "head placement",
+    "placement manager",
+    "campus recruiter",
+    "campus relations",
+    "internship coordinator",
+    "head of training",
+    "head of training and placement",
+  ],
+  DEAN_DIRECTOR: [
+    "dean",
+    "academic director",
+    "principal",
+    "institute director",
+    "head of institute",
+    "chancellor",
+    "provost",
+    "director academics",
+  ],
   OTHER: ["consultant", "coordinator", "supervisor", "specialist", "assistant", "staff"],
   UNKNOWN: ["unknown", "unclassified", "n/a", "none"],
 };
 
 function normalizeText(text: string): string {
   return text.toLowerCase().trim().replace(/[^a-z0-9]+/g, " ");
+}
+
+function matchesSynonym(cleaned: string, syn: string): boolean {
+  if (cleaned === syn) return true;
+  const escaped = syn.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`, "i");
+  return regex.test(cleaned);
 }
 
 /** Normalize arbitrary text to a standard HotelSegment enum value */
@@ -103,7 +169,7 @@ export function normalizeHotelSegment(raw?: string | null): HotelSegment {
 
   for (const [segment, synonyms] of Object.entries(SEGMENT_SYNONYMS) as [HotelSegment, string[]][]) {
     for (const syn of synonyms) {
-      if (cleaned === syn || cleaned.includes(syn)) {
+      if (matchesSynonym(cleaned, syn)) {
         return segment;
       }
     }
@@ -123,7 +189,7 @@ export function normalizeContactPersona(raw?: string | null): ContactPersona {
 
   for (const [persona, synonyms] of Object.entries(PERSONA_SYNONYMS) as [ContactPersona, string[]][]) {
     for (const syn of synonyms) {
-      if (cleaned === syn || cleaned.includes(syn)) {
+      if (matchesSynonym(cleaned, syn)) {
         return persona;
       }
     }
@@ -167,6 +233,15 @@ export function inferPersonaFromTitle(title?: string | null): ClassificationResu
   if (/\b(finance|financial|controller|procurement|purchasing|cfo)\b/.test(cleaned)) {
     return { value: "FINANCE_PROCUREMENT", confidence: 0.8, status: "GUESSED", source: "title_heuristic" };
   }
+  if (/\b(placement|training and placement|tpo|campus recruiter|recruitment|internship|career services|placement officer)\b/.test(cleaned)) {
+    return { value: "PLACEMENT_OFFICER", confidence: 0.85, status: "GUESSED", source: "title_heuristic" };
+  }
+  if (/\b(dean|principal|provost|chancellor|director academics|professor|head of institute)\b/.test(cleaned)) {
+    return { value: "DEAN_DIRECTOR", confidence: 0.85, status: "GUESSED", source: "title_heuristic" };
+  }
+  if (/\b(partnership|alliances|strategic alliance|co-marketing|channel manager|partner lead)\b/.test(cleaned)) {
+    return { value: "PARTNERSHIP_DIRECTOR", confidence: 0.85, status: "GUESSED", source: "title_heuristic" };
+  }
 
   const normalized = normalizeContactPersona(title);
   if (normalized !== "UNKNOWN") {
@@ -175,12 +250,30 @@ export function inferPersonaFromTitle(title?: string | null): ClassificationResu
   return { value: "UNKNOWN", confidence: 0.2, status: "GUESSED", source: "unrecognized_title" };
 }
 
-/** Infer hotel segment from property name or custom fields */
+/** Infer hotel segment or organization category from property name, custom fields, or email */
 export function inferSegmentFromCompany(
   company?: string | null,
-  customFields: Record<string, string> = {}
+  customFields: Record<string, string> = {},
+  email?: string | null
 ): ClassificationResult<HotelSegment> {
-  const hints = [company, customFields.propertyType, customFields.segment, customFields.stars, customFields.category]
+  const emailDomain = email && email.includes("@") ? email.split("@")[1]?.toLowerCase().replace(/\.[a-z.]+$/, "") : "";
+  let domainHint = "";
+  if (emailDomain) {
+    if (/hotels?|resorts?|hospitality/i.test(emailDomain)) domainHint += " hotel";
+    if (/concierge|collective|partners?|alliances?|agenc(y|ies)|solutions/i.test(emailDomain)) domainHint += " partner concierge";
+    if (/ihm|univ|colleges?|institutes?|academ(y|ies)/i.test(emailDomain)) domainHint += " institute";
+  }
+  const hints = [
+    company,
+    domainHint,
+    emailDomain,
+    customFields.propertyType,
+    customFields.segment,
+    customFields.stars,
+    customFields.category,
+    customFields.industry,
+    customFields.type,
+  ]
     .filter(Boolean)
     .join(" ");
 
@@ -189,26 +282,52 @@ export function inferSegmentFromCompany(
   }
   const cleaned = normalizeText(hints);
 
+  // 1. Check educational institutions / hiring target first
+  if (
+    /\b(institutes?|colleges?|universit(y|ies)|ihm|academ(y|ies)|campus|polytechnics?|vidyapeeth|school of hospitality|hospitality institute|placement cell|training institute)\b/.test(
+      cleaned
+    ) ||
+    (email && /\.(edu|ac\.in|edu\.in)(\/|$)/i.test(email)) ||
+    (email && /ihm/i.test(email))
+  ) {
+    return { value: "INSTITUTE", confidence: 0.85, status: "GUESSED", source: "institute_name_heuristic" };
+  }
+
+  // 2. Check co-partnerships, agencies, alliances, concierge, collective, solutions
+  if (
+    /\b(concierge|collective|partners?|partnerships?|alliances?|co\s*marketing|co\s*partnerships?|vendors?|software|solutions|travel\s*tech|consulting|consultanc(y|ies)|agenc(y|ies)|media|platforms?|apps?|systems|lifestyle|membership|promotions?|syndicate|associat(es?|ion))\b/.test(
+      cleaned
+    )
+  ) {
+    return { value: "CO_PARTNERSHIP", confidence: 0.85, status: "GUESSED", source: "partnership_heuristic" };
+  }
+
+  // 3. Specific hotel property segments
   if (/\b(resort|beach|spa|golf|ski|retreat|island)\b/.test(cleaned)) {
-    return { value: "RESORT", confidence: 0.75, status: "GUESSED", source: "property_name_heuristic" };
+    return { value: "RESORT", confidence: 0.8, status: "GUESSED", source: "property_name_heuristic" };
   }
   if (/\b(extended stay|suites|aparthotel|residence|serviced)\b/.test(cleaned)) {
     return { value: "EXTENDED_STAY", confidence: 0.75, status: "GUESSED", source: "property_name_heuristic" };
   }
-  if (/\b(boutique|design|lifestyle|historic|heritage|maison|chateau)\b/.test(cleaned)) {
-    return { value: "BOUTIQUE", confidence: 0.7, status: "GUESSED", source: "property_name_heuristic" };
+  if (/\b(boutique|design|lifestyle hotel|historic|heritage|maison|chateau|haveli)\b/.test(cleaned)) {
+    return { value: "BOUTIQUE", confidence: 0.75, status: "GUESSED", source: "property_name_heuristic" };
   }
-  if (/\b(luxury|5 star|five star|palace|st regis|ritz|four seasons)\b/.test(cleaned)) {
-    return { value: "LUXURY", confidence: 0.8, status: "GUESSED", source: "property_name_heuristic" };
+  if (/\b(luxury|5 star|five star|palace|st regis|ritz|four seasons|taj|oberoi|leela)\b/.test(cleaned)) {
+    return { value: "LUXURY", confidence: 0.85, status: "GUESSED", source: "property_name_heuristic" };
   }
-  if (/\b(motel|hostel|inn|lodge|budget|economy|1 star|2 star)\b/.test(cleaned)) {
-    return { value: "BUDGET", confidence: 0.65, status: "GUESSED", source: "property_name_heuristic" };
+  if (/\b(motel|hostel|inn|inns|lodge|budget|economy|1 star|2 star|homestay|guest house)\b/.test(cleaned)) {
+    return { value: "BUDGET", confidence: 0.7, status: "GUESSED", source: "property_name_heuristic" };
   }
-  if (/\b(upscale|hilton|marriott|sheraton|hyatt|westin|radisson)\b/.test(cleaned)) {
-    return { value: "UPSCALE", confidence: 0.65, status: "GUESSED", source: "property_name_heuristic" };
+  if (/\b(upscale|hilton|marriott|sheraton|hyatt|westin|radisson|novotel|crowne plaza)\b/.test(cleaned)) {
+    return { value: "UPSCALE", confidence: 0.7, status: "GUESSED", source: "property_name_heuristic" };
   }
-  if (/\b(midscale|hampton|holiday inn|courtyard|ibis|best western)\b/.test(cleaned)) {
-    return { value: "MIDSCALE", confidence: 0.65, status: "GUESSED", source: "property_name_heuristic" };
+  if (/\b(midscale|hampton|holiday inn|courtyard|ibis|best western|ginger|lemon tree)\b/.test(cleaned)) {
+    return { value: "MIDSCALE", confidence: 0.7, status: "GUESSED", source: "property_name_heuristic" };
+  }
+
+  // 4. General hotel keywords (e.g. "MMR Hotels", "The Grand Hotel", "@mmrhotels.com", "concierge Htl")
+  if (/\b(hotels?|htl|hospitality|stays?|villas?)\b/.test(cleaned)) {
+    return { value: "INDEPENDENT", confidence: 0.8, status: "GUESSED", source: "hotel_keyword_heuristic" };
   }
 
   const normalized = normalizeHotelSegment(hints);

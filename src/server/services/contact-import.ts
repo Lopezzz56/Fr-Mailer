@@ -10,6 +10,7 @@ import { extractEmails, likelyTypo, suggestEmailFix } from "./email-cells.js";
 import { inferPersonaFromTitle, inferSegmentFromCompany, normalizeContactPersona, normalizeHotelSegment } from "./classification.js";
 import {
   ALL_SHEETS,
+  COALESCABLE_TARGETS,
   CUSTOM_FIELD_NAME,
   EmailSchema,
   MAX_IMPORT_ROWS,
@@ -106,18 +107,58 @@ export async function parseWorkbook(buffer: Buffer, fileName: string): Promise<S
   return usable;
 }
 
+const normalize = (h: string) => h.toLowerCase().replace(/[^a-z0-9]/g, "");
+
 /** One sheet by name, or ALL_SHEETS combined by column name (columns in order of first appearance) */
 export function selectSheet(sheets: SheetData[], sheet?: string): ParsedSheet {
   const chosen = !sheet ? [sheets[0]!] : sheet === ALL_SHEETS ? sheets : sheets.filter((s) => s.name === sheet);
   if (!chosen.length) throw AppError.badRequest("NO_SUCH_SHEET", `The file has no sheet called "${sheet}".`);
 
   const headers: string[] = [];
-  for (const s of chosen) for (const h of s.headers) if (!headers.includes(h)) headers.push(h);
+  const headerCanonicalMap = new Map<string, string>();
+
+  function findSynonymTarget(sheetHeaders: string[], header: string): string | null {
+    const key = normalize(header);
+    for (const registered of headers) {
+      const regKey = normalize(registered);
+      if (regKey === key) return registered;
+      // Only alias across sheets if this sheet doesn't already contain the registered header
+      if (!sheetHeaders.includes(registered)) {
+        for (const aliases of Object.values(ALIASES)) {
+          if (aliases.includes(regKey) && aliases.includes(key)) {
+            return registered;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  for (const s of chosen) {
+    for (const h of s.headers) {
+      if (sheet === ALL_SHEETS) {
+        const canonical = findSynonymTarget(s.headers, h);
+        if (canonical) {
+          headerCanonicalMap.set(`${s.name}::${h}`, canonical);
+        } else {
+          headers.push(h);
+          headerCanonicalMap.set(`${s.name}::${h}`, h);
+        }
+      } else {
+        if (!headers.includes(h)) headers.push(h);
+      }
+    }
+  }
 
   const rows: string[][] = [];
   const refs: ParsedSheet["refs"] = [];
   for (const s of chosen) {
-    const index = headers.map((h) => s.headers.indexOf(h));
+    const index = headers.map((h) => {
+      if (sheet === ALL_SHEETS) {
+        return s.headers.findIndex((sh) => headerCanonicalMap.get(`${s.name}::${sh}`) === h);
+      }
+      return s.headers.indexOf(h);
+    });
     s.rows.forEach((r, i) => {
       rows.push(index.map((j) => (j === -1 ? "" : (r[j] ?? ""))));
       refs.push({ sheet: s.name, row: s.rowNumbers[i]! });
@@ -139,34 +180,171 @@ export async function parseSpreadsheet(buffer: Buffer, fileName: string): Promis
 // ---------------------------------------------------------------------------
 
 const ALIASES: Record<"email" | StandardContactField | "fullName", string[]> = {
-  email: ["email", "emailaddress", "mail", "workemail", "businessemail", "emailid"],
+  email: [
+    "email",
+    "emailaddress",
+    "mail",
+    "workemail",
+    "businessemail",
+    "emailid",
+    "publicemail",
+    "officialemail",
+    "contactemail",
+    "primaryemail",
+    "guestemail",
+    "bookingemail",
+    "reservationemail",
+    "reservationsemail",
+    "frontdeskemail",
+    "infoemail",
+    "hotelemail",
+    "directemail",
+    "generalemail",
+    "inboxemail",
+  ],
   firstName: ["firstname", "fname", "givenname", "first", "forename"],
   lastName: ["lastname", "lname", "surname", "familyname", "last"],
-  fullName: ["name", "fullname", "contactname", "contact"],
-  company: ["company", "companyname", "organization", "organisation", "org", "account", "accountname", "business", "hotel", "property"],
-  title: ["title", "jobtitle", "position", "role", "designation"],
-  phone: ["phone", "phonenumber", "mobile", "mobilenumber", "tel", "telephone", "cell", "contactnumber"],
-  hotelSegment: ["hotelsegment", "segment", "propertytype", "hoteltype", "starrating", "category"],
-  contactPersona: ["contactpersona", "persona", "rolecategory", "jobfunction", "department"],
+  fullName: [
+    "name",
+    "fullname",
+    "contactname",
+    "contact",
+    "contactperson",
+    "personname",
+    "decisionmaker",
+    "leadname",
+    "guestname",
+  ],
+  company: [
+    "company",
+    "companyname",
+    "organization",
+    "organisation",
+    "org",
+    "account",
+    "accountname",
+    "business",
+    "businessname",
+    "hotel",
+    "hotelname",
+    "hotelgroup",
+    "hotelgroupname",
+    "hotelprospectname",
+    "prospectname",
+    "property",
+    "propertyname",
+    "resort",
+    "resortname",
+    "establishment",
+    "chain",
+    "hotelchain",
+  ],
+  title: ["title", "jobtitle", "position", "role", "designation", "executiveposition"],
+  phone: [
+    "phone",
+    "phonenumber",
+    "mobile",
+    "mobilenumber",
+    "tel",
+    "telephone",
+    "cell",
+    "cellphone",
+    "contactnumber",
+    "publicphone",
+    "officialphone",
+    "contactphone",
+    "workphone",
+    "businessphone",
+    "hotelphone",
+    "receptionphone",
+    "frontdeskphone",
+    "directphone",
+    "phoneno",
+    "mobilephone",
+    "landline",
+  ],
+  hotelSegment: [
+    "hotelsegment",
+    "segment",
+    "propertytype",
+    "hoteltype",
+    "starrating",
+    "category",
+    "positioning",
+    "starpositioning",
+    "starcategorypositioning",
+    "starcategory",
+    "hotelpositioning",
+    "segmenttype",
+  ],
+  contactPersona: [
+    "contactpersona",
+    "persona",
+    "rolecategory",
+    "jobfunction",
+    "department",
+    "targetpersona",
+  ],
 };
-
-const normalize = (h: string) => h.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 export const customFieldName = toFieldName;
 
 export function suggestMapping(headers: string[]): Record<string, ImportTarget> {
   const used = new Set<string>();
   const mapping: Record<string, ImportTarget> = {};
+
+  // First pass: exact alias match
   for (const header of headers) {
     const key = normalize(header);
-    const match = (Object.entries(ALIASES) as [ImportTarget, string[]][]).find(([target, aliases]) => !used.has(target) && aliases.includes(key));
+    const match = (Object.entries(ALIASES) as [ImportTarget, string[]][]).find(
+      ([target, aliases]) => !used.has(target) && aliases.includes(key)
+    );
     if (match) {
       used.add(match[0]);
       mapping[header] = match[0];
-    } else {
-      mapping[header] = `custom:${customFieldName(header)}`;
     }
   }
+
+  // Second pass: heuristic matching for critical fields if not yet claimed
+  for (const header of headers) {
+    if (mapping[header]) continue;
+    const lower = header.toLowerCase();
+    const key = normalize(header);
+
+    // Email heuristic: if header contains "email" (e.g. "Public Email", "Sales E-mail")
+    if (
+      !used.has("email") &&
+      (key.includes("email") || /\b(email|e-mail|mail)\b/i.test(lower)) &&
+      !/mailingaddress|street/i.test(lower)
+    ) {
+      used.add("email");
+      mapping[header] = "email";
+      continue;
+    }
+
+    // Phone heuristic: if header contains "phone", "tel", "mobile"
+    if (
+      !used.has("phone") &&
+      (key.includes("phone") || /\b(phone|tel|mobile|cell|telephone)\b/i.test(lower))
+    ) {
+      used.add("phone");
+      mapping[header] = "phone";
+      continue;
+    }
+
+    // Company / Hotel heuristic: if header contains "hotel", "resort", "property", "company"
+    if (
+      !used.has("company") &&
+      (key.includes("hotel") || key.includes("property") || /\b(hotel|resort|property|company)\b/i.test(lower))
+    ) {
+      used.add("company");
+      mapping[header] = "company";
+      continue;
+    }
+
+    mapping[header] = `custom:${customFieldName(header)}`;
+  }
+
   // "name" + separate first/last columns: prefer the separate ones
   if (used.has("fullName") && (used.has("firstName") || used.has("lastName"))) {
     for (const [h, t] of Object.entries(mapping)) if (t === "fullName") mapping[h] = "ignore";
@@ -186,7 +364,7 @@ export function validateMapping(mapping: Record<string, string>, headers: string
       (STANDARD_CONTACT_FIELDS as readonly string[]).includes(target) ||
       (target.startsWith("custom:") && CUSTOM_FIELD_NAME.test(target.slice(7)));
     if (!valid) throw AppError.badRequest("BAD_MAPPING", `"${target}" isn't a valid destination for column "${header}".`);
-    if (target !== "ignore" && targets.has(target)) {
+    if (target !== "ignore" && targets.has(target) && !COALESCABLE_TARGETS.has(target)) {
       throw AppError.badRequest("BAD_MAPPING", `Two columns are mapped to the same field (${target.replace("custom:", "")}).`);
     }
     targets.add(target);
@@ -223,13 +401,23 @@ export function rowToValues(row: string[], headers: string[], mapping: Record<st
     const target = mapping[header];
     const cell = (row[i] ?? "").trim();
     if (!target || target === "ignore" || !cell) return;
-    if (target === "email") values.rawEmail = cell;
-    else if (target === "fullName") {
-      const [first, ...rest] = cell.split(/\s+/);
-      values.standard.firstName ??= first;
-      if (rest.length) values.standard.lastName ??= rest.join(" ");
-    } else if (target.startsWith("custom:")) values.custom[target.slice(7)] = cell.slice(0, 2000);
-    else values.standard[target as StandardContactField] = cell.slice(0, 200);
+    if (target === "email") {
+      values.rawEmail = values.rawEmail ? `${values.rawEmail}, ${cell}` : cell;
+    } else if (target === "fullName") {
+      if (!values.standard.firstName) {
+        const [first, ...rest] = cell.split(/\s+/);
+        values.standard.firstName = first;
+        if (rest.length && !values.standard.lastName) values.standard.lastName = rest.join(" ");
+      }
+    } else if (target.startsWith("custom:")) {
+      const key = target.slice(7);
+      values.custom[key] = values.custom[key] || cell.slice(0, 2000);
+    } else {
+      const stdKey = target as StandardContactField;
+      if (!values.standard[stdKey]) {
+        values.standard[stdKey] = cell.slice(0, 200);
+      }
+    }
   });
   const found = extractEmails(values.rawEmail);
   values.emails = found.emails;

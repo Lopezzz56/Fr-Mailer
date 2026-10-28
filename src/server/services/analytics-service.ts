@@ -17,6 +17,7 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
       campaignTemplates: {
         include: { template: { select: { id: true, name: true, version: true } } },
       },
+      sequenceSteps: { orderBy: { stepIndex: "asc" } },
     },
   });
 
@@ -56,6 +57,34 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
   let unsubscribedCount = 0;
 
   // Breakdown aggregators
+  const stepMap = new Map<
+    number,
+    {
+      stepIndex: number;
+      purpose: string;
+      assignedCount: number;
+      sentCount: number;
+      repliedCount: number;
+      positiveRepliesCount: number;
+      meetingsBookedCount: number;
+      bouncedCount: number;
+      replyRate: number;
+    }
+  >();
+
+  for (const st of campaign.sequenceSteps) {
+    stepMap.set(st.stepIndex, {
+      stepIndex: st.stepIndex,
+      purpose: st.purpose,
+      assignedCount: 0,
+      sentCount: 0,
+      repliedCount: 0,
+      positiveRepliesCount: 0,
+      meetingsBookedCount: 0,
+      bouncedCount: 0,
+      replyRate: 0,
+    });
+  }
   const templateMap = new Map<
     string,
     {
@@ -211,6 +240,34 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
     if (isReplied) pEntry.repliedCount++;
     if (isPositive) pEntry.positiveRepliesCount++;
     if (isMeeting) pEntry.meetingsBookedCount++;
+
+    // Step attribution
+    const stepIdx = send.stepIndex ?? 0;
+    let stepEntry = stepMap.get(stepIdx);
+    if (!stepEntry) {
+      stepEntry = {
+        stepIndex: stepIdx,
+        purpose: stepIdx === 0 ? "Initial Email" : `Follow-up ${stepIdx}`,
+        assignedCount: 0,
+        sentCount: 0,
+        repliedCount: 0,
+        positiveRepliesCount: 0,
+        meetingsBookedCount: 0,
+        bouncedCount: 0,
+        replyRate: 0,
+      };
+      stepMap.set(stepIdx, stepEntry);
+    }
+    stepEntry.assignedCount++;
+    if (isSent) stepEntry.sentCount++;
+    if (isReplied) stepEntry.repliedCount++;
+    if (isPositive) stepEntry.positiveRepliesCount++;
+    if (isMeeting) stepEntry.meetingsBookedCount++;
+    if (isBounced) stepEntry.bouncedCount++;
+  }
+
+  for (const s of stepMap.values()) {
+    s.replyRate = s.sentCount > 0 ? Number(((s.repliedCount / s.sentCount) * 100).toFixed(1)) : 0;
   }
 
   // Denominator: Provider-accepted sends (never count rejected attempts or total list size as delivered)
@@ -237,6 +294,7 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
     byTemplate: [...templateMap.values()],
     byHotelSegment: [...segmentMap.values()],
     byContactPersona: [...personaMap.values()],
+    bySequenceStep: [...stepMap.values()],
   };
 }
 

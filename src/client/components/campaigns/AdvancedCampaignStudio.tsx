@@ -2,13 +2,25 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
+  ArrowRight,
+  ArrowUp,
+  ArrowDown,
+  Bot,
+  Building2,
+  CheckCircle2,
+  Crown,
   Eye,
   FileText,
   Filter,
   FlaskConical,
+  GraduationCap,
+  Handshake,
+  Info,
+  MapPin,
   Plus,
   RefreshCw,
   Send,
+  ShieldAlert,
   ShieldCheck,
   Sparkles,
   Split,
@@ -20,6 +32,7 @@ import {
   HOTEL_SEGMENT_LABELS,
   CONTACT_PERSONAS,
   CONTACT_PERSONA_LABELS,
+  type CampaignAutomationMode,
   type CampaignDetailDto,
   type HotelSegment,
   type ContactPersona,
@@ -31,12 +44,21 @@ import { useToast } from "../ui/Toast";
 import { Panel, Stat } from "../ui/Card";
 import { Button, ButtonLink } from "../ui/Button";
 import { Badge } from "../ui/Badge";
-import { TextField, SelectField, Checkbox } from "../ui/Field";
+import { TextField, SelectField, Checkbox, TextAreaField } from "../ui/Field";
 import { Callout } from "../ui/Feedback";
-import { Dialog } from "../ui/Overlay";
+import { Dialog, ConfirmDialog } from "../ui/Overlay";
 import { PageLoader } from "../ui/Spinner";
 import { EmailPreview } from "../email/EmailPreview";
 import { num, plural } from "../../lib/format";
+
+export interface StudioSequenceStep {
+  stepIndex: number;
+  templateId: string;
+  delayDays: number;
+  delayBusinessDaysOnly: boolean;
+  subjectMode: "THREADED" | "STANDALONE";
+  purpose: string;
+}
 
 export interface SelectedTemplateItem {
   templateId: string;
@@ -115,6 +137,40 @@ export function AdvancedCampaignStudio({
   const [fromName, setFromName] = useState("");
   const [replyTo, setReplyTo] = useState("");
   const [sendRatePerMinute, setSendRatePerMinute] = useState("20");
+
+  // Automation Mode & Sending Safeguards
+  const [automationMode, setAutomationMode] = useState<CampaignAutomationMode>("APPROVAL_REQUIRED");
+  const [confirmAutomaticModalOpen, setConfirmAutomaticModalOpen] = useState(false);
+
+  // Follow-up Sequence Steps (Default: Day 0 Initial + Day 3 Follow-up)
+  const [sequenceSteps, setSequenceSteps] = useState<StudioSequenceStep[]>([
+    {
+      stepIndex: 0,
+      templateId: "",
+      delayDays: 0,
+      delayBusinessDaysOnly: true,
+      subjectMode: "THREADED",
+      purpose: "Initial Outreach (Day 0)",
+    },
+    {
+      stepIndex: 1,
+      templateId: "",
+      delayDays: 3,
+      delayBusinessDaysOnly: true,
+      subjectMode: "THREADED",
+      purpose: "Value Add & First Follow-Up (+3 business days)",
+    },
+  ]);
+
+  // AI Follow-up Drafting Modal State
+  const [aiDraftModalOpen, setAiDraftModalOpen] = useState(false);
+  const [aiDraftStepIndex, setAiDraftStepIndex] = useState<number | null>(null);
+  const [aiDraftPurpose, setAiDraftPurpose] = useState("");
+  const [aiDraftPersona, setAiDraftPersona] = useState("");
+  const [aiDraftInstructions, setAiDraftInstructions] = useState("");
+  const [aiDraftLoading, setAiDraftLoading] = useState(false);
+  const [aiDraftResult, setAiDraftResult] = useState<{ subject: string; body: string } | null>(null);
+  const [savingAiTemplate, setSavingAiTemplate] = useState(false);
 
   // Multi-Templates State
   const [selectedTemplates, setSelectedTemplates] = useState<SelectedTemplateItem[]>([]);
@@ -215,6 +271,23 @@ export function AdvancedCampaignStudio({
           }))
         );
       }
+
+      if (c.automationMode) {
+        setAutomationMode(c.automationMode as CampaignAutomationMode);
+      }
+
+      if (c.sequenceSteps && c.sequenceSteps.length > 0) {
+        setSequenceSteps(
+          c.sequenceSteps.map((s) => ({
+            stepIndex: s.stepIndex,
+            templateId: s.templateId,
+            delayDays: s.delayDays,
+            delayBusinessDaysOnly: s.delayBusinessDaysOnly,
+            subjectMode: s.subjectMode as "THREADED" | "STANDALONE",
+            purpose: s.purpose || (s.stepIndex === 0 ? "Initial outreach (Day 0)" : `Follow-up ${s.stepIndex}`),
+          }))
+        );
+      }
     }
   }, [isNew, mailboxQuery.data, existingQuery.data]);
 
@@ -233,6 +306,27 @@ export function AdvancedCampaignStudio({
       ]);
     }
   }, [isNew, selectedTemplates.length, templatesQuery.data]);
+
+  // Keep sequence steps templateId populated if empty
+  useEffect(() => {
+    if (selectedTemplates.length > 0) {
+      const fallback = selectedTemplates.find((t) => t.isFallback) ?? selectedTemplates[0];
+      if (fallback) {
+        setSequenceSteps((prev) =>
+          prev.map((s, idx) => {
+            if (idx === 0 && !s.templateId) {
+              return { ...s, templateId: fallback.templateId };
+            }
+            if (idx === 1 && !s.templateId) {
+              const alt = selectedTemplates.find((t) => !t.isFallback) ?? fallback;
+              return { ...s, templateId: alt.templateId };
+            }
+            return s;
+          })
+        );
+      }
+    }
+  }, [selectedTemplates]);
 
   // Auto-seed first contact list if empty and lists query loaded
   useEffect(() => {
@@ -396,6 +490,28 @@ export function AdvancedCampaignStudio({
     setRules((prev) => prev.filter((r) => r.id !== ruleId));
   };
 
+  const moveRuleUp = (index: number) => {
+    if (index <= 0) return;
+    setRules((prev) => {
+      const copy = [...prev];
+      const temp = copy[index - 1]!;
+      copy[index - 1] = copy[index]!;
+      copy[index] = temp;
+      return copy.map((r, i) => ({ ...r, priority: i + 1 }));
+    });
+  };
+
+  const moveRuleDown = (index: number) => {
+    setRules((prev) => {
+      if (index >= prev.length - 1) return prev;
+      const copy = [...prev];
+      const temp = copy[index + 1]!;
+      copy[index + 1] = copy[index]!;
+      copy[index] = temp;
+      return copy.map((r, i) => ({ ...r, priority: i + 1 }));
+    });
+  };
+
   const applyRulePreset = (hotelSegment: string, contactPersona: string, desc: string, city: string = "") => {
     const targetTemplateId = selectedTemplates.find((t) => !t.isFallback)?.templateId || selectedTemplates[0]?.templateId || "";
     setEditingRuleId(null);
@@ -410,6 +526,196 @@ export function AdvancedCampaignStudio({
       description: desc,
     });
     setRuleModalOpen(true);
+  };
+
+  const autoAssignRulesByAudience = () => {
+    if (selectedTemplates.length === 0) return;
+
+    const newRules: ClientTargetingRule[] = [];
+    let priorityCounter = 1;
+
+    // Detect Institute / Hiring template
+    const instTpl = selectedTemplates.find((t) =>
+      /\b(hiring|placement|campus|recruitment|internship|interns|students?|ihm|colleges?|institutes?)\b/i.test(
+        `${t.name} ${t.subject || ""}`
+      )
+    );
+    if (instTpl) {
+      newRules.push({
+        id: `auto-rule-${Date.now()}-${priorityCounter}`,
+        templateId: instTpl.templateId,
+        priority: priorityCounter++,
+        hotelSegment: "INSTITUTE",
+        contactPersona: "",
+        city: "",
+        requiresVerified: false,
+        minConfidence: null,
+        description: "Campus Institutes & Colleges (Hiring Outreach)",
+      });
+    }
+
+    // Detect Co-Partnership template
+    const partnerTpl = selectedTemplates.find((t) =>
+      /\b(partners?|partnerships?|co\s*market(ing)?|alliances?|collaborat(e|ion|ive)|brand partner|affiliate)\b/i.test(
+        `${t.name} ${t.subject || ""}`
+      )
+    );
+    if (partnerTpl) {
+      newRules.push({
+        id: `auto-rule-${Date.now()}-${priorityCounter}`,
+        templateId: partnerTpl.templateId,
+        priority: priorityCounter++,
+        hotelSegment: "CO_PARTNERSHIP",
+        contactPersona: "",
+        city: "",
+        requiresVerified: false,
+        minConfidence: null,
+        description: "Co-Partnerships & Strategic Brand Alliances",
+      });
+    }
+
+    // Detect Hotel Property template
+    const hotelTpl = selectedTemplates.find((t) =>
+      /\b(hotels?|resorts?|properties|hospitality|gm|general manager|guest|rooms?|revpar|stay)\b/i.test(
+        `${t.name} ${t.subject || ""}`
+      )
+    );
+    if (hotelTpl) {
+      newRules.push({
+        id: `auto-rule-${Date.now()}-${priorityCounter}`,
+        templateId: hotelTpl.templateId,
+        priority: priorityCounter++,
+        hotelSegment: "HOTEL",
+        contactPersona: "",
+        city: "",
+        requiresVerified: false,
+        minConfidence: null,
+        description: "Hotel & Resort Property Contacts",
+      });
+    }
+
+    if (newRules.length > 0) {
+      setRules(newRules);
+      toast.success(
+        "Audience rules configured",
+        `${newRules.length} targeting rule(s) configured automatically from your campaign templates.`
+      );
+    } else {
+      toast.error(
+        "No matching template keywords found. Add templates named for Institutes, Partners, or Hotels."
+      );
+    }
+  };
+
+  // Follow-up Sequence Helpers
+  const addSequenceStep = (preset?: { purpose: string; delayDays: number }) => {
+    setSequenceSteps((prev) => {
+      const nextIdx = prev.length;
+      const fallbackTpl = selectedTemplates[0]?.templateId ?? "";
+      return [
+        ...prev,
+        {
+          stepIndex: nextIdx,
+          templateId: fallbackTpl,
+          delayDays: preset?.delayDays ?? 3,
+          delayBusinessDaysOnly: true,
+          subjectMode: "THREADED",
+          purpose: preset?.purpose ?? `Follow-up Step ${nextIdx}`,
+        },
+      ];
+    });
+  };
+
+  const removeSequenceStep = (stepIndex: number) => {
+    if (stepIndex === 0) {
+      toast.error("Initial email step cannot be removed.");
+      return;
+    }
+    setSequenceSteps((prev) =>
+      prev
+        .filter((s) => s.stepIndex !== stepIndex)
+        .map((s, idx) => ({ ...s, stepIndex: idx }))
+    );
+  };
+
+  const updateSequenceStep = (stepIndex: number, partial: Partial<StudioSequenceStep>) => {
+    setSequenceSteps((prev) =>
+      prev.map((s) => (s.stepIndex === stepIndex ? { ...s, ...partial } : s))
+    );
+  };
+
+  const openAiDraftModal = (step: StudioSequenceStep) => {
+    setAiDraftStepIndex(step.stepIndex);
+    setAiDraftPurpose(step.purpose);
+    setAiDraftPersona("");
+    setAiDraftInstructions("");
+    setAiDraftResult(null);
+    setAiDraftModalOpen(true);
+  };
+
+  const generateAiDraft = async () => {
+    if (!aiDraftStepIndex) return;
+    setAiDraftLoading(true);
+    try {
+      const prevStep = sequenceSteps[aiDraftStepIndex - 1];
+      const allTemplates = templatesQuery.data?.data ?? [];
+      const prevTpl = prevStep?.templateId ? allTemplates.find((t) => t.id === prevStep.templateId) : undefined;
+      const res = await api.post<{ subject: string; body?: string; bodyText?: string; bodyHtml?: string }>(
+        `/api/campaigns/${campaignId || "new"}/sequence/ai-draft`,
+        {
+          stepIndex: aiDraftStepIndex,
+          purpose: aiDraftPurpose,
+          previousSubject: prevTpl?.subject,
+          previousBody: prevTpl?.bodyText || prevTpl?.bodyHtml,
+          instructions: `${aiDraftPersona ? `Target recipient persona: ${aiDraftPersona}. ` : ""}${aiDraftInstructions}`,
+        }
+      );
+      const bodyContent = res.data.bodyText || res.data.body || "";
+      setAiDraftResult({
+        subject: res.data.subject,
+        body: bodyContent,
+      });
+      toast.success("Follow-up drafted by AI", "Review and assign to this step.");
+    } catch (err) {
+      toast.error("Failed to generate AI draft", errorMessage(err));
+    } finally {
+      setAiDraftLoading(false);
+    }
+  };
+
+  const saveAiDraftAsTemplate = async () => {
+    if (!aiDraftResult || aiDraftStepIndex === null) return;
+    setSavingAiTemplate(true);
+    try {
+      const stepName = `Follow-up Step ${aiDraftStepIndex} - ${aiDraftPurpose.slice(0, 24)}`;
+      const res = await api.post<{ id: string; name: string; subject: string }>("/api/templates", {
+        name: stepName,
+        subject: aiDraftResult.subject,
+        bodyHtml: plainTextToHtml(aiDraftResult.body),
+        bodyText: aiDraftResult.body,
+        description: `AI-assisted follow-up template for step ${aiDraftStepIndex}: ${aiDraftPurpose}`,
+      });
+      await templatesQuery.refetch();
+      // Assign this template to the step
+      updateSequenceStep(aiDraftStepIndex, { templateId: res.data.id });
+      // Also add to selectedTemplates if not present
+      setSelectedTemplates((prev) => [
+        ...prev,
+        {
+          templateId: res.data.id,
+          name: res.data.name,
+          subject: res.data.subject,
+          isFallback: false,
+          priority: prev.length,
+        },
+      ]);
+      setAiDraftModalOpen(false);
+      toast.success("Template created & assigned!", `Step ${aiDraftStepIndex} is now linked to "${res.data.name}".`);
+    } catch (err) {
+      toast.error("Could not save template", errorMessage(err));
+    } finally {
+      setSavingAiTemplate(false);
+    }
   };
 
   // Test Send State & Helpers
@@ -482,6 +788,15 @@ export function AdvancedCampaignStudio({
         fromName: fromName.trim() || mailboxQuery.data?.data.smtp.fromName || "FocusRealm",
         replyTo: replyTo.trim() || null,
         sendRatePerMinute: parseInt(sendRatePerMinute, 10) || 20,
+        automationMode,
+        sequenceSteps: sequenceSteps.map((s, idx) => ({
+          stepIndex: idx,
+          templateId: s.templateId || fallback.templateId,
+          delayDays: idx === 0 ? 0 : s.delayDays,
+          delayBusinessDaysOnly: s.delayBusinessDaysOnly,
+          subjectMode: s.subjectMode,
+          purpose: s.purpose || (idx === 0 ? "Initial outreach" : `Follow-up ${idx}`),
+        })),
         templates: selectedTemplates.map((t) => ({
           templateId: t.templateId,
           isFallback: t.isFallback,
@@ -622,10 +937,325 @@ export function AdvancedCampaignStudio({
         </div>
       </Panel>
 
-      {/* 2. Multi-Template Selection */}
+      {/* 2. Controlled Automation Mode & Sending Safeguards */}
       <Panel
-        title="2. Eligible Email Templates"
-        description="Select multiple email templates. Contacts matching targeting rules will receive their specific template; unmatched contacts receive the default fallback."
+        title="2. Controlled Automation Mode & Sending Safeguards"
+        description="Choose how outreach and follow-ups are dispatched. Safety stopping rules are strictly enforced across all modes."
+      >
+        <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-3">
+            {/* Mode 1: MANUAL */}
+            <div
+              onClick={() => setAutomationMode("MANUAL")}
+              className={`cursor-pointer rounded-lg border p-4 transition-all ${
+                automationMode === "MANUAL"
+                  ? "border-brand bg-brand-soft/20 shadow-xs ring-1 ring-brand"
+                  : "border-line bg-surface hover:border-line-hover"
+              }`}
+            >
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-semibold text-ink text-sm">Manual Sending</span>
+                {automationMode === "MANUAL" && (
+                  <Badge tone="brand">Active</Badge>
+                )}
+              </div>
+              <p className="text-xs text-ink-muted leading-relaxed">
+                You manually trigger and approve each individual email and follow-up. Nothing is sent without your explicit click.
+              </p>
+              <div className="mt-3 text-[11px] text-ink-subtle flex items-center gap-1">
+                <ShieldCheck className="h-3.5 w-3.5 text-ink-muted" /> Full human execution
+              </div>
+            </div>
+
+            {/* Mode 2: APPROVAL_REQUIRED (Recommended) */}
+            <div
+              onClick={() => setAutomationMode("APPROVAL_REQUIRED")}
+              className={`cursor-pointer rounded-lg border p-4 transition-all ${
+                automationMode === "APPROVAL_REQUIRED"
+                  ? "border-brand bg-brand-soft/20 shadow-xs ring-1 ring-brand"
+                  : "border-line bg-surface hover:border-line-hover"
+              }`}
+            >
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-semibold text-ink text-sm">Approval Required</span>
+                <Badge tone="success">Recommended</Badge>
+              </div>
+              <p className="text-xs text-ink-muted leading-relaxed">
+                The system schedules follow-ups when due, but pauses them in an <strong>Awaiting Approval</strong> queue until you approve individually or in bulk.
+              </p>
+              <div className="mt-3 text-[11px] text-brand flex items-center gap-1 font-medium">
+                <CheckCircle2 className="h-3.5 w-3.5" /> High control & automated timing
+              </div>
+            </div>
+
+            {/* Mode 3: AUTOMATIC */}
+            <div
+              onClick={() => {
+                if (automationMode !== "AUTOMATIC") {
+                  setConfirmAutomaticModalOpen(true);
+                }
+              }}
+              className={`cursor-pointer rounded-lg border p-4 transition-all ${
+                automationMode === "AUTOMATIC"
+                  ? "border-amber-500 bg-amber-500/10 shadow-xs ring-1 ring-amber-500"
+                  : "border-line bg-surface hover:border-line-hover"
+              }`}
+            >
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-semibold text-ink text-sm">Automatic Follow-ups</span>
+                {automationMode === "AUTOMATIC" ? (
+                  <Badge tone="warning">Active</Badge>
+                ) : (
+                  <Badge tone="neutral">Requires confirmation</Badge>
+                )}
+              </div>
+              <p className="text-xs text-ink-muted leading-relaxed">
+                Approved sequence steps dispatch automatically once due. Instant safety stop on reply, bounce, unsubscribe, or stale inbox sync.
+              </p>
+              <div className="mt-3 text-[11px] text-amber-700 dark:text-amber-400 flex items-center gap-1 font-medium">
+                <Bot className="h-3.5 w-3.5" /> Autonomous with safety brakes
+              </div>
+            </div>
+          </div>
+
+          {/* Safety Stopping Rules Callout Banner */}
+          <div className="rounded-lg border border-line bg-surface-sunken/40 p-3.5 text-xs text-ink-muted">
+            <div className="flex items-center gap-2 mb-1.5 font-semibold text-ink">
+              <ShieldAlert className="h-4 w-4 text-brand" />
+              FocusRealm Sending Safeguards & Stopping Rules
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 mt-2">
+              <div className="rounded border border-line/60 bg-surface p-2">
+                <div className="font-medium text-ink">Instant Stop on Reply</div>
+                <div className="text-[11px] text-ink-subtle mt-0.5">Cancels future follow-ups immediately upon inbound email.</div>
+              </div>
+              <div className="rounded border border-line/60 bg-surface p-2">
+                <div className="font-medium text-ink">Auto Bounce Suppression</div>
+                <div className="text-[11px] text-ink-subtle mt-0.5">Suppresses failed mailboxes and halts remaining touches.</div>
+              </div>
+              <div className="rounded border border-line/60 bg-surface p-2">
+                <div className="font-medium text-ink">Mailbox Health Guard</div>
+                <div className="text-[11px] text-ink-subtle mt-0.5">Defers sends if SpaceMail IMAP is offline or stale (&gt;30m).</div>
+              </div>
+              <div className="rounded border border-line/60 bg-surface p-2">
+                <div className="font-medium text-ink">Idempotent Delivery</div>
+                <div className="text-[11px] text-ink-subtle mt-0.5">Database row-locking prevents concurrent duplicate dispatches.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Panel>
+
+      {/* 3. Follow-up Sequence & Cadence */}
+      <Panel
+        title="3. Follow-up Sequence & Cadence"
+        description="Design multi-touch outreach. Day 0 delivers the initial introduction; subsequent steps send after elapsed business days if no reply is detected."
+        actions={
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<Plus className="h-3.5 w-3.5" />}
+              onClick={() => addSequenceStep()}
+            >
+              Add Step
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-6">
+          {/* Visual Sequence Cadence Flow */}
+          <div className="rounded-xl border border-line bg-surface-muted/40 p-4">
+            <div className="text-xs font-semibold text-ink uppercase tracking-wider mb-3 flex items-center justify-between">
+              <span>Sequence Progression</span>
+              <span className="text-[11px] font-normal text-ink-subtle lowercase">
+                {sequenceSteps.length} touch{sequenceSteps.length === 1 ? "" : "es"} in sequence
+              </span>
+            </div>
+
+            <div className="flex flex-col md:flex-row items-stretch md:items-center gap-2 overflow-x-auto pb-2">
+              {sequenceSteps.map((step, idx) => {
+                const tpl = (templatesQuery.data?.data ?? []).find((t) => t.id === step.templateId);
+                return (
+                  <div key={idx} className="flex flex-1 items-center gap-2 min-w-[210px]">
+                    <div className="flex-1 rounded-lg border border-line bg-surface p-3 shadow-2xs">
+                      <div className="flex items-center justify-between gap-1 mb-1">
+                        <span className="text-xs font-bold text-ink">
+                          {idx === 0 ? "Initial Email" : `Step ${idx}`}
+                        </span>
+                        <Badge tone={idx === 0 ? "brand" : "neutral"}>
+                          {idx === 0 ? "Day 0" : `+${step.delayDays} ${step.delayBusinessDaysOnly ? "biz days" : "days"}`}
+                        </Badge>
+                      </div>
+                      <p className="text-[11px] text-ink font-medium line-clamp-1">{step.purpose}</p>
+                      <p className="text-[11px] text-ink-subtle line-clamp-1 mt-0.5">
+                        {tpl?.name || "Select template"}
+                      </p>
+                    </div>
+
+                    {idx < sequenceSteps.length - 1 && (
+                      <div className="flex flex-col items-center justify-center px-1 text-ink-subtle">
+                        <ArrowRight className="h-4 w-4 hidden md:block" />
+                        <span className="text-[9px] font-semibold text-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 px-1 py-0.5 rounded border border-emerald-200 dark:border-emerald-800 hidden md:block mt-0.5">
+                          If No Reply
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Sequence Step Configuration Cards */}
+          <div className="space-y-4">
+            {sequenceSteps.map((step, idx) => {
+              const isInitial = idx === 0;
+              const allTemplates = templatesQuery.data?.data ?? [];
+              return (
+                <div
+                  key={idx}
+                  className="rounded-lg border border-line bg-surface p-4 space-y-4 shadow-2xs hover:border-line-hover transition-colors"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
+                    <div className="flex items-center gap-2">
+                      <div className="flex h-6 w-6 items-center justify-center rounded-full bg-brand text-white text-xs font-bold">
+                        {idx}
+                      </div>
+                      <span className="font-semibold text-ink text-sm">
+                        {isInitial ? "Step 0: Initial Email" : `Follow-Up Step ${idx}`}
+                      </span>
+                      <Badge tone={isInitial ? "brand" : "neutral"}>
+                        {isInitial ? "Day 0" : `Send after ${step.delayDays} ${step.delayBusinessDaysOnly ? "business days" : "calendar days"}`}
+                      </Badge>
+                      {!isInitial && (
+                        <Badge tone={step.subjectMode === "THREADED" ? "success" : "neutral"}>
+                          {step.subjectMode === "THREADED" ? "Threaded (Re:)" : "Standalone Subject"}
+                        </Badge>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {!isInitial && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          icon={<Sparkles className="h-3.5 w-3.5 text-brand" />}
+                          onClick={() => openAiDraftModal(step)}
+                        >
+                          AI Draft Follow-up
+                        </Button>
+                      )}
+                      {!isInitial && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          icon={<Trash2 className="h-3.5 w-3.5 text-danger" />}
+                          onClick={() => removeSequenceStep(idx)}
+                          title="Remove follow-up step"
+                        />
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    <TextField
+                      label="Step Purpose / Angle"
+                      value={step.purpose}
+                      onChange={(e) => updateSequenceStep(idx, { purpose: e.target.value })}
+                      placeholder="e.g. Case study & social proof"
+                    />
+
+                    <SelectField
+                      label="Assigned Email Template"
+                      value={step.templateId}
+                      onChange={(e) => updateSequenceStep(idx, { templateId: e.target.value })}
+                      options={allTemplates.map((t) => ({
+                        value: t.id,
+                        label: `${t.name}${t.subject ? ` — "${t.subject}"` : ""}`,
+                      }))}
+                      required
+                    />
+
+                    {!isInitial ? (
+                      <div className="grid grid-cols-2 gap-2">
+                        <TextField
+                          label="Delay (Days)"
+                          type="number"
+                          value={String(step.delayDays)}
+                          onChange={(e) => updateSequenceStep(idx, { delayDays: Math.max(1, parseInt(e.target.value, 10) || 1) })}
+                        />
+                        <SelectField
+                          label="Threading"
+                          value={step.subjectMode}
+                          onChange={(e) => updateSequenceStep(idx, { subjectMode: e.target.value as "THREADED" | "STANDALONE" })}
+                          options={[
+                            { value: "THREADED", label: "Threaded (Re:)" },
+                            { value: "STANDALONE", label: "New Subject" },
+                          ]}
+                        />
+                      </div>
+                    ) : (
+                      <div className="flex items-end pb-2">
+                        <span className="text-xs text-ink-subtle">
+                          Initial outreach triggers Day 0. Recipient targeting rules and fallbacks route templates below.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {!isInitial && (
+                    <div className="flex items-center justify-between text-xs pt-1">
+                      <Checkbox
+                        label="Business days only (skips Saturdays and Sundays)"
+                        checked={step.delayBusinessDaysOnly}
+                        onChange={(e) => updateSequenceStep(idx, { delayBusinessDaysOnly: e.target.checked })}
+                      />
+                      <span className="text-ink-subtle text-[11px]">
+                        Stops immediately if contact replies or unsubscribes.
+                      </span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Quick Presets for Follow-up Cadence */}
+          <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-line text-xs">
+            <span className="text-ink-subtle font-medium">Quick Cadence Presets:</span>
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<Plus className="h-3 w-3" />}
+              onClick={() => addSequenceStep({ purpose: "Proof point & case study", delayDays: 3 })}
+            >
+              + Value / Proof Point (+3 biz days)
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<Plus className="h-3 w-3" />}
+              onClick={() => addSequenceStep({ purpose: "Collaboration proposal & direct booking ROI", delayDays: 4 })}
+            >
+              + Partnership Angle (+4 biz days)
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<Plus className="h-3 w-3" />}
+              onClick={() => addSequenceStep({ purpose: "Permission-based breakup & final note", delayDays: 5 })}
+            >
+              + Permission Breakup (+5 biz days)
+            </Button>
+          </div>
+        </div>
+      </Panel>
+
+      {/* 4. Eligible Email Templates */}
+      <Panel
+        title="4. Initial Email Templates & Fallback"
+        description="Select multiple email templates for Step 0. Contacts matching targeting rules will receive their specific template; unmatched contacts receive the default fallback."
         actions={
           <div className="flex items-center gap-2">
             <Button
@@ -736,20 +1366,31 @@ export function AdvancedCampaignStudio({
         </div>
       </Panel>
 
-      {/* 3. Segment & Persona Targeting Rules */}
+      {/* 5. Segment & Persona Targeting Rules */}
       <Panel
-        title="3. Segment & Persona Targeting Rules"
+        title="5. Segment & Persona Targeting Rules"
         description="Rules route contacts matching specific criteria to their dedicated template. Contacts not matching any rule automatically receive the Fallback template."
         actions={
-          <Button
-            variant="secondary"
-            size="sm"
-            icon={<Plus className="h-3.5 w-3.5" />}
-            onClick={openNewRuleModal}
-            disabled={selectedTemplates.length === 0}
-          >
-            Add Targeting Rule
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<Sparkles className="h-3.5 w-3.5 text-brand" />}
+              onClick={autoAssignRulesByAudience}
+              disabled={selectedTemplates.length === 0}
+            >
+              Auto-Assign Audience Rules
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<Plus className="h-3.5 w-3.5" />}
+              onClick={openNewRuleModal}
+              disabled={selectedTemplates.length === 0}
+            >
+              Add Targeting Rule
+            </Button>
+          </div>
         }
       >
         <div className="space-y-4">
@@ -777,7 +1418,7 @@ export function AdvancedCampaignStudio({
             <div className="mt-3 pt-3 border-t border-brand/10">
               <div className="flex items-center justify-between gap-2 mb-2">
                 <span className="text-[11px] font-semibold text-ink-subtle uppercase tracking-wider flex items-center gap-1.5">
-                  <Sparkles className="h-3 w-3 text-brand" /> Quick 1-Click Presets:
+                  <Sparkles className="h-3 w-3 text-brand" /> Quick Targeting Presets:
                 </span>
                 <span className="text-[11px] text-ink-subtle italic">Click to pre-fill a targeting rule</span>
               </div>
@@ -786,37 +1427,51 @@ export function AdvancedCampaignStudio({
                   size="sm"
                   variant="secondary"
                   className="text-xs"
-                  onClick={() => applyRulePreset("LUXURY_RESORT", "", "Luxury Hotels & Resorts")}
+                  icon={<GraduationCap className="h-3.5 w-3.5 text-brand" />}
+                  onClick={() => applyRulePreset("INSTITUTE", "", "Campus & Institute Hiring Outreach")}
                   disabled={selectedTemplates.length === 0}
                 >
-                  🏨 Target Luxury & Resorts
+                  Target Institutes (Hiring)
                 </Button>
                 <Button
                   size="sm"
                   variant="secondary"
                   className="text-xs"
-                  onClick={() => applyRulePreset("", "GENERAL_MANAGER", "General Managers")}
+                  icon={<Handshake className="h-3.5 w-3.5 text-brand" />}
+                  onClick={() => applyRulePreset("CO_PARTNERSHIP", "", "Co-Marketing & Brand Partners")}
                   disabled={selectedTemplates.length === 0}
                 >
-                  👔 Target General Managers
+                  Target Co-Partnerships
                 </Button>
                 <Button
                   size="sm"
                   variant="secondary"
                   className="text-xs"
-                  onClick={() => applyRulePreset("OTHER", "FOUNDER_OWNER", "Partners & Agency Founders")}
+                  icon={<Building2 className="h-3.5 w-3.5 text-brand" />}
+                  onClick={() => applyRulePreset("HOTEL", "", "All Hotel & Resort Properties")}
                   disabled={selectedTemplates.length === 0}
                 >
-                  🤝 Target Partners & Agencies
+                  Target All Hotels
                 </Button>
                 <Button
                   size="sm"
                   variant="secondary"
                   className="text-xs"
+                  icon={<Crown className="h-3.5 w-3.5 text-brand" />}
+                  onClick={() => applyRulePreset("LUXURY", "GENERAL_MANAGER", "Luxury General Managers")}
+                  disabled={selectedTemplates.length === 0}
+                >
+                  Target Luxury GMs
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="text-xs"
+                  icon={<MapPin className="h-3.5 w-3.5 text-brand" />}
                   onClick={() => applyRulePreset("", "", "Specific City Focus", "Goa")}
                   disabled={selectedTemplates.length === 0}
                 >
-                  📍 Target by City
+                  Target by City
                 </Button>
               </div>
             </div>
@@ -844,13 +1499,37 @@ export function AdvancedCampaignStudio({
             {rules.map((rule, idx) => {
               const targetTemplate = selectedTemplates.find((t) => t.templateId === rule.templateId);
               return (
-                <div key={rule.id} className="flex flex-wrap items-center justify-between gap-3 p-3.5 text-xs">
+                <div key={rule.id} className="flex flex-wrap items-center justify-between gap-3 p-3.5 text-xs hover:bg-surface-muted/20 transition-colors">
                   <div className="flex items-center gap-3">
-                    <span className="flex h-6 w-6 items-center justify-center rounded-full bg-surface-muted font-bold text-ink-subtle text-[11px]">
-                      #{idx + 1}
-                    </span>
+                    <div className="flex flex-col items-center gap-0.5">
+                      <button
+                        type="button"
+                        title="Move rule up in priority"
+                        disabled={idx === 0}
+                        onClick={() => moveRuleUp(idx)}
+                        className="p-1 rounded text-ink-subtle hover:text-ink hover:bg-surface-muted disabled:opacity-20 disabled:cursor-not-allowed"
+                      >
+                        <ArrowUp className="h-3.5 w-3.5" />
+                      </button>
+                      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-surface-muted font-bold text-ink-subtle text-[10px]">
+                        {idx + 1}
+                      </span>
+                      <button
+                        type="button"
+                        title="Move rule down in priority"
+                        disabled={idx === rules.length - 1}
+                        onClick={() => moveRuleDown(idx)}
+                        className="p-1 rounded text-ink-subtle hover:text-ink hover:bg-surface-muted disabled:opacity-20 disabled:cursor-not-allowed"
+                      >
+                        <ArrowDown className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+
                     <div>
                       <div className="flex items-center gap-2">
+                        <span className="font-semibold text-brand text-[11px] uppercase tracking-wide">
+                          Priority #{rule.priority ?? idx + 1}:
+                        </span>
                         <span className="font-medium text-ink">
                           Send: <strong className="text-brand">{targetTemplate?.name ?? "Unknown Template"}</strong>
                         </span>
@@ -858,7 +1537,9 @@ export function AdvancedCampaignStudio({
                       <div className="mt-1 flex flex-wrap items-center gap-1.5 text-ink-muted">
                         {rule.hotelSegment && (
                           <Badge tone="info">
-                            {HOTEL_SEGMENT_LABELS[rule.hotelSegment as HotelSegment] ?? rule.hotelSegment}
+                            {rule.hotelSegment === "HOTEL"
+                              ? "All Hotel Properties"
+                              : HOTEL_SEGMENT_LABELS[rule.hotelSegment as HotelSegment] ?? rule.hotelSegment}
                           </Badge>
                         )}
                         {rule.contactPersona && (
@@ -901,9 +1582,9 @@ export function AdvancedCampaignStudio({
         </div>
       </Panel>
 
-      {/* 4. Live Recipient & Template Analysis */}
+      {/* 6. Live Recipient & Sequence Simulation */}
       <Panel
-        title="4. Live Recipient & Template Analysis"
+        title="6. Live Recipient & Sequence Simulation"
         description="Real-time distribution breakdown and simulated matching for the selected audience."
         actions={
           sim && sim.sample && sim.sample.length > 0 && (
@@ -1220,13 +1901,16 @@ export function AdvancedCampaignStudio({
 
           <div className="grid gap-3 sm:grid-cols-2">
             <SelectField
-              label="Target Hotel Segment"
+              label="Target Segment / Category"
               optional
               value={ruleForm.hotelSegment}
               onChange={(e) => setRuleForm((f) => ({ ...f, hotelSegment: e.target.value }))}
               options={[
-                { value: "", label: "Any hotel segment" },
-                ...HOTEL_SEGMENTS.map((seg) => ({
+                { value: "", label: "Any organization / segment" },
+                { value: "HOTEL", label: "All Hotel & Resort Properties" },
+                { value: "INSTITUTE", label: "Institutes & Colleges (Hiring Outreach)" },
+                { value: "CO_PARTNERSHIP", label: "Co-Partnerships & Brand Alliances" },
+                ...HOTEL_SEGMENTS.filter((s) => s !== "UNKNOWN" && s !== "CO_PARTNERSHIP" && s !== "INSTITUTE").map((seg) => ({
                   value: seg,
                   label: HOTEL_SEGMENT_LABELS[seg],
                 })),
@@ -1239,7 +1923,12 @@ export function AdvancedCampaignStudio({
               onChange={(e) => setRuleForm((f) => ({ ...f, contactPersona: e.target.value }))}
               options={[
                 { value: "", label: "Any persona / title" },
-                ...CONTACT_PERSONAS.map((p) => ({
+                { value: "PLACEMENT_OFFICER", label: "Placement & Training Officer (Hiring)" },
+                { value: "DEAN_DIRECTOR", label: "Dean / Academic Director" },
+                { value: "PARTNERSHIP_DIRECTOR", label: "Partnership / Alliance Director" },
+                ...CONTACT_PERSONAS.filter(
+                  (p) => p !== "UNKNOWN" && p !== "PLACEMENT_OFFICER" && p !== "DEAN_DIRECTOR" && p !== "PARTNERSHIP_DIRECTOR"
+                ).map((p) => ({
                   value: p,
                   label: CONTACT_PERSONA_LABELS[p],
                 })),
@@ -1303,8 +1992,9 @@ export function AdvancedCampaignStudio({
           )}
 
           <div className="rounded-lg bg-brand-soft/20 border border-brand/20 p-3 text-ink-muted">
-            <p>
-              💡 <strong>Safety note:</strong> Test emails are sent with <code>[Test]</code> prepended to the subject and are strictly dispatched only to your designated test address. Real campaign recipients are never emailed during a test.
+            <p className="flex items-start gap-1.5 leading-relaxed">
+              <Info className="h-4 w-4 text-brand shrink-0 mt-0.5" />
+              <span><strong>Safety note:</strong> Test emails are sent with <code>[Test]</code> prepended to the subject and are strictly dispatched only to your designated test address. Real campaign recipients are never emailed during a test.</span>
             </p>
           </div>
 
@@ -1569,8 +2259,9 @@ export function AdvancedCampaignStudio({
 
               {previewTab === "edit" && (
                 <div className="space-y-3">
-                  <div className="rounded-md bg-brand-soft/20 border border-brand/20 p-2.5 text-xs text-ink-muted">
-                    💡 <strong>Manual Override:</strong> Any subject or body edits saved here are permanently tied to this recipient ({previewSample.email}). They will never be overwritten by template re-renders or automated rules during campaign approval and sending.
+                  <div className="rounded-md bg-brand-soft/20 border border-brand/20 p-2.5 text-xs text-ink-muted flex items-start gap-1.5 leading-relaxed">
+                    <Info className="h-4 w-4 text-brand shrink-0 mt-0.5" />
+                    <span><strong>Manual Override:</strong> Any subject or body edits saved here are permanently tied to this recipient ({previewSample.email}). They will never be overwritten by template re-renders or automated rules during campaign approval and sending.</span>
                   </div>
 
                   <TextField
@@ -1598,6 +2289,145 @@ export function AdvancedCampaignStudio({
           </Dialog>
         );
       })()}
+
+      {/* Confirmation Dialog: Enable Automatic Follow-ups */}
+      <ConfirmDialog
+        open={confirmAutomaticModalOpen}
+        onClose={() => setConfirmAutomaticModalOpen(false)}
+        title="Enable Automatic Follow-up Outreach?"
+        confirmLabel="Enable Automatic Sending"
+        tone="primary"
+        onConfirm={() => {
+          setAutomationMode("AUTOMATIC");
+          setConfirmAutomaticModalOpen(false);
+          toast.success("Automatic follow-ups mode active", "Sequence steps will send when due if all safety checks pass.");
+        }}
+      >
+        <div className="space-y-3 text-xs text-ink-muted">
+          <p>
+            In <strong>Automatic mode</strong>, scheduled follow-up emails will be dispatched automatically once the specified waiting period (in business days) passes, without requiring individual per-recipient approval.
+          </p>
+
+          <div className="rounded-lg border border-line bg-surface-muted/60 p-3 space-y-2">
+            <span className="font-semibold text-ink text-xs flex items-center gap-1.5">
+              <ShieldAlert className="h-4 w-4 text-brand" />
+              Autonomous Safeguards & Stopping Rules Enforced:
+            </span>
+            <ul className="space-y-1.5 list-disc pl-4 text-ink-muted leading-relaxed">
+              <li>
+                <strong>Instant Stop on Inbound Reply:</strong> Any reply from a recipient halts and cancels all remaining follow-ups for that contact immediately.
+              </li>
+              <li>
+                <strong>Immediate Bounce & Unsubscribe Suppression:</strong> Delivery bounces or opt-out phrases automatically suppress the recipient from any further touches.
+              </li>
+              <li>
+                <strong>Stale Inbox Guard:</strong> If IMAP mailbox synchronization is offline or stale (&gt;30m), sending is safely deferred until connection is confirmed healthy.
+              </li>
+              <li>
+                <strong>Manual Override:</strong> You can pause or cancel individual recipients or the entire campaign at any moment.
+              </li>
+            </ul>
+          </div>
+        </div>
+      </ConfirmDialog>
+
+      {/* Dialog: AI Follow-Up Drafting Assistant */}
+      <Dialog
+        open={aiDraftModalOpen}
+        onClose={() => setAiDraftModalOpen(false)}
+        title={`AI Assistant: Draft Follow-up Step ${aiDraftStepIndex ?? 1}`}
+        description="Generate a context-aware, value-add follow-up email without repetitive cliches or hallucinated claims."
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setAiDraftModalOpen(false)} disabled={aiDraftLoading || savingAiTemplate}>
+              Cancel
+            </Button>
+            {aiDraftResult && (
+              <Button
+                variant="primary"
+                onClick={saveAiDraftAsTemplate}
+                loading={savingAiTemplate}
+                icon={<Sparkles className="h-4 w-4" />}
+              >
+                Create Template & Assign to Step
+              </Button>
+            )}
+          </>
+        }
+      >
+        <div className="space-y-4 text-xs">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <TextField
+              label="Step Purpose / Focus"
+              value={aiDraftPurpose}
+              onChange={(e) => setAiDraftPurpose(e.target.value)}
+              placeholder="e.g. Case study, direct booking ROI, or breakup note"
+              required
+            />
+            <SelectField
+              label="Recipient Persona"
+              optional
+              value={aiDraftPersona}
+              onChange={(e) => setAiDraftPersona(e.target.value)}
+              options={[
+                { value: "", label: "General hotel decision maker" },
+                ...CONTACT_PERSONAS.map((p) => ({
+                  value: CONTACT_PERSONA_LABELS[p],
+                  label: CONTACT_PERSONA_LABELS[p],
+                })),
+              ]}
+            />
+          </div>
+
+          <TextAreaField
+            label="Additional Custom Instructions (Optional)"
+            optional
+            value={aiDraftInstructions}
+            onChange={(e) => setAiDraftInstructions(e.target.value)}
+            placeholder="e.g. Emphasize how FocusRealm integrates alongside existing PMS without hardware replacement. Keep it under 90 words."
+            rows={3}
+          />
+
+          <div className="flex justify-end">
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={aiDraftLoading}
+              onClick={generateAiDraft}
+              icon={<Sparkles className="h-3.5 w-3.5 text-brand" />}
+            >
+              {aiDraftResult ? "Regenerate Draft" : "Generate Draft with AI"}
+            </Button>
+          </div>
+
+          {aiDraftResult && (
+            <div className="rounded-lg border border-line bg-surface p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-ink text-xs uppercase tracking-wider">
+                  Generated Follow-up Draft
+                </span>
+                <Badge tone="brand">Ready to use</Badge>
+              </div>
+
+              <TextField
+                label="Subject Line"
+                value={aiDraftResult.subject}
+                onChange={(e) => setAiDraftResult({ ...aiDraftResult, subject: e.target.value })}
+              />
+
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-ink block">Email Body</label>
+                <textarea
+                  rows={8}
+                  value={aiDraftResult.body}
+                  onChange={(e) => setAiDraftResult({ ...aiDraftResult, body: e.target.value })}
+                  className="w-full rounded-md border border-line bg-surface p-3 font-mono text-xs text-ink focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand leading-relaxed"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </Dialog>
     </div>
   );
 }

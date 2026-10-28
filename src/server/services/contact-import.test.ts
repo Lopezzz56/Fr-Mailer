@@ -47,13 +47,40 @@ describe("suggestMapping", () => {
   it("prefers separate first/last columns over a combined name", () => {
     expect(suggestMapping(["Name", "First Name", "Email"]).Name).toBe("ignore");
   });
+
+  it("correctly identifies hotel prospect columns including Public Email and Public Phone", () => {
+    const headers = [
+      "Hotel Name",
+      "Star Category / Positioning",
+      "Public Phone",
+      "Public Email",
+      "Website / Verification Link",
+      "Why It May Fit Focus Realm",
+    ];
+    const mapping = suggestMapping(headers);
+    expect(mapping["Public Email"]).toBe("email");
+    expect(mapping["Public Phone"]).toBe("phone");
+    expect(mapping["Hotel Name"]).toBe("company");
+    expect(mapping["Star Category / Positioning"]).toBe("hotelSegment");
+    expect(mapping["Website / Verification Link"]).toBe("custom:websiteVerificationLink");
+  });
 });
 
 describe("validateMapping", () => {
-  it("requires an email column and rejects duplicates", () => {
+  it("requires an email column and rejects duplicates for non-coalescable targets", () => {
     expect(() => validateMapping({ A: "firstName" }, ["A"])).toThrow(/email/);
     expect(() => validateMapping({ A: "email", B: "email" }, ["A", "B"])).toThrow(/same field/);
     expect(() => validateMapping({ A: "email", B: "custom:bad name" }, ["A", "B"])).toThrow(/valid destination/);
+    expect(() => validateMapping({ A: "email", B: "custom:notes", C: "custom:notes" }, ["A", "B", "C"])).toThrow(/same field/);
+  });
+
+  it("permits coalescable fields like Company to receive multiple columns without error", () => {
+    const valid = validateMapping(
+      { "Hotel Name": "company", "Hotel / Group Name": "company", Email: "email" },
+      ["Hotel Name", "Hotel / Group Name", "Email"]
+    );
+    expect(valid["Hotel Name"]).toBe("company");
+    expect(valid["Hotel / Group Name"]).toBe("company");
   });
 });
 
@@ -90,6 +117,23 @@ describe("parseWorkbook (multi-sheet .xlsx)", () => {
     ]);
     expect(() => selectSheet(sheets, "Delhi")).toThrow(/no sheet called "Delhi"/);
   });
+
+  it("unifies synonymous headers like Hotel Name and Hotel / Group Name across sheets", async () => {
+    const multiSheetBuffer = await writeXlsxFile([
+      { sheet: "North", data: [["Hotel Name", "Public Email"], ["Taj Mahal", "taj@hotel.test"]] },
+      { sheet: "South", data: [["Hotel / Group Name", "Public Email"], ["Oberoi Group", "oberoi@hotel.test"]] },
+    ]).toBuffer();
+
+    const sheets = await parseWorkbook(multiSheetBuffer, "growing_hotels.xlsx");
+    const combined = selectSheet(sheets, ALL_SHEETS);
+
+    // Both sheets should align to the canonical "Hotel Name" column without creating a duplicate column
+    expect(combined.headers).toEqual(["Hotel Name", "Public Email"]);
+    expect(combined.rows).toEqual([
+      ["Taj Mahal", "taj@hotel.test"],
+      ["Oberoi Group", "oberoi@hotel.test"],
+    ]);
+  });
 });
 
 describe("rowToValues", () => {
@@ -110,6 +154,19 @@ describe("rowToValues", () => {
     expect(rowToValues(["a@x.com; b@y.com", "Ana", ""], headers, mapping).emails).toEqual(["a@x.com", "b@y.com"]);
     expect(rowToValues(["", "Ana", ""], headers, mapping)).toMatchObject({ rawEmail: "", emails: [] });
     expect(rowToValues(["nope", "Ana", ""], headers, mapping)).toMatchObject({ rawEmail: "nope", emails: [] });
+  });
+
+  it("coalesces values when multiple columns map to the same target like company", () => {
+    const coalesceHeaders = ["Email", "Hotel Name", "Hotel / Group Name"];
+    const coalesceMapping = { Email: "email", "Hotel Name": "company", "Hotel / Group Name": "company" } as const;
+
+    // Row 1: Hotel Name populated, Group Name empty
+    const r1 = rowToValues(["a@hotel.com", "Grand Palace", ""], coalesceHeaders, coalesceMapping);
+    expect(r1.standard.company).toBe("Grand Palace");
+
+    // Row 2: Hotel Name empty, Group Name populated
+    const r2 = rowToValues(["b@hotel.com", "", "Oberoi Group"], coalesceHeaders, coalesceMapping);
+    expect(r2.standard.company).toBe("Oberoi Group");
   });
 });
 

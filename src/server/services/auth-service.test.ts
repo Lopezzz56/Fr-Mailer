@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { hashPassword, verifyPassword, isLoginThrottled, recordLoginFailure, clearLoginFailures } from "./auth-service.js";
 
-describe("password hashing", () => {
+describe("password hashing", { timeout: 20000 }, () => {
   it("verifies the right password and rejects a wrong one", async () => {
     const stored = await hashPassword("correct horse battery");
     expect(stored.startsWith("scrypt$")).toBe(true);

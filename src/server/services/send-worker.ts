@@ -11,6 +11,8 @@ import { getTransport } from "./mailer.js";
 import { classifySmtpError } from "./smtp-outcome.js";
 import { unsubscribeHeaders, unsubscribeUrl } from "./unsubscribe.js";
 import { pauseCampaign } from "./campaign-service.js";
+import { isInboxMonitoringSafe } from "./inbox-monitor.js";
+import { onStepSent } from "./sequence-service.js";
 
 const IDLE_DELAY_MS = 3000;
 
@@ -22,6 +24,8 @@ interface ClaimedSend {
   html: string;
   text: string;
   messageId: string;
+  stepIndex: number;
+  inReplyToId: string | null;
 }
 
 export async function sentInLast24h(): Promise<number> {
@@ -62,9 +66,25 @@ export async function releaseLease(name: string, owner: string): Promise<void> {
   await prisma.$executeRaw`DELETE FROM settings WHERE key = ${`lease:${name}`} AND value->>'owner' = ${owner}`;
 }
 
-/** True if any sending campaign still has queued messages */
+/** True if any sending campaign still has queued messages that are claimable */
 export async function hasQueuedWork(): Promise<boolean> {
-  const next = await prisma.send.findFirst({ where: { status: "PENDING", campaign: { status: "SENDING" } }, select: { id: true } });
+  const now = new Date();
+  const next = await prisma.send.findFirst({
+    where: {
+      status: "PENDING",
+      campaign: { status: "SENDING" },
+      OR: [{ scheduledFor: null }, { scheduledFor: { lte: now } }],
+      AND: [
+        {
+          OR: [
+            { approvedAt: { not: null } },
+            { campaign: { automationMode: "AUTOMATIC" } },
+          ],
+        },
+      ],
+    },
+    select: { id: true },
+  });
   return Boolean(next);
 }
 
@@ -74,19 +94,35 @@ async function claimNext(campaignId: string): Promise<ClaimedSend | null> {
        SET status = 'CLAIMED', "claimedAt" = now(), attempts = attempts + 1, "updatedAt" = now()
      WHERE id = (
        SELECT id FROM sends
-        WHERE "campaignId" = ${campaignId} AND status = 'PENDING'
-        ORDER BY "createdAt", id
+        WHERE "campaignId" = ${campaignId}
+          AND status = 'PENDING'
+          AND ("approvedAt" IS NOT NULL OR EXISTS (
+            SELECT 1 FROM campaigns WHERE id = ${campaignId} AND "automationMode" = 'AUTOMATIC'
+          ))
+          AND ("scheduledFor" IS NULL OR "scheduledFor" <= now())
+        ORDER BY "stepIndex" ASC, "scheduledFor" ASC NULLS FIRST, "createdAt" ASC, id
         LIMIT 1
         FOR UPDATE SKIP LOCKED)
-    RETURNING id, "campaignId", email, subject, html, text, "messageId"`;
+    RETURNING id, "campaignId", email, subject, html, text, "messageId", "stepIndex", "inReplyToId"`;
   return rows[0] ?? null;
 }
 
 async function finishIfDone(campaignId: string) {
   const remaining = await prisma.send.count({ where: { campaignId, status: { in: ["PENDING", "CLAIMED"] } } });
-  if (remaining === 0) {
-    await prisma.campaign.updateMany({ where: { id: campaignId, status: "SENDING" }, data: { status: "COMPLETED", completedAt: new Date() } });
-  }
+  if (remaining > 0) return;
+
+  const activeRecipients = await prisma.campaignRecipientState.count({
+    where: {
+      campaignId,
+      state: { in: ["FOLLOW_UP_SCHEDULED", "AWAITING_APPROVAL"] },
+    },
+  });
+  if (activeRecipients > 0) return;
+
+  await prisma.campaign.updateMany({
+    where: { id: campaignId, status: "SENDING" },
+    data: { status: "COMPLETED", completedAt: new Date() },
+  });
 }
 
 /** Sends one message for the campaign if possible. Returns true if it did any work. */
@@ -111,7 +147,55 @@ export async function sendOne(campaign: { id: string; fromName: string; replyTo:
     return true;
   }
 
+  // Follow-up specific safeguards for stepIndex > 0
+  if (send.stepIndex > 0) {
+    // 1. Reply detection check: cancel if recipient has replied on any prior step
+    const priorReply = await prisma.send.findFirst({
+      where: { campaignId: campaign.id, email: send.email, repliedAt: { not: null } },
+      select: { id: true },
+    });
+    if (priorReply) {
+      await prisma.send.update({
+        where: { id: send.id },
+        data: { status: "CANCELLED", skipReason: "Reply received on prior outreach — follow-up stopped" },
+      });
+      return true;
+    }
+
+    // 2. Recipient state check: cancel if paused, cancelled, or suppressed
+    const rState = await prisma.campaignRecipientState.findUnique({
+      where: { campaignId_email: { campaignId: campaign.id, email: send.email } },
+      select: { state: true },
+    });
+    if (rState && ["PAUSED", "CANCELLED", "BOUNCED", "SUPPRESSED", "REPLY_RECEIVED"].includes(rState.state)) {
+      await prisma.send.update({
+        where: { id: send.id },
+        data: { status: "CANCELLED", skipReason: `Recipient is in state: ${rState.state}` },
+      });
+      return true;
+    }
+
+    // 3. Inbox monitoring health check: defer if monitoring is unhealthy or stale
+    const inboxHealth = await isInboxMonitoringSafe();
+    if (!inboxHealth.safe) {
+      await prisma.send.update({
+        where: { id: send.id },
+        data: { status: "PENDING", attempts: { decrement: 1 }, lastError: `Deferred: ${inboxHealth.reason}` },
+      });
+      return false;
+    }
+  }
+
   const url = unsubscribeUrl(send.id);
+  const headers: Record<string, string> = {
+    ...unsubscribeHeaders(url),
+    "X-FR-Send-ID": send.id,
+  };
+  if (send.stepIndex > 0 && send.inReplyToId) {
+    headers["In-Reply-To"] = send.inReplyToId;
+    headers["References"] = send.inReplyToId;
+  }
+
   try {
     await getTransport().send({
       to: send.email,
@@ -121,7 +205,7 @@ export async function sendOne(campaign: { id: string; fromName: string; replyTo:
       messageId: send.messageId,
       fromName: campaign.fromName,
       replyTo: campaign.replyTo,
-      headers: { ...unsubscribeHeaders(url), "X-FR-Send-ID": send.id },
+      headers,
     });
   } catch (err) {
     const outcome = classifySmtpError(err);
@@ -158,6 +242,9 @@ export async function sendOne(campaign: { id: string; fromName: string; replyTo:
 
   // Outside the catch: if this write fails the row stays CLAIMED -> UNKNOWN on next boot, never resent
   await prisma.send.update({ where: { id: send.id }, data: { status: "SENT", sentAt: new Date(), lastError: null } });
+  await onStepSent(send.id).catch((err) => {
+    console.error(`[worker] onStepSent failed for send ${send.id}:`, (err as Error).message);
+  });
   await finishIfDone(campaign.id);
   return true;
 }
@@ -209,6 +296,7 @@ export class SendWorker {
         const result = await this.tick();
         delay = result === "worked" ? 0 : result === "waiting" ? 250 : result === "limit" ? 30_000 : 15_000;
       } catch (err) {
+        delay = 10_000;
         console.error("[worker] tick failed:", (err as Error).message);
       }
       if (delay && this.running) await this.sleep(delay);

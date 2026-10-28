@@ -8,7 +8,28 @@
 // - Pure, deterministic, auditable decisions with human-readable explanations.
 // - Do not treat unverified/guessed attributes as verified facts.
 import type { EnrichmentStatus } from "../../shared/types.js";
-import { normalizeContactPersona, normalizeHotelSegment } from "./classification.js";
+import {
+  inferPersonaFromTitle,
+  inferSegmentFromCompany,
+  normalizeContactPersona,
+  normalizeHotelSegment,
+} from "./classification.js";
+
+export function detectTemplateVertical(
+  template: Pick<EligibleTemplate, "name" | "subject">
+): "INSTITUTE" | "CO_PARTNERSHIP" | "HOTEL" | "GENERAL" {
+  const text = `${template.name} ${template.subject || ""}`.toLowerCase();
+  if (/\b(hiring|placement|campus|recruitment|internship|interns|students?|ihm|colleges?|institutes?)\b/i.test(text)) {
+    return "INSTITUTE";
+  }
+  if (/\b(partners?|partnerships?|co\s*market(ing)?|alliances?|collaborat(e|ion|ive)|brand partner|affiliate)\b/i.test(text)) {
+    return "CO_PARTNERSHIP";
+  }
+  if (/\b(hotels?|resorts?|properties|hospitality|gm|general manager|guest|rooms?|revpar|stay)\b/i.test(text)) {
+    return "HOTEL";
+  }
+  return "GENERAL";
+}
 
 export interface RecipientProfile {
   id: string;
@@ -96,6 +117,29 @@ export function selectTemplateForRecipient(
     templates[0]!;
 
   // -------------------------------------------------------------------------
+  // 0. Resolve effective attributes (stored values take precedence, fallback to inference)
+  // -------------------------------------------------------------------------
+  const inferredSegResult = (!recipient.hotelSegment || recipient.hotelSegment === "UNKNOWN")
+    ? inferSegmentFromCompany(recipient.company, recipient.customFields, recipient.email)
+    : null;
+  const effectiveSegment =
+    recipient.hotelSegment && recipient.hotelSegment !== "UNKNOWN"
+      ? recipient.hotelSegment
+      : (inferredSegResult && inferredSegResult.value !== "UNKNOWN" ? inferredSegResult.value : null);
+  const effectiveSegmentStatus = recipient.hotelSegmentStatus ?? (inferredSegResult ? inferredSegResult.status : null);
+  const effectiveSegmentConfidence = recipient.hotelSegmentConfidence ?? (inferredSegResult ? inferredSegResult.confidence : null);
+
+  const inferredPersonaResult = (!recipient.contactPersona || recipient.contactPersona === "UNKNOWN")
+    ? inferPersonaFromTitle(recipient.title)
+    : null;
+  const effectivePersona =
+    recipient.contactPersona && recipient.contactPersona !== "UNKNOWN"
+      ? recipient.contactPersona
+      : (inferredPersonaResult && inferredPersonaResult.value !== "UNKNOWN" ? inferredPersonaResult.value : null);
+  const effectivePersonaStatus = recipient.contactPersonaStatus ?? (inferredPersonaResult ? inferredPersonaResult.status : null);
+  const effectivePersonaConfidence = recipient.contactPersonaConfidence ?? (inferredPersonaResult ? inferredPersonaResult.confidence : null);
+
+  // -------------------------------------------------------------------------
   // 1. Check manual override for this contact
   // -------------------------------------------------------------------------
   const override =
@@ -134,25 +178,37 @@ export function selectTemplateForRecipient(
     const matchReasons: string[] = [];
     let ruleMatched = true;
 
-    // Check Hotel Segment
+    // Check Hotel Segment / Organization Category
     if (rule.hotelSegment && rule.hotelSegment.trim()) {
-      const expectedSegment = normalizeHotelSegment(rule.hotelSegment);
-      const recipientSegment = normalizeHotelSegment(recipient.hotelSegment);
-
-      if (expectedSegment !== recipientSegment) {
-        ruleMatched = false;
-      } else {
-        if (rule.requiresVerified && !isVerifiedStatus(recipient.hotelSegmentStatus)) {
-          ruleMatched = false;
-        } else if (
-          rule.minConfidence !== null &&
-          rule.minConfidence !== undefined &&
-          (recipient.hotelSegmentConfidence ?? 0) < rule.minConfidence
-        ) {
+      const ruleSegUpper = rule.hotelSegment.toUpperCase().trim();
+      if (ruleSegUpper === "HOTEL") {
+        const isHotel =
+          effectiveSegment &&
+          !["CO_PARTNERSHIP", "INSTITUTE", "UNKNOWN"].includes(effectiveSegment.toUpperCase());
+        if (!isHotel) {
           ruleMatched = false;
         } else {
-          const verifiedBadge = isVerifiedStatus(recipient.hotelSegmentStatus) ? " [verified]" : "";
-          matchReasons.push(`Segment '${rule.hotelSegment}'${verifiedBadge}`);
+          matchReasons.push("Hotels & Hospitality");
+        }
+      } else {
+        const expectedSegment = normalizeHotelSegment(rule.hotelSegment);
+        const recipientSegment = normalizeHotelSegment(effectiveSegment);
+
+        if (expectedSegment !== recipientSegment) {
+          ruleMatched = false;
+        } else {
+          if (rule.requiresVerified && !isVerifiedStatus(effectiveSegmentStatus)) {
+            ruleMatched = false;
+          } else if (
+            rule.minConfidence !== null &&
+            rule.minConfidence !== undefined &&
+            (effectiveSegmentConfidence ?? 0) < rule.minConfidence
+          ) {
+            ruleMatched = false;
+          } else {
+            const verifiedBadge = isVerifiedStatus(effectiveSegmentStatus) ? " [verified]" : "";
+            matchReasons.push(`Segment '${rule.hotelSegment}'${verifiedBadge}`);
+          }
         }
       }
     }
@@ -162,21 +218,21 @@ export function selectTemplateForRecipient(
     // Check Contact Persona
     if (rule.contactPersona && rule.contactPersona.trim()) {
       const expectedPersona = normalizeContactPersona(rule.contactPersona);
-      const recipientPersona = normalizeContactPersona(recipient.contactPersona);
+      const recipientPersona = normalizeContactPersona(effectivePersona);
 
       if (expectedPersona !== recipientPersona) {
         ruleMatched = false;
       } else {
-        if (rule.requiresVerified && !isVerifiedStatus(recipient.contactPersonaStatus)) {
+        if (rule.requiresVerified && !isVerifiedStatus(effectivePersonaStatus)) {
           ruleMatched = false;
         } else if (
           rule.minConfidence !== null &&
           rule.minConfidence !== undefined &&
-          (recipient.contactPersonaConfidence ?? 0) < rule.minConfidence
+          (effectivePersonaConfidence ?? 0) < rule.minConfidence
         ) {
           ruleMatched = false;
         } else {
-          const verifiedBadge = isVerifiedStatus(recipient.contactPersonaStatus) ? " [verified]" : "";
+          const verifiedBadge = isVerifiedStatus(effectivePersonaStatus) ? " [verified]" : "";
           matchReasons.push(`Persona '${rule.contactPersona}'${verifiedBadge}`);
         }
       }
@@ -194,8 +250,9 @@ export function selectTemplateForRecipient(
       }
     }
 
-    if (ruleMatched && matchReasons.length > 0) {
+    if (ruleMatched && (matchReasons.length > 0 || (!rule.hotelSegment && !rule.contactPersona && !rule.city))) {
       const desc = rule.description ? ` (${rule.description})` : "";
+      const matchText = matchReasons.length > 0 ? `matched ${matchReasons.join(", ")}` : "all recipients at this priority";
       return {
         templateId: targetTemplate.id,
         templateName: targetTemplate.name,
@@ -203,20 +260,84 @@ export function selectTemplateForRecipient(
         assignmentSource: "RULE",
         ruleId: rule.id,
         rulePriority: rule.priority,
-        explanation: `Rule #${rule.priority}${desc}: matched ${matchReasons.join(", ")}`,
+        explanation: `Rule #${rule.priority}${desc}: ${matchText}`,
       };
     }
   }
 
   // -------------------------------------------------------------------------
-  // 3. Fallback handling
+  // 3. Smart Audience Vertical Routing (Automatic cross-vertical segregation)
   // -------------------------------------------------------------------------
-  const segLabel = recipient.hotelSegment ? `Segment '${recipient.hotelSegment}'` : "no segment";
-  const perLabel = recipient.contactPersona ? `Persona '${recipient.contactPersona}'` : "no persona";
+  // When no explicit rules match:
+  // If the campaign has a template specifically tailored to the recipient's vertical
+  // (Co-Partnership, Institute/Hiring, or Hotel property), automatically route to it.
+  const recipientVertical: "INSTITUTE" | "CO_PARTNERSHIP" | "HOTEL" | "GENERAL" =
+    effectiveSegment === "CO_PARTNERSHIP" || effectivePersona === "PARTNERSHIP_DIRECTOR"
+      ? "CO_PARTNERSHIP"
+      : effectiveSegment === "INSTITUTE" ||
+        effectivePersona === "PLACEMENT_OFFICER" ||
+        effectivePersona === "DEAN_DIRECTOR"
+      ? "INSTITUTE"
+      : effectiveSegment && !["CO_PARTNERSHIP", "INSTITUTE", "UNKNOWN"].includes(effectiveSegment.toUpperCase())
+      ? "HOTEL"
+      : "GENERAL";
+
+  if (recipientVertical !== "GENERAL" && templates.length > 1) {
+    const fallbackVertical = detectTemplateVertical(fallbackTemplate);
+    const fallbackMismatch = fallbackVertical !== "GENERAL" && fallbackVertical !== recipientVertical;
+
+    if (rules.length === 0 || fallbackMismatch) {
+      const verticalMatchedTpl = templates.find((t) => {
+        if (detectTemplateVertical(t) !== recipientVertical) return false;
+        if (recipientVertical === "HOTEL") {
+          const nameLower = t.name.toLowerCase();
+          if (nameLower.includes("luxury") && effectiveSegment !== "LUXURY") return false;
+          if (nameLower.includes("boutique") && effectiveSegment !== "BOUTIQUE") return false;
+          if (nameLower.includes("resort") && effectiveSegment !== "RESORT") return false;
+          if (nameLower.includes("revpar") && effectivePersona !== "REVENUE_MANAGER") return false;
+        }
+        return true;
+      });
+
+      if (verticalMatchedTpl && verticalMatchedTpl.id !== fallbackTemplate.id) {
+        const audienceLabels: Record<string, string> = {
+          CO_PARTNERSHIP: "Co-Partnership & Brand Partner",
+          INSTITUTE: "Campus & Hiring Outreach",
+          HOTEL: "Hotel Property",
+        };
+        return {
+          templateId: verticalMatchedTpl.id,
+          templateName: verticalMatchedTpl.name,
+          template: verticalMatchedTpl,
+          assignmentSource: "RULE",
+          ruleId: null,
+          rulePriority: null,
+          explanation: `Audience segregation: ${audienceLabels[recipientVertical] ?? recipientVertical} matched to '${verticalMatchedTpl.name}'`,
+        };
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 4. Fallback handling (with safety guard against mismatching)
+  // -------------------------------------------------------------------------
+  let finalFallback = fallbackTemplate;
+  const isPartner = effectiveSegment === "CO_PARTNERSHIP" || effectivePersona === "PARTNERSHIP_DIRECTOR";
+  // Safety guard: If recipient is a partner, but the chosen fallback template is an Institute/Hiring template,
+  // pick a non-hiring alternative if one exists in the campaign:
+  if (isPartner && detectTemplateVertical(fallbackTemplate) === "INSTITUTE") {
+    const nonHiringAlternative = templates.find((t) => detectTemplateVertical(t) !== "INSTITUTE");
+    if (nonHiringAlternative) {
+      finalFallback = nonHiringAlternative;
+    }
+  }
+
+  const segLabel = effectiveSegment ? `Segment '${effectiveSegment}'` : "no segment";
+  const perLabel = effectivePersona ? `Persona '${effectivePersona}'` : "no persona";
   return {
-    templateId: fallbackTemplate.id,
-    templateName: fallbackTemplate.name,
-    template: fallbackTemplate,
+    templateId: finalFallback.id,
+    templateName: finalFallback.name,
+    template: finalFallback,
     assignmentSource: "FALLBACK",
     ruleId: null,
     rulePriority: null,

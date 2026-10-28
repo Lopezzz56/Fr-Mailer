@@ -38,12 +38,12 @@ export async function runBurst(budgetMs = BURST_MS): Promise<BurstResult> {
   if (!owner) return { ran: false, reason: "Another burst is already running." };
 
   try {
-    const { handled, stoppedBecause } = await new SendWorker().runFor(budgetMs);
     let inboxChecked = false;
     if (await inboxDue()) {
       await checkInbox().catch((err) => console.error("[inbox] check failed:", (err as Error).message));
       inboxChecked = true;
     }
+    const { handled, stoppedBecause } = await new SendWorker().runFor(budgetMs);
     // More to do and not blocked by the daily limit -> keep going without waiting for cron
     const more = stoppedBecause === "budget" && (await hasQueuedWork());
     return { ran: true, handled, stoppedBecause, inboxChecked, more };

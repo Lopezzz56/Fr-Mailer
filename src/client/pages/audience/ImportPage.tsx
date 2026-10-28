@@ -3,13 +3,17 @@ import { useRef, useState, type DragEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
 import {
+  AlertTriangle,
   Building2,
   CheckCircle2,
   Download,
   Eye,
   FileSpreadsheet,
   HelpCircle,
+  Info,
+  Mail,
   RotateCcw,
+  ShieldCheck,
   Sparkles,
   Split,
   Trash2,
@@ -29,6 +33,7 @@ import { ChoiceCard, SelectField, TextField } from "../../components/ui/Field";
 import { Callout } from "../../components/ui/Feedback";
 import {
   ALL_SHEETS,
+  COALESCABLE_TARGETS,
   DUPLICATE_POLICY_LABELS,
   IMPORT_TARGET_LABELS,
   MAX_IMPORT_BYTES,
@@ -42,6 +47,7 @@ import {
   type ImportRowError,
   type MultiEmailPolicy,
   type ProspectListType,
+  type StandardContactField,
 } from "@shared/types";
 import {
   LIST_PREPARATION_GUIDES,
@@ -345,8 +351,23 @@ export function ImportPage() {
   };
 
   const emailColumn = Object.entries(mapping).find(([, t]) => t === "email")?.[0];
+  const companyColumns = Object.entries(mapping).filter(([, t]) => t === "company").map(([h]) => h);
+  const nameColumns = Object.entries(mapping).filter(([, t]) => t === "fullName" || t === "firstName").map(([h]) => h);
+  const phoneColumns = Object.entries(mapping).filter(([, t]) => t === "phone").map(([h]) => h);
+  const websiteColumns = Object.entries(mapping).filter(
+    ([h, t]) => t.includes("website") || t.includes("url") || /website|verification|source/i.test(h)
+  ).map(([h]) => h);
+
   const duplicateTargets = Object.values(mapping).filter(
-    (t, i, all) => t !== "ignore" && all.indexOf(t) !== i
+    (t, i, all) => t !== "ignore" && !COALESCABLE_TARGETS.has(t) && all.indexOf(t) !== i
+  );
+
+  const coalescedTargets = Array.from(
+    new Set(
+      Object.values(mapping).filter(
+        (t, i, all) => t !== "ignore" && COALESCABLE_TARGETS.has(t) && all.indexOf(t) !== i
+      )
+    )
   );
 
   const targetOptions = (header: string) => {
@@ -688,6 +709,126 @@ export function ImportPage() {
             </Panel>
           )}
 
+          {/* Import Field Readiness & Queue Cards */}
+          <div className="grid gap-3 sm:grid-cols-3">
+            {/* Card 1: Required for Delivery */}
+            <div
+              className={cn(
+                "flex flex-col justify-between rounded-xl border p-4 text-xs transition-colors",
+                emailColumn ? "border-line bg-surface" : "border-amber-400 bg-amber-50/40"
+              )}
+            >
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-semibold text-ink">
+                    <Mail className="h-4 w-4 text-brand" />
+                    <span>1. Required for Delivery</span>
+                  </div>
+                  <Badge tone={emailColumn ? "success" : "danger"}>
+                    {emailColumn ? "Mapped" : "Action Required"}
+                  </Badge>
+                </div>
+                <div className="mt-2.5">
+                  {emailColumn ? (
+                    <p className="font-medium text-ink flex items-center gap-1.5">
+                      <CheckCircle2 className="h-3.5 w-3.5 text-success inline shrink-0" />
+                      <span>
+                        Email Column: <strong className="text-ink">{emailColumn}</strong>
+                      </span>
+                    </p>
+                  ) : (
+                    <p className="font-medium text-danger flex items-center gap-1.5">
+                      <AlertTriangle className="h-3.5 w-3.5 text-danger inline shrink-0" />
+                      <span>No email column selected</span>
+                    </p>
+                  )}
+                  <p className="mt-1.5 text-[11px] text-ink-subtle leading-relaxed">
+                    Outreach cannot dispatch without an email address. Select which column holds recipient email (e.g. Public Email).
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Card 2: Essential for Personalization */}
+            <div
+              className={cn(
+                "flex flex-col justify-between rounded-xl border p-4 text-xs transition-colors",
+                companyColumns.length > 0 ? "border-line bg-surface" : "border-amber-400 bg-amber-50/40"
+              )}
+            >
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-semibold text-ink">
+                    <Building2 className="h-4 w-4 text-brand" />
+                    <span>2. Essential for Personalization</span>
+                  </div>
+                  <Badge tone={companyColumns.length > 0 ? "success" : "warning"}>
+                    {companyColumns.length > 0 ? "Mapped" : "Recommended"}
+                  </Badge>
+                </div>
+                <div className="mt-2.5">
+                  {companyColumns.length > 0 ? (
+                    <p className="font-medium text-ink flex items-center gap-1.5">
+                      <CheckCircle2 className="h-3.5 w-3.5 text-success inline shrink-0" />
+                      <span className="truncate">
+                        Hotel/Company: <strong className="text-ink">{companyColumns.join(", ")}</strong>
+                      </span>
+                    </p>
+                  ) : (
+                    <p className="font-medium text-warning flex items-center gap-1.5">
+                      <AlertTriangle className="h-3.5 w-3.5 text-warning inline shrink-0" />
+                      <span>Hotel / Company unmapped</span>
+                    </p>
+                  )}
+                  {nameColumns.length > 0 ? (
+                    <p className="mt-1 text-ink-subtle">
+                      Recipient Name: <strong className="text-ink">{nameColumns.join(", ")}</strong>
+                    </p>
+                  ) : (
+                    <p className="mt-1 text-ink-muted">
+                      Recipient Name: Unmapped (fallback greeting will be used)
+                    </p>
+                  )}
+                  <p className="mt-1.5 text-[11px] text-ink-subtle leading-relaxed">
+                    Details without which emails break personalization. Essential for <code className="bg-surface-muted px-1 rounded text-[10px]">{"{{company}}"}</code> merge tags.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Card 3: Optional Research & Enrichment */}
+            <div className="flex flex-col justify-between rounded-xl border border-line bg-surface p-4 text-xs">
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-semibold text-ink">
+                    <Info className="h-4 w-4 text-brand" />
+                    <span>3. Optional Research Link</span>
+                  </div>
+                  <Badge tone="neutral">Optional Context</Badge>
+                </div>
+                <div className="mt-2.5">
+                  <p className="font-medium text-ink flex items-center gap-1.5">
+                    <ShieldCheck className="h-3.5 w-3.5 text-brand inline shrink-0" />
+                    <span>Website & Phone: Not required for sending</span>
+                  </p>
+                  <p className="mt-1 text-ink-subtle">
+                    {websiteColumns.length > 0
+                      ? `Website/Source: ${websiteColumns.join(", ")} (stored as custom tag)`
+                      : "Website/Source link: None mapped (omitting will not break outreach)"}
+                  </p>
+                  {phoneColumns.length > 0 && (
+                    <p className="mt-0.5 text-ink-subtle">
+                      Phone: {phoneColumns.join(", ")} (optional multichannel field)
+                    </p>
+                  )}
+                  <p className="mt-1.5 text-[11px] text-ink-subtle leading-relaxed">
+                    Website links and phones enrich contact profiles, but emails will NOT break without them. They can be safely stored or excluded.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <Panel
             title="Match columns to contact fields"
             description={`${preview.fileName}${
@@ -721,11 +862,23 @@ export function ImportPage() {
                       >
                         <td className="py-3 pl-5 pr-4 font-medium">
                           <span className={cn(isIgnored && "line-through text-ink-subtle")}>{h}</span>
-                          {h.toLowerCase().includes("email") && (
+                          {mapping[h] === "email" ? (
                             <Badge tone="brand" className="ml-2 text-[10px]">
-                              Email Key
+                              Email (Required)
                             </Badge>
-                          )}
+                          ) : mapping[h] === "company" ? (
+                            <Badge tone="info" className="ml-2 text-[10px]">
+                              Company / Hotel
+                            </Badge>
+                          ) : mapping[h] === "phone" ? (
+                            <Badge tone="neutral" className="ml-2 text-[10px]">
+                              Phone (Optional)
+                            </Badge>
+                          ) : /website|url|verification|source/i.test(h) ? (
+                            <Badge tone="neutral" className="ml-2 text-[10px]">
+                              Link (Optional)
+                            </Badge>
+                          ) : null}
                         </td>
                         <td className="max-w-[320px] py-3 pr-4 text-xs text-ink-subtle">
                           <span className="line-clamp-2">
@@ -785,10 +938,25 @@ export function ImportPage() {
             )}
 
             <div className="space-y-3 border-t border-line px-5 py-4">
-              {!emailColumn && <Callout tone="warning">Choose which column holds the email address.</Callout>}
+              {!emailColumn && (
+                <Callout tone="warning">
+                  Choose which column holds the recipient email address (e.g. Public Email or Contact Email) to proceed.
+                </Callout>
+              )}
+              {coalescedTargets.length > 0 && (
+                <Callout tone="info">
+                  Automatic Combining Active: Multiple columns are mapped to{" "}
+                  <strong>
+                    {coalescedTargets
+                      .map((t) => IMPORT_TARGET_LABELS[t as StandardContactField] ?? t)
+                      .join(", ")}
+                  </strong>{" "}
+                  ({companyColumns.join(", ")}). They will automatically combine per row using the first available value without duplicate errors.
+                </Callout>
+              )}
               {duplicateTargets.length > 0 && (
                 <Callout tone="warning">
-                  Two columns are going to the same field. Pick a different destination for one of them.
+                  Two columns are going to the same custom field ({duplicateTargets.map((t) => t.replace("custom:", "")).join(", ")}). Pick a different destination for one of them.
                 </Callout>
               )}
               {analyzeMutation.isError && (

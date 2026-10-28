@@ -50,21 +50,25 @@ export const HOTEL_SEGMENTS = [
   "RESORT",
   "EXTENDED_STAY",
   "INDEPENDENT",
+  "CO_PARTNERSHIP",
+  "INSTITUTE",
   "UNKNOWN",
 ] as const;
 export type HotelSegment = (typeof HOTEL_SEGMENTS)[number];
 export const HotelSegmentSchema = z.enum(HOTEL_SEGMENTS);
 
 export const HOTEL_SEGMENT_LABELS: Record<HotelSegment, string> = {
-  LUXURY: "Luxury",
-  BOUTIQUE: "Boutique",
+  LUXURY: "Luxury Hotel",
+  BOUTIQUE: "Boutique Hotel",
   UPSCALE: "Upscale / Full Service",
   MIDSCALE: "Midscale / Select Service",
   BUDGET: "Budget / Economy",
   RESORT: "Resort & Destination",
   EXTENDED_STAY: "Extended Stay",
-  INDEPENDENT: "Independent",
-  UNKNOWN: "Unknown",
+  INDEPENDENT: "Independent Hotel",
+  CO_PARTNERSHIP: "Co-Partnership & Brand",
+  INSTITUTE: "Institute / College (Hiring)",
+  UNKNOWN: "Unknown / General",
 };
 
 export const CONTACT_PERSONAS = [
@@ -75,6 +79,9 @@ export const CONTACT_PERSONAS = [
   "IT_DIRECTOR",
   "OWNER_OPERATOR",
   "FINANCE_PROCUREMENT",
+  "PARTNERSHIP_DIRECTOR",
+  "PLACEMENT_OFFICER",
+  "DEAN_DIRECTOR",
   "OTHER",
   "UNKNOWN",
 ] as const;
@@ -89,6 +96,9 @@ export const CONTACT_PERSONA_LABELS: Record<ContactPersona, string> = {
   IT_DIRECTOR: "IT & Systems Director",
   OWNER_OPERATOR: "Owner / Principal",
   FINANCE_PROCUREMENT: "Finance & Procurement",
+  PARTNERSHIP_DIRECTOR: "Partnership / Alliance Director",
+  PLACEMENT_OFFICER: "Placement & Training Officer (Hiring)",
+  DEAN_DIRECTOR: "Dean / Academic Director",
   OTHER: "Other Staff",
   UNKNOWN: "Unknown",
 };
@@ -175,12 +185,20 @@ export interface ContactListDto {
 /** Where an import column goes: a contact field, "fullName" (split into first/last), a custom field ("custom:<name>"), or nowhere */
 export type ImportTarget = "email" | StandardContactField | "fullName" | `custom:${string}` | "ignore";
 
+export const COALESCABLE_TARGETS = new Set<string>([
+  "company",
+  "phone",
+  "title",
+  "hotelSegment",
+  "contactPersona",
+]);
+
 export const IMPORT_TARGET_LABELS: Record<"email" | StandardContactField | "fullName", string> = {
   email: "Email",
   firstName: "First name",
   lastName: "Last name",
   fullName: "Full name (split into first & last)",
-  company: "Company",
+  company: "Company / Hotel Name",
   title: "Job title",
   phone: "Phone",
   hotelSegment: "Hotel segment",
@@ -361,6 +379,110 @@ export const CampaignStatusSchema = z.enum([
 ]);
 export type CampaignStatus = z.infer<typeof CampaignStatusSchema>;
 
+export const CAMPAIGN_AUTOMATION_MODES = ["MANUAL", "APPROVAL_REQUIRED", "AUTOMATIC"] as const;
+export type CampaignAutomationMode = (typeof CAMPAIGN_AUTOMATION_MODES)[number];
+export const CampaignAutomationModeSchema = z.enum(CAMPAIGN_AUTOMATION_MODES);
+
+export const CAMPAIGN_AUTOMATION_MODE_LABELS: Record<CampaignAutomationMode, { label: string; description: string }> = {
+  MANUAL: {
+    label: "Manual",
+    description: "You review, draft, and trigger each email manually.",
+  },
+  APPROVAL_REQUIRED: {
+    label: "Approval required",
+    description: "System prepares and schedules follow-ups when due, but waits for explicit approval before sending each one.",
+  },
+  AUTOMATIC: {
+    label: "Automatic follow-ups",
+    description: "Approved sequence steps are sent automatically when due and all stopping conditions are satisfied.",
+  },
+};
+
+export const RECIPIENT_SEQUENCE_STATES = [
+  "PENDING_INITIAL",
+  "INITIAL_SENT",
+  "FOLLOW_UP_SCHEDULED",
+  "AWAITING_APPROVAL",
+  "FOLLOW_UP_SENT",
+  "REPLY_RECEIVED",
+  "BOUNCED",
+  "SUPPRESSED",
+  "PAUSED",
+  "COMPLETED",
+  "CANCELLED",
+] as const;
+export type RecipientSequenceState = (typeof RECIPIENT_SEQUENCE_STATES)[number];
+export const RecipientSequenceStateSchema = z.enum(RECIPIENT_SEQUENCE_STATES);
+
+export const RECIPIENT_SEQUENCE_STATE_LABELS: Record<RecipientSequenceState, { label: string; tone: "brand" | "neutral" | "success" | "warning" | "danger" | "info" }> = {
+  PENDING_INITIAL: { label: "Pending Initial Send", tone: "neutral" },
+  INITIAL_SENT: { label: "Initial Sent", tone: "brand" },
+  FOLLOW_UP_SCHEDULED: { label: "Follow-up Scheduled", tone: "info" },
+  AWAITING_APPROVAL: { label: "Awaiting Approval", tone: "warning" },
+  FOLLOW_UP_SENT: { label: "Follow-up Sent", tone: "brand" },
+  REPLY_RECEIVED: { label: "Reply Received — Action Required", tone: "success" },
+  BOUNCED: { label: "Bounced", tone: "danger" },
+  SUPPRESSED: { label: "Suppressed", tone: "danger" },
+  PAUSED: { label: "Sequence Paused", tone: "warning" },
+  COMPLETED: { label: "Sequence Completed", tone: "neutral" },
+  CANCELLED: { label: "Sequence Cancelled", tone: "neutral" },
+};
+
+export const SequenceStepInputSchema = z.object({
+  stepIndex: z.coerce.number().int().min(0),
+  purpose: z.string().trim().min(1, "Purpose is required").max(100),
+  delayDays: z.coerce.number().int().min(0).max(60).default(3),
+  delayBusinessDaysOnly: z.boolean().default(true),
+  subjectMode: z.enum(["THREADED", "STANDALONE"]).default("THREADED"),
+  customSubject: z.string().trim().max(250).optional().nullable(),
+  templateId: IdSchema,
+  promptInstructions: z.string().trim().max(2000).optional().nullable(),
+});
+export type SequenceStepInput = z.infer<typeof SequenceStepInputSchema>;
+
+export interface SequenceStepDto {
+  id: string;
+  campaignId: string;
+  stepIndex: number;
+  purpose: string;
+  delayDays: number;
+  delayBusinessDaysOnly: boolean;
+  subjectMode: "THREADED" | "STANDALONE";
+  customSubject: string | null;
+  templateId: string;
+  templateName: string;
+  templateSubject: string;
+  promptInstructions: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CampaignRecipientStateDto {
+  id: string;
+  campaignId: string;
+  contactId: string | null;
+  email: string;
+  state: RecipientSequenceState;
+  currentStepIndex: number;
+  nextActionAt: string | null;
+  nextStepIndex: number | null;
+  pausedReason: string | null;
+  cancelledReason: string | null;
+  lastSentAt: string | null;
+  lastMessageId: string | null;
+  repliedAt: string | null;
+  bouncedAt: string | null;
+  unsubscribedAt: string | null;
+  history?: {
+    sendId: string;
+    stepIndex: number;
+    subject: string;
+    sentAt: string | null;
+    status: string;
+    messageId: string;
+  }[];
+}
+
 export const DeliveryStatusSchema = z.enum(["PENDING", "CLAIMED", "SENT", "FAILED", "UNKNOWN", "SKIPPED", "CANCELLED"]);
 export type DeliveryStatus = z.infer<typeof DeliveryStatusSchema>;
 
@@ -379,6 +501,8 @@ export const CampaignInputSchema = z.object({
     .nullable()
     .or(z.literal("").transform(() => null)),
   sendRatePerMinute: z.coerce.number().int().min(1).max(120).default(20),
+  automationMode: CampaignAutomationModeSchema.default("APPROVAL_REQUIRED"),
+  sequenceSteps: z.array(SequenceStepInputSchema).optional(),
   templates: z
     .array(
       z.object({
@@ -552,6 +676,8 @@ export interface CampaignDetailDto extends CampaignSummaryDto {
   /** Frozen content after approval; null while editable */
   snapshot: { subject: string; bodyHtml: string; bodyText: string | null } | null;
   liveSendingBlocker: string | null;
+  automationMode: CampaignAutomationMode;
+  sequenceSteps: SequenceStepDto[];
   templates: CampaignTemplateDto[];
   rules: CampaignRuleDto[];
   overridesCount: number;
@@ -587,6 +713,7 @@ export interface SendDto {
   id: string;
   email: string;
   contactId: string | null;
+  subject?: string | null;
   status: DeliveryStatus;
   skipReason: string | null;
   attempts: number;
@@ -599,6 +726,11 @@ export interface SendDto {
   templateId?: string | null;
   templateVersion?: number | null;
   assignmentReason?: string | null;
+  stepIndex: number;
+  scheduledFor: string | null;
+  approvedAt: string | null;
+  inReplyToId: string | null;
+  isCustom: boolean;
 }
 
 export interface CampaignAnalyticsSummaryDto {
@@ -644,6 +776,17 @@ export interface CampaignAnalyticsSummaryDto {
     repliedCount: number;
     positiveRepliesCount: number;
     meetingsBookedCount: number;
+  }[];
+  bySequenceStep?: {
+    stepIndex: number;
+    purpose: string;
+    assignedCount: number;
+    sentCount: number;
+    repliedCount: number;
+    positiveRepliesCount: number;
+    meetingsBookedCount: number;
+    bouncedCount: number;
+    replyRate: number;
   }[];
 }
 

@@ -20,6 +20,7 @@ import { getTransport, messageIdDomain } from "./mailer.js";
 import { unsubscribeHeaders, unsubscribeUrl, withFooter } from "./unsubscribe.js";
 
 import { selectTemplateForRecipient, type EligibleTemplate, type SelectionRule } from "./template-selection.js";
+import { initializeRecipientStates } from "./sequence-service.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -45,6 +46,7 @@ async function getCampaignOr404(id: string, db: Tx | typeof prisma = prisma) {
       campaignTemplates: { include: { template: true }, orderBy: { priority: "asc" } },
       rules: { include: { template: true }, orderBy: { priority: "asc" } },
       recipientOverrides: { include: { template: true } },
+      sequenceSteps: { include: { template: true }, orderBy: { stepIndex: "asc" } },
     },
   });
   if (!campaign) throw AppError.notFound("CAMPAIGN_NOT_FOUND", "That campaign no longer exists.");
@@ -404,6 +406,9 @@ export async function approveCampaign(req: Request, id: string, seen: { contentH
           templateId: r.templateId,
           templateVersion: r.templateVersion,
           assignmentReason: r.assignmentReason,
+          stepIndex: 0,
+          scheduledFor: new Date(),
+          approvedAt: new Date(),
         };
       });
       for (const s of work.skipped) {
@@ -422,11 +427,14 @@ export async function approveCampaign(req: Request, id: string, seen: { contentH
           templateId: s.templateId ?? null,
           templateVersion: s.templateVersion ?? null,
           assignmentReason: s.assignmentReason ?? null,
+          stepIndex: 0,
         });
       }
       for (let i = 0; i < rows.length; i += 1000) {
         await tx.send.createMany({ data: rows.slice(i, i + 1000), skipDuplicates: true });
       }
+
+      await initializeRecipientStates(id, work.ready, tx);
 
       await audit(req, { action: "campaign.approve", entityType: "Campaign", entityId: id, metadata: { recipients: work.ready.length, skipped: work.skipped.length } }, tx);
     },

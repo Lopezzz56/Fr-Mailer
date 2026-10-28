@@ -1,6 +1,6 @@
 // Form fields: one label/hint/error layout for every control
 import { forwardRef, useId, useState, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
-import { Eye, EyeOff, Search } from "lucide-react";
+import { ChevronDown, Eye, EyeOff, Search } from "lucide-react";
 import { cn } from "../../lib/cn";
 
 interface FieldShellProps {
@@ -103,18 +103,34 @@ export const SelectField = forwardRef<HTMLSelectElement, SelectHTMLAttributes<HT
     return (
       <FieldShell label={label} hint={hint} error={error} optional={optional} className={containerClassName}>
         {({ id, describedBy, invalid }) => (
-          <select ref={ref} id={id} aria-describedby={describedBy} aria-invalid={invalid || undefined} className={cn("control h-9 pr-8", className)} {...props}>
-            {placeholder !== undefined && (
-              <option value="" disabled>
-                {placeholder}
-              </option>
-            )}
-            {options.map((o) => (
-              <option key={o.value} value={o.value} disabled={o.disabled}>
-                {o.label}
-              </option>
-            ))}
-          </select>
+          <div className="relative w-full">
+            <select
+              ref={ref}
+              id={id}
+              aria-describedby={describedBy}
+              aria-invalid={invalid || undefined}
+              className={cn(
+                "control h-9 w-full appearance-none rounded-md border border-line bg-surface pl-3 pr-8 text-xs font-medium text-ink transition-colors cursor-pointer shadow-xs",
+                "hover:border-line-strong focus:border-brand focus:ring-1 focus:ring-brand/20",
+                className
+              )}
+              {...props}
+            >
+              {placeholder !== undefined && (
+                <option value="" disabled className="text-ink-faint">
+                  {placeholder}
+                </option>
+              )}
+              {options.map((o) => (
+                <option key={o.value} value={o.value} disabled={o.disabled} className="text-ink bg-surface py-1">
+                  {o.label}
+                </option>
+              ))}
+            </select>
+            <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2.5 text-ink-subtle">
+              <ChevronDown className="h-4 w-4" aria-hidden="true" />
+            </div>
+          </div>
         )}
       </FieldShell>
     );

@@ -296,7 +296,31 @@ export function CampaignDetailPage() {
       <PageHeader
         back={{ to: "/campaigns", label: "Campaigns" }}
         title={c.name}
-        meta={<CampaignStatusBadge status={c.status} />}
+        meta={
+          <div className="flex items-center gap-2 flex-wrap">
+            <CampaignStatusBadge status={c.status} />
+            <Badge
+              tone={
+                c.automationMode === "AUTOMATIC"
+                  ? "warning"
+                  : c.automationMode === "APPROVAL_REQUIRED"
+                  ? "success"
+                  : "neutral"
+              }
+            >
+              {c.automationMode === "AUTOMATIC"
+                ? "Automatic Follow-ups"
+                : c.automationMode === "APPROVAL_REQUIRED"
+                ? "Approval Required"
+                : "Manual Sending"}
+            </Badge>
+            {c.sequenceSteps && c.sequenceSteps.length > 1 && (
+              <Badge tone="brand">
+                {c.sequenceSteps.length} Steps
+              </Badge>
+            )}
+          </div>
+        }
         description={c.description ?? `${c.template.name} → ${c.list.name}`}
         actions={
           <>
@@ -305,6 +329,19 @@ export function CampaignDetailPage() {
               items={[
                 { label: "Duplicate as new draft", onSelect: () => duplicate.mutate(), hidden: !can("campaigns.manage") },
                 { label: "Retry failed messages", onSelect: () => act.mutate("retry-failed"), hidden: !(can("campaigns.control") && c.counts.failed > 0 && ["SENDING", "PAUSED"].includes(c.status)) },
+                {
+                  label: "Stop all follow-ups",
+                  tone: "danger",
+                  onSelect: () => {
+                    if (window.confirm("Stop all scheduled follow-up emails for this campaign?")) {
+                      api.post(`/api/campaigns/${id}/sequence/stop-all`).then(() => {
+                        refresh();
+                        toast.success("Follow-ups stopped");
+                      });
+                    }
+                  },
+                  hidden: !can("campaigns.control") || ["COMPLETED", "CANCELLED", "DRAFT"].includes(c.status),
+                },
                 { label: "Cancel campaign", tone: "danger", onSelect: () => setDialog("cancel"), hidden: !can("campaigns.control") || ["COMPLETED", "CANCELLED", "DRAFT"].includes(c.status) },
                 { label: "Delete", tone: "danger", onSelect: () => setDialog("delete"), hidden: !can("campaigns.manage") || !(c.status === "DRAFT" || (c.status === "CANCELLED" && c.counts.sent === 0)) },
               ]}
@@ -406,6 +443,9 @@ export function CampaignDetailPage() {
               items={[
                 { label: "Template", value: <Link className="link" to={`/templates/${c.template.id}`}>{c.template.name}</Link> },
                 { label: "List", value: <Link className="link" to={`/lists/${c.list.id}`}>{c.list.name} ({plural(c.list.memberCount, "contact")} now)</Link> },
+                { label: "Automation Mode", value: c.automationMode === "AUTOMATIC" ? "Automatic Follow-ups" : c.automationMode === "APPROVAL_REQUIRED" ? "Approval Required (Recommended)" : "Manual Sending" },
+                { label: "Sequence Cadence", value: `${c.sequenceSteps?.length ?? 1} touch${(c.sequenceSteps?.length ?? 1) === 1 ? "" : "es"} (Day 0 initial${(c.sequenceSteps?.length ?? 1) > 1 ? ` + ${(c.sequenceSteps?.length ?? 1) - 1} follow-up(s)` : ""})` },
+                { label: "Safety Stopping Rules", value: "Instant Stop on Inbound Reply • Auto-suppress Bounces • Mailbox Health Guard" },
                 { label: "Sends as", value: fromLine },
                 { label: "Replies go to", value: c.replyTo ?? c.fromEmail ?? "—" },
                 { label: "Pace", value: `${c.sendRatePerMinute} emails per minute` },
