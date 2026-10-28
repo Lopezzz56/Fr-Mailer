@@ -166,8 +166,18 @@ export function toSessionUser(user: {
   name: string;
   role: SessionUser["role"];
   status: SessionUser["status"];
+  senderName?: string | null;
+  sendingEmail?: string | null;
 }): SessionUser {
-  return { id: user.id, email: user.email, name: user.name, role: user.role, status: user.status };
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+    status: user.status,
+    senderName: user.senderName ?? null,
+    sendingEmail: user.sendingEmail ?? null,
+  };
 }
 
 // ============================================================================

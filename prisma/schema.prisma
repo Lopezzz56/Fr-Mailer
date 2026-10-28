@@ -220,8 +220,9 @@ model Campaign {
   template          Template       @relation(fields: [templateId], references: [id])
   contactListId     String
   contactList       ContactList    @relation(fields: [contactListId], references: [id])
-  // Sender: always the configured mailbox address; these are per-campaign presentation
+  // Sender: per-campaign identity; defaults to user's sender address or mailbox
   fromName          String
+  fromEmail         String?
   replyTo           String?
   sendRatePerMinute Int            @default(20)
   automationMode    CampaignAutomationMode @default(APPROVAL_REQUIRED)
@@ -484,6 +485,8 @@ model User {
   invitedById  String?
   invitedBy    User?      @relation("UserInvitedBy", fields: [invitedById], references: [id], onDelete: Restrict)
   lastLoginAt  DateTime?  @db.Timestamptz
+  senderName   String?
+  sendingEmail String?
   createdAt    DateTime   @default(now()) @db.Timestamptz
   updatedAt    DateTime   @updatedAt @db.Timestamptz
 

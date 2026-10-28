@@ -40,6 +40,7 @@ import {
 import { htmlToText, plainTextToHtml } from "@shared/merge";
 import { api, errorMessage } from "../../lib/api";
 import { useCampaign, useInvalidate, useLists, useMailbox, useTemplates } from "../../lib/queries";
+import { useAuth } from "../../lib/auth";
 import { useToast } from "../ui/Toast";
 import { Panel, Stat } from "../ui/Card";
 import { Button, ButtonLink } from "../ui/Button";
@@ -127,6 +128,7 @@ export function AdvancedCampaignStudio({
 
   const templatesQuery = useTemplates();
   const listsQuery = useLists();
+  const { user } = useAuth();
   const mailboxQuery = useMailbox();
   const existingQuery = useCampaign(campaignId ?? "");
 
@@ -135,6 +137,7 @@ export function AdvancedCampaignStudio({
   const [description, setDescription] = useState("");
   const [contactListId, setContactListId] = useState("");
   const [fromName, setFromName] = useState("");
+  const [fromEmail, setFromEmail] = useState("");
   const [replyTo, setReplyTo] = useState("");
   const [sendRatePerMinute, setSendRatePerMinute] = useState("20");
 
@@ -220,9 +223,10 @@ export function AdvancedCampaignStudio({
 
   // Initialize from mailbox / existing campaign
   useEffect(() => {
-    if (isNew && mailboxQuery.data && !senderInitializedRef.current) {
+    if (isNew && (mailboxQuery.data || user) && !senderInitializedRef.current) {
       senderInitializedRef.current = true;
-      setFromName(mailboxQuery.data.data.smtp.fromName || "FocusRealm");
+      setFromName(user?.senderName || user?.name || mailboxQuery.data?.data.smtp.fromName || "FocusRealm");
+      setFromEmail(user?.sendingEmail || user?.email || mailboxQuery.data?.data.smtp.fromEmail || "");
     }
     if (!isNew && existingQuery.data && !senderInitializedRef.current) {
       senderInitializedRef.current = true;
@@ -231,6 +235,7 @@ export function AdvancedCampaignStudio({
       setDescription(c.description ?? "");
       setContactListId(c.list.id);
       setFromName(c.fromName);
+      setFromEmail(c.fromEmail ?? "");
       setReplyTo(c.replyTo ?? "");
       setSendRatePerMinute(String(c.sendRatePerMinute));
 
@@ -785,7 +790,8 @@ export function AdvancedCampaignStudio({
         description: description.trim() || null,
         contactListId,
         templateId: fallback.templateId,
-        fromName: fromName.trim() || mailboxQuery.data?.data.smtp.fromName || "FocusRealm",
+        fromName: fromName.trim() || user?.senderName || user?.name || mailboxQuery.data?.data.smtp.fromName || "FocusRealm",
+        fromEmail: fromEmail.trim() || user?.sendingEmail || user?.email || mailboxQuery.data?.data.smtp.fromEmail || null,
         replyTo: replyTo.trim() || null,
         sendRatePerMinute: parseInt(sendRatePerMinute, 10) || 20,
         automationMode,
@@ -886,53 +892,95 @@ export function AdvancedCampaignStudio({
             placeholder="Goal, context, or outreach objective for founder approval"
           />
 
-          <div className="grid gap-4 sm:grid-cols-3 pt-2">
+          <div className="grid gap-4 sm:grid-cols-2 pt-2">
             <div>
               <TextField
                 label="Sender Display Name"
                 value={fromName}
                 onChange={(e) => setFromName(e.target.value)}
                 placeholder="e.g. Founder’s Office, Sehej Sharma, FocusRealm"
+                hint="Friendly name recipients see in their inbox"
+                required
+              />
+              <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-ink-subtle">
+                <span className="text-[10px] uppercase font-semibold text-ink-muted">Quick:</span>
+                {[user?.name, user?.senderName, "Founder’s Office", "FocusRealm"]
+                  .filter((v): v is string => Boolean(v && v.trim()))
+                  .filter((v, i, a) => a.indexOf(v) === i)
+                  .map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setFromName(preset)}
+                      className={`rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors ${
+                        fromName === preset
+                          ? "bg-primary text-white"
+                          : "bg-canvas-subtle text-ink-muted hover:bg-line hover:text-ink"
+                      }`}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+              </div>
+            </div>
+
+            <div>
+              <TextField
+                label="Sender Email Address"
+                type="email"
+                value={fromEmail}
+                onChange={(e) => setFromEmail(e.target.value)}
+                placeholder={user?.email || mailboxQuery.data?.data.smtp.fromEmail || "employee@focusrealm.org"}
                 hint={
-                  mailboxQuery.data?.data.smtp.fromEmail ? (
-                    <span className="flex items-center justify-between gap-1 text-[11px]">
-                      <span>Sends from: <strong className="font-semibold text-ink">{mailboxQuery.data.data.smtp.fromEmail}</strong></span>
-                      <ButtonLink to="/settings/mailbox" size="sm" variant="ghost" className="text-primary hover:underline text-[11px] p-0 h-auto">Settings</ButtonLink>
-                    </span>
-                  ) : "Configured mailbox"
+                  <span className="flex items-center justify-between gap-1 text-[11px]">
+                    <span>Address displayed to recipients</span>
+                    <ButtonLink to="/settings/account" size="sm" variant="ghost" className="text-primary hover:underline text-[11px] p-0 h-auto">Your Profile</ButtonLink>
+                  </span>
                 }
               />
               <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-ink-subtle">
                 <span className="text-[10px] uppercase font-semibold text-ink-muted">Quick:</span>
-                {["Founder’s Office", "FocusRealm", "Sehej Sharma"].map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    onClick={() => setFromName(preset)}
-                    className={`rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors ${
-                      fromName === preset
-                        ? "bg-primary text-white"
-                        : "bg-canvas-subtle text-ink-muted hover:bg-line hover:text-ink"
-                    }`}
-                  >
-                    {preset}
-                  </button>
-                ))}
+                {[user?.sendingEmail, user?.email, mailboxQuery.data?.data.smtp.fromEmail]
+                  .filter((v): v is string => Boolean(v && v.trim()))
+                  .filter((v, i, a) => a.indexOf(v) === i)
+                  .map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setFromEmail(preset)}
+                      className={`rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors ${
+                        fromEmail === preset
+                          ? "bg-primary text-white"
+                          : "bg-canvas-subtle text-ink-muted hover:bg-line hover:text-ink"
+                      }`}
+                    >
+                      {preset}
+                    </button>
+                  ))}
               </div>
             </div>
-            <TextField
-              label="Reply-To"
-              optional
-              value={replyTo}
-              onChange={(e) => setReplyTo(e.target.value)}
-              placeholder="defaults to sender mailbox"
-            />
-            <SelectField
-              label="Sending Pace"
-              value={sendRatePerMinute}
-              onChange={(e) => setSendRatePerMinute(e.target.value)}
-              options={PACES}
-            />
+
+            <div>
+              <TextField
+                label="Reply-To"
+                type="email"
+                optional
+                value={replyTo}
+                onChange={(e) => setReplyTo(e.target.value)}
+                placeholder={fromEmail || user?.email || "defaults to sender address"}
+                hint="Where recipient replies are delivered"
+              />
+            </div>
+
+            <div>
+              <SelectField
+                label="Sending Pace"
+                value={sendRatePerMinute}
+                onChange={(e) => setSendRatePerMinute(e.target.value)}
+                options={PACES}
+                hint="Max speed per minute"
+              />
+            </div>
           </div>
         </div>
       </Panel>
@@ -2249,8 +2297,9 @@ export function AdvancedCampaignStudio({
 
               {previewTab === "preview" && (
                 <EmailPreview
-                  from={`${fromName || "FocusRealm"} <${mailboxQuery.data?.data.smtp.fromEmail ?? "namaste@misehotel.com"}>`}
+                  from={`${fromName || user?.senderName || user?.name || "FocusRealm"} <${fromEmail || user?.sendingEmail || user?.email || mailboxQuery.data?.data.smtp.fromEmail || "namaste@misehotel.com"}>`}
                   to={previewSample.email}
+                  replyTo={replyTo || (fromEmail && fromEmail !== mailboxQuery.data?.data.smtp.fromEmail ? fromEmail : undefined)}
                   subject={previewSample.subject}
                   html={previewSample.html}
                   text={previewSample.text}

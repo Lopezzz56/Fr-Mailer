@@ -163,7 +163,7 @@ mailboxRouter.post(
 /** Updates sender email, password, and fromName; verifies connection before saving */
 mailboxRouter.post(
   "/update-account",
-  requirePermission("settings.manage"),
+  requirePermission("settings.view"),
   asyncHandler(async (req, res) => {
     const { email, password, fromName } = req.body ?? {};
     if (!email) {

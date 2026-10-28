@@ -450,8 +450,29 @@ function ActivityTab() {
 }
 
 function AccountTab() {
-  const { user } = useAuth();
+  const { user, refresh } = useAuth();
   const toast = useToast();
+
+  const [senderName, setSenderName] = useState(user?.senderName ?? user?.name ?? "");
+  const [sendingEmail, setSendingEmail] = useState(user?.sendingEmail ?? user?.email ?? "");
+  const [profileSaved, setProfileSaved] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+
+  const updateProfile = useMutation({
+    mutationFn: () =>
+      api.patch("/api/auth/me", {
+        senderName: senderName.trim() || null,
+        sendingEmail: sendingEmail.trim() || null,
+      }),
+    onSuccess: async () => {
+      await refresh();
+      setProfileSaved(true);
+      setTimeout(() => setProfileSaved(false), 3000);
+      toast.success("Outreach address updated", "Your personal sending identity has been saved.");
+    },
+    onError: (err) => setProfileError(errorMessage(err)),
+  });
+
   const [form, setForm] = useState({ currentPassword: "", newPassword: "", confirm: "" });
   const [error, setError] = useState<string | null>(null);
   const change = useMutation({
@@ -471,8 +492,55 @@ function AccountTab() {
   return (
     <div className="max-w-2xl space-y-6">
       <Panel title="Profile">
-        <DescriptionList items={[{ label: "Name", value: user?.name }, { label: "Email", value: user?.email }, { label: "Role", value: user && ROLE_LABELS[user.role] }]} />
+        <DescriptionList
+          items={[
+            { label: "Name", value: user?.name },
+            { label: "Login Email", value: user?.email },
+            { label: "Role", value: user && ROLE_LABELS[user.role] },
+          ]}
+        />
       </Panel>
+
+      <Panel
+        title="Default Outreach Sending Address"
+        description="Your personal sender name and email address used when creating outreach campaigns."
+      >
+        <div className="space-y-4">
+          {profileError && <Callout tone="danger">{profileError}</Callout>}
+          {profileSaved && (
+            <p className="text-xs text-success flex items-center gap-1">
+              <CheckCircle2 className="h-4 w-4" /> Personal sender settings saved.
+            </p>
+          )}
+          <div className="grid gap-4 sm:grid-cols-2">
+            <TextField
+              label="Sender Display Name"
+              value={senderName}
+              onChange={(e) => setSenderName(e.target.value)}
+              placeholder={user?.name || "e.g. Sehej Sharma"}
+              hint="Name shown to recipients in their inbox"
+            />
+            <TextField
+              label="Sender Email Address"
+              type="email"
+              value={sendingEmail}
+              onChange={(e) => setSendingEmail(e.target.value)}
+              placeholder={user?.email || "e.g. sehej@focusrealm.org"}
+              hint="Your personal outreach email address"
+            />
+          </div>
+          <div className="flex justify-end">
+            <Button
+              variant="primary"
+              loading={updateProfile.isPending}
+              onClick={() => updateProfile.mutate()}
+            >
+              Save Sending Address
+            </Button>
+          </div>
+        </div>
+      </Panel>
+
       <Panel title="Change password">
         <div className="space-y-4">
           <TextField label="Current password" type="password" autoComplete="current-password" value={form.currentPassword} onChange={(e) => setForm({ ...form, currentPassword: e.target.value })} />

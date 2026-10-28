@@ -492,6 +492,14 @@ export const CampaignInputSchema = z.object({
   templateId: IdSchema,
   contactListId: IdSchema,
   fromName: z.string().trim().min(1, "Sender name is required").max(100),
+  fromEmail: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .email("Enter a valid sender email address")
+    .optional()
+    .nullable()
+    .or(z.literal("").transform(() => null)),
   replyTo: z
     .string()
     .trim()

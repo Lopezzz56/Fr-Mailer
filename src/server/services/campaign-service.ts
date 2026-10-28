@@ -736,6 +736,7 @@ export async function sendTest(
         html: content.html,
         text: content.text,
         fromName: campaign.fromName,
+        fromEmail: campaign.fromEmail,
         replyTo: campaign.replyTo,
         headers: { "X-FR-Test": "true", ...unsubscribeHeaders(unsubscribeUrl("test-preview")) },
       });

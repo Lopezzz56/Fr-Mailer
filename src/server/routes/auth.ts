@@ -83,6 +83,30 @@ authRouter.get(
   asyncHandler(async (req, res) => ok(res, req.user))
 );
 
+const UpdateProfileSchema = z.object({
+  name: z.string().trim().min(1, "Name is required").max(100).optional(),
+  senderName: z.string().trim().max(100).optional().nullable().or(z.literal("").transform(() => null)),
+  sendingEmail: z.string().trim().toLowerCase().email("Enter a valid email address").optional().nullable().or(z.literal("").transform(() => null)),
+});
+
+authRouter.patch(
+  "/me",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const input = UpdateProfileSchema.parse(req.body);
+    const updated = await prisma.user.update({
+      where: { id: req.user!.id },
+      data: {
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.senderName !== undefined ? { senderName: input.senderName?.trim() || null } : {}),
+        ...(input.sendingEmail !== undefined ? { sendingEmail: input.sendingEmail?.trim() || null } : {}),
+      },
+    });
+    req.user = toSessionUser(updated);
+    ok(res, req.user);
+  })
+);
+
 // Invite acceptance
 authRouter.get(
   "/invite/:token",

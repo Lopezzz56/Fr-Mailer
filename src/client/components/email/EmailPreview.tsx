@@ -11,6 +11,7 @@ const FRAME_STYLE = `<style>
 export function EmailPreview({
   from,
   to,
+  replyTo,
   subject,
   html,
   text,
@@ -19,6 +20,7 @@ export function EmailPreview({
 }: {
   from?: string;
   to?: string;
+  replyTo?: string;
   subject: string;
   html: string;
   text?: string;
@@ -39,6 +41,12 @@ export function EmailPreview({
           <p className="truncate">
             <span className="inline-block w-14 text-ink-subtle">To</span>
             <span className="text-ink">{to}</span>
+          </p>
+        )}
+        {replyTo && (
+          <p className="truncate">
+            <span className="inline-block w-14 text-ink-subtle">Reply-To</span>
+            <span className="text-ink">{replyTo}</span>
           </p>
         )}
         <p className="truncate">

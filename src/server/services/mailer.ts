@@ -35,10 +35,11 @@ class SmtpTransport implements MailTransport {
   });
 
   async send(message: OutgoingMessage) {
-    // SpaceMail SMTP strictly enforces that the envelope/sender address matches the authenticated mailbox user (SMTP_USER).
-    // Always use the authenticated SMTP_USER for the transport address so SpaceMail never rejects with 553 5.7.1.
-    // Any custom sender email or campaign reply-to is preserved via the Reply-To header.
+    // SpaceMail SMTP strictly enforces that the envelope address matches the authenticated mailbox user (SMTP_USER).
+    // We set envelope.from = authenticatedAddress to satisfy SpaceMail authentication without 553 rejections,
+    // while displaying the employee's customized sender address and name in the email From header and Reply-To.
     const authenticatedAddress = env.SMTP_USER || env.SMTP_FROM_EMAIL!;
+    const fromAddress = message.fromEmail?.trim() || authenticatedAddress;
     const effectiveReplyTo =
       message.replyTo ||
       message.fromEmail ||
@@ -47,7 +48,11 @@ class SmtpTransport implements MailTransport {
         : undefined);
 
     const mailOptions = {
-      from: { name: message.fromName, address: authenticatedAddress },
+      from: { name: message.fromName, address: fromAddress },
+      envelope: {
+        from: authenticatedAddress,
+        to: message.to,
+      },
       to: message.to,
       replyTo: effectiveReplyTo,
       subject: message.subject,

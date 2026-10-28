@@ -126,7 +126,7 @@ async function finishIfDone(campaignId: string) {
 }
 
 /** Sends one message for the campaign if possible. Returns true if it did any work. */
-export async function sendOne(campaign: { id: string; fromName: string; replyTo: string | null }): Promise<boolean> {
+export async function sendOne(campaign: { id: string; fromName: string; fromEmail?: string | null; replyTo: string | null }): Promise<boolean> {
   const send = await claimNext(campaign.id);
   if (!send) {
     await finishIfDone(campaign.id);
@@ -204,6 +204,7 @@ export async function sendOne(campaign: { id: string; fromName: string; replyTo:
       text: send.text,
       messageId: send.messageId,
       fromName: campaign.fromName,
+      fromEmail: campaign.fromEmail,
       replyTo: campaign.replyTo,
       headers,
     });
@@ -337,7 +338,7 @@ export class SendWorker {
   async tick(): Promise<"worked" | "waiting" | "limit" | "idle"> {
     const campaigns = await prisma.campaign.findMany({
       where: { status: "SENDING" },
-      select: { id: true, fromName: true, replyTo: true, sendRatePerMinute: true },
+      select: { id: true, fromName: true, fromEmail: true, replyTo: true, sendRatePerMinute: true },
       orderBy: { startedAt: "asc" },
     });
     if (!campaigns.length) return "idle";

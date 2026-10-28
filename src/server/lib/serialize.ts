@@ -279,7 +279,7 @@ export async function toCampaignDetail(c: CampaignRow): Promise<CampaignDetailDt
     ...toCampaignSummary(c, counts),
     description: c.description,
     fromName: c.fromName,
-    fromEmail: env.SMTP_FROM_EMAIL ?? null,
+    fromEmail: c.fromEmail ?? env.SMTP_FROM_EMAIL ?? null,
     replyTo: c.replyTo,
     sendRatePerMinute: c.sendRatePerMinute,
     approvalRequestedBy: c.approvalRequestedBy,

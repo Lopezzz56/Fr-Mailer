@@ -129,6 +129,8 @@ export const SessionUserSchema = z.object({
   name: z.string(),
   role: UserRoleSchema,
   status: UserStatusSchema,
+  senderName: z.string().nullable().optional(),
+  sendingEmail: z.string().nullable().optional(),
 });
 export type SessionUser = z.infer<typeof SessionUserSchema>;
 
