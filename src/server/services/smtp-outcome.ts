@@ -37,7 +37,7 @@ export function classifySmtpError(error: unknown): SmtpOutcome {
       const atRecipient = command.startsWith("RCPT");
       const isSenderRejection =
         command.startsWith("MAIL") ||
-        /sender (address )?rejected|not owned by user|authenticated sender/i.test(text);
+        /sender (address )?rejected|not owned by user|authenticated sender|<From> and <envelope-from>|JFE040011/i.test(text);
 
       return {
         kind: "rejected",

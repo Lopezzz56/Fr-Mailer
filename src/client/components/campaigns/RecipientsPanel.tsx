@@ -25,6 +25,7 @@ import { useInvalidate, useSends, type SendDetail } from "../../lib/queries";
 import { useDebounced } from "../../lib/hooks";
 import { useAuth } from "../../lib/auth";
 import { formatDateTime } from "../../lib/format";
+import { cn } from "../../lib/cn";
 import { Card } from "../ui/Card";
 import { Badge, DeliveryStatusBadge } from "../ui/Badge";
 import { Button, buttonClasses } from "../ui/Button";
@@ -32,6 +33,7 @@ import { Checkbox, SearchInput, SelectField, TextField } from "../ui/Field";
 import { DataTable, Pagination, type Column } from "../ui/DataTable";
 import { FilterChips } from "../ui/Navigation";
 import { Callout, EmptyState, ErrorState } from "../ui/Feedback";
+import { DeliveryProblemCallout } from "./DeliveryProblemCallout";
 import { Drawer } from "../ui/Overlay";
 import { PageLoader } from "../ui/Spinner";
 import { useToast } from "../ui/Toast";
@@ -273,7 +275,13 @@ function SendDrawer({ campaignId, sendId, fromLine, onClose }: { campaignId: str
               </Callout>
             )}
             {s.skipReason && <Callout tone="info" title="Skipped">{s.skipReason}</Callout>}
-            {s.lastError && s.status !== "UNKNOWN" && <Callout tone="danger" title="Delivery problem">{s.lastError}</Callout>}
+            {s.lastError && s.status !== "UNKNOWN" && (
+              <DeliveryProblemCallout
+                error={s.lastError}
+                onRetry={can("campaigns.control") ? () => resolve.mutate("retry") : undefined}
+                isRetrying={resolve.isPending && resolve.variables === "retry"}
+              />
+            )}
 
             {/* Recipient Sequence Status & State Controls */}
             {seqQuery.data?.recipient && (
@@ -543,15 +551,23 @@ export function RecipientsPanel({ campaignId, counts, live, fromLine, initialFil
       key: "email",
       header: "Recipient",
       cell: (s) => (
-        <div className="flex items-center gap-1.5">
-          <span className="font-medium">{s.email}</span>
-          {s.isCustom && <Badge tone="neutral">Customized</Badge>}
+        <div className="flex flex-col gap-1 min-w-0">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="font-medium truncate max-w-[200px] sm:max-w-none">{s.email}</span>
+            {s.isCustom && <Badge tone="neutral">Customized</Badge>}
+          </div>
+          <div className="flex items-center gap-2 sm:hidden text-2xs text-ink-subtle">
+            <span>{s.stepIndex === 0 ? "Initial" : `Step ${s.stepIndex ?? 1}`}</span>
+            {s.sentAt && <span>· {formatDateTime(s.sentAt)}</span>}
+          </div>
         </div>
       ),
     },
     {
       key: "step",
       header: "Step",
+      headerClassName: "hidden sm:table-cell",
+      className: "hidden sm:table-cell",
       cell: (s) => (
         <div className="flex items-center gap-1">
           <Badge tone={s.stepIndex === 0 ? "neutral" : "brand"}>
@@ -581,6 +597,8 @@ export function RecipientsPanel({ campaignId, counts, live, fromLine, initialFil
     {
       key: "detail",
       header: "Details",
+      headerClassName: "hidden md:table-cell",
+      className: "hidden md:table-cell",
       cell: (s) => (
         <span className="line-clamp-1 max-w-xs text-xs text-ink-subtle">
           {s.status === "PENDING" && s.scheduledFor
@@ -589,10 +607,18 @@ export function RecipientsPanel({ campaignId, counts, live, fromLine, initialFil
         </span>
       ),
     },
-    { key: "engagement", header: "Response", cell: (s) => <Engagement s={s} /> },
+    {
+      key: "engagement",
+      header: "Response",
+      headerClassName: "hidden sm:table-cell",
+      className: "hidden sm:table-cell",
+      cell: (s) => <Engagement s={s} />
+    },
     {
       key: "sentAt",
       header: "Timing",
+      headerClassName: "hidden lg:table-cell",
+      className: "hidden lg:table-cell",
       cell: (s) => (
         <span className="whitespace-nowrap text-ink-muted text-xs">
           {s.sentAt
@@ -639,7 +665,7 @@ export function RecipientsPanel({ campaignId, counts, live, fromLine, initialFil
           }}
           options={options.filter((o) => o.key === "all" || (o.count !== undefined ? o.count > 0 : true))}
         />
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
           {can("campaigns.control") && (
             <Button
               size="sm"
@@ -651,12 +677,13 @@ export function RecipientsPanel({ campaignId, counts, live, fromLine, initialFil
                 }
               }}
               icon={<Square className="h-3.5 w-3.5 text-danger" />}
+              className="w-full sm:w-auto"
             >
               Stop All Follow-ups
             </Button>
           )}
-          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Find an email" className="w-56" />
-          <a href={`/api/campaigns/${campaignId}/export`} className={buttonClasses("secondary", "md")} download>
+          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Find an email" className="w-full sm:w-56" />
+          <a href={`/api/campaigns/${campaignId}/export`} className={cn(buttonClasses("secondary", "md"), "w-full sm:w-auto justify-center")} download>
             <Download className="h-4 w-4" /> Export
           </a>
         </div>

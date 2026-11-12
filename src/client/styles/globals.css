@@ -5,17 +5,24 @@
 
 @layer base {
   html {
+    max-width: 100vw;
+    overflow-x: hidden;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
+    color-scheme: light dark;
+  }
+  html:not(.dark) {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
   }
   body {
-    @apply bg-canvas text-ink text-sm;
+    @apply bg-canvas text-ink text-sm selection:bg-brand/20;
     font-family: var(--font-sans);
     font-feature-settings: "cv11", "ss01";
-  }
-  ::selection {
-    background: rgb(var(--brand) / 0.18);
+    min-height: 100vh;
   }
   :focus-visible {
     outline: 2px solid rgb(var(--brand));
@@ -27,7 +34,7 @@
   select:focus-visible {
     outline: none;
   }
-  /* Keep autofilled fields white instead of the browser's blue tint */
+  /* Keep autofilled fields themed correctly */
   input:-webkit-autofill,
   input:-webkit-autofill:hover,
   input:-webkit-autofill:focus {
@@ -39,8 +46,7 @@
   h1,
   h2,
   h3 {
-    @apply text-ink;
-    letter-spacing: -0.01em;
+    @apply text-ink tracking-tight font-semibold;
   }
   code,
   kbd {
@@ -53,10 +59,10 @@
 }
 
 @layer components {
-  /* Form controls share one look */
+  /* Form controls share one polished look */
   .control {
-    @apply block w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink shadow-xs
-      placeholder:text-ink-faint transition-colors
+    @apply block w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink shadow-xs
+      placeholder:text-ink-faint transition-all duration-150
       hover:border-line-strong
       focus:border-brand focus:shadow-focus
       disabled:cursor-not-allowed disabled:bg-surface-muted disabled:text-ink-subtle;
@@ -65,8 +71,32 @@
     @apply border-danger focus:shadow-[0_0_0_3px_rgb(var(--danger)/0.18)];
   }
   .link {
-    @apply font-medium text-brand hover:text-brand-hover hover:underline underline-offset-2;
+    @apply font-medium text-brand hover:text-brand-hover hover:underline underline-offset-2 transition-colors;
   }
+}
+
+/* Custom refined scrollbars */
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--line-strong) / 0.6);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--line-strong) / 0.9);
 }
 
 /* Respect reduced motion */

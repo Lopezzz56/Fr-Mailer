@@ -7,9 +7,10 @@ import { PrismaClient } from "@prisma/client";
 import { hashPassword } from "../services/auth-service.js";
 import type { UserRole } from "../../shared/auth.js";
 
-const DEMO_USERS: { email: string; name: string; role: UserRole }[] = [
-  { email: "founder@focusrealm.test", name: "Founder’s Office", role: "FOUNDER" },
-  { email: "employee@focusrealm.test", name: "FocusRealm Team", role: "EMPLOYEE" },
+const DEMO_USERS: { email: string; name: string; role: UserRole; canSendWithoutApproval?: boolean }[] = [
+  { email: "founder@focusrealm.test", name: "Founder", role: "FOUNDER", canSendWithoutApproval: true },
+  { email: "founderoffice@focusrealm.test", name: "Founder’s Office", role: "FOUNDER_OFFICE", canSendWithoutApproval: true },
+  { email: "employee@focusrealm.test", name: "FocusRealm Team", role: "EMPLOYEE", canSendWithoutApproval: false },
 ];
 
 async function main() {
@@ -24,10 +25,23 @@ async function main() {
       const passwordHash = await hashPassword(password);
       await prisma.user.upsert({
         where: { email: demo.email },
-        update: { name: demo.name, role: demo.role, status: "ACTIVE", passwordHash },
-        create: { email: demo.email, name: demo.name, role: demo.role, status: "ACTIVE", passwordHash },
+        update: {
+          name: demo.name,
+          role: demo.role,
+          status: "ACTIVE",
+          passwordHash,
+          canSendWithoutApproval: demo.canSendWithoutApproval ?? false,
+        },
+        create: {
+          email: demo.email,
+          name: demo.name,
+          role: demo.role,
+          status: "ACTIVE",
+          passwordHash,
+          canSendWithoutApproval: demo.canSendWithoutApproval ?? false,
+        },
       });
-      console.log(`${demo.role.padEnd(8)} ${demo.email}  /  ${password}`);
+      console.log(`${demo.role.padEnd(14)} ${demo.email}  /  ${password}`);
     }
   } finally {
     await prisma.$disconnect();

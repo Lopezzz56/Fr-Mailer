@@ -54,27 +54,41 @@ export function DataTable<T>({
       <table className="w-full border-collapse text-left text-[13px]">
         {caption && <caption className="sr-only">{caption}</caption>}
         <thead>
-          <tr className="border-b border-line bg-surface-muted">
+          <tr className="border-b border-line bg-surface-muted/80 backdrop-blur-xs">
             {selection && (
-              <th className="w-10 py-2.5 pl-5 pr-1">
-                <input type="checkbox" aria-label="Select all on this page" checked={Boolean(allSelected)} onChange={toggleAll} className="h-4 w-4 accent-[rgb(var(--brand))]" />
+              <th className="w-10 py-3 pl-5 pr-1">
+                <input
+                  type="checkbox"
+                  aria-label="Select all on this page"
+                  checked={Boolean(allSelected)}
+                  onChange={toggleAll}
+                  className="h-4 w-4 rounded border-line-strong text-brand focus:ring-brand/30 accent-[rgb(var(--brand))]"
+                />
               </th>
             )}
             {columns.map((c, i) => (
-              <th key={c.key} scope="col" className={cn("whitespace-nowrap py-2.5 pr-4 text-xs font-medium text-ink-subtle", i === 0 && !selection && "pl-5", c.headerClassName)}>
+              <th
+                key={c.key}
+                scope="col"
+                className={cn(
+                  "whitespace-nowrap py-3 pr-4 text-2xs font-semibold uppercase tracking-wider text-ink-subtle",
+                  i === 0 && !selection && "pl-5",
+                  c.headerClassName
+                )}
+              >
                 {c.header}
               </th>
             ))}
           </tr>
         </thead>
-        <tbody>
+        <tbody className="divide-y divide-line/70">
           {loading && !rows
             ? Array.from({ length: 5 }).map((_, i) => (
                 <tr key={i} className="border-b border-line last:border-0">
                   {selection && <td className="py-3.5 pl-5" />}
                   {columns.map((c, j) => (
                     <td key={c.key} className={cn("py-3.5 pr-4", j === 0 && !selection && "pl-5")}>
-                      <Skeleton className="h-3.5 w-3/4" />
+                      <Skeleton className="h-3.5 w-3/4 rounded" />
                     </td>
                   ))}
                 </tr>
@@ -86,11 +100,21 @@ export function DataTable<T>({
                   <tr
                     key={id}
                     onClick={onRowClick ? () => onRowClick(row) : undefined}
-                    className={cn("border-b border-line last:border-0 transition-colors", onRowClick && "cursor-pointer hover:bg-surface-muted", selected && "bg-brand-soft/50")}
+                    className={cn(
+                      "transition-colors duration-100",
+                      onRowClick && "cursor-pointer hover:bg-surface-muted/80",
+                      selected && "bg-brand-soft/40"
+                    )}
                   >
                     {selection && (
                       <td className="py-3 pl-5 pr-1" onClick={(e) => e.stopPropagation()}>
-                        <input type="checkbox" aria-label="Select row" checked={Boolean(selected)} onChange={() => toggle(id)} className="h-4 w-4 accent-[rgb(var(--brand))]" />
+                        <input
+                          type="checkbox"
+                          aria-label="Select row"
+                          checked={Boolean(selected)}
+                          onChange={() => toggle(id)}
+                          className="h-4 w-4 rounded border-line-strong text-brand focus:ring-brand/30 accent-[rgb(var(--brand))]"
+                        />
                       </td>
                     )}
                     {columns.map((c, j) => (
@@ -103,30 +127,42 @@ export function DataTable<T>({
               })}
         </tbody>
       </table>
-      {!loading && rows && rows.length === 0 && empty}
+      {!loading && data.length === 0 && empty && <div className="p-8 text-center">{empty}</div>}
     </div>
   );
 }
 
-export function Pagination({ pagination, onPage }: { pagination: PaginationInfo | undefined; onPage: (page: number) => void }) {
-  if (!pagination || pagination.total <= pagination.pageSize) return null;
-  const { page, pageSize, total, totalPages } = pagination;
-  const from = (page - 1) * pageSize + 1;
-  const to = Math.min(page * pageSize, total);
+export function Pagination({
+  pagination,
+  onPage,
+  onPageChange,
+}: {
+  pagination?: PaginationInfo;
+  onPage?: (page: number) => void;
+  onPageChange?: (page: number) => void;
+}) {
+  const handler = onPageChange || onPage;
+  if (!pagination || pagination.totalPages <= 1 || !handler) return null;
+  const { page, totalPages, total } = pagination;
   return (
-    <nav className="flex items-center justify-between border-t border-line px-5 py-3 text-[13px] text-ink-subtle" aria-label="Pagination">
-      <span className="tabular">
-        {from.toLocaleString()}–{to.toLocaleString()} of {total.toLocaleString()}
+    <nav className="flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-line px-4 sm:px-5 py-3 text-xs text-ink-subtle" aria-label="Pagination">
+      <span className="text-center sm:text-left">
+        Page <strong className="font-semibold text-ink">{page}</strong> of <strong className="font-semibold text-ink">{totalPages}</strong> ({total.toLocaleString()} total)
       </span>
-      <div className="flex items-center gap-1">
-        <button className="inline-flex h-8 items-center gap-1 rounded-md px-2.5 hover:bg-surface-sunken disabled:opacity-40" onClick={() => onPage(page - 1)} disabled={page <= 1}>
-          <ChevronLeft className="h-4 w-4" /> Previous
+      <div className="flex gap-2 w-full sm:w-auto justify-between sm:justify-end">
+        <button
+          onClick={() => handler(page - 1)}
+          disabled={page <= 1}
+          className="flex-1 sm:flex-initial justify-center inline-flex h-8 items-center gap-1 rounded-lg border border-line bg-surface px-3 font-medium text-ink shadow-xs transition-colors hover:bg-surface-muted disabled:opacity-40 disabled:hover:bg-surface"
+        >
+          <ChevronLeft className="h-3.5 w-3.5" /> Previous
         </button>
-        <span className="tabular px-2">
-          Page {page} of {totalPages}
-        </span>
-        <button className="inline-flex h-8 items-center gap-1 rounded-md px-2.5 hover:bg-surface-sunken disabled:opacity-40" onClick={() => onPage(page + 1)} disabled={page >= totalPages}>
-          Next <ChevronRight className="h-4 w-4" />
+        <button
+          onClick={() => handler(page + 1)}
+          disabled={page >= totalPages}
+          className="flex-1 sm:flex-initial justify-center inline-flex h-8 items-center gap-1 rounded-lg border border-line bg-surface px-3 font-medium text-ink shadow-xs transition-colors hover:bg-surface-muted disabled:opacity-40 disabled:hover:bg-surface"
+        >
+          Next <ChevronRight className="h-3.5 w-3.5" />
         </button>
       </div>
     </nav>

@@ -5,6 +5,7 @@ import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from "@ta
 import { ApiError } from "./lib/api";
 import { AuthProvider, meQueryKey } from "./lib/auth";
 import { ToastProvider } from "./components/ui/Toast";
+import { ThemeProvider } from "./lib/theme";
 import App from "./App";
 import "./styles/globals.css";
 
@@ -31,11 +32,13 @@ const queryClient = new QueryClient({
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <ToastProvider>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </ToastProvider>
+      <ThemeProvider>
+        <ToastProvider>
+          <AuthProvider>
+            <App />
+          </AuthProvider>
+        </ToastProvider>
+      </ThemeProvider>
     </QueryClientProvider>
   </React.StrictMode>
 );

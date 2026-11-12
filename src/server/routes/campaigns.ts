@@ -6,6 +6,7 @@ import prisma from "../db.js";
 import { asyncHandler, AppError } from "../middleware/error-handler.js";
 import { requirePermission } from "../middleware/session.js";
 import { audit } from "../lib/audit.js";
+import { assertListAccessible, assertTemplateAccessible } from "../lib/resource-visibility.js";
 import { ok, okPage, searchParam, skipTake } from "../lib/http.js";
 import { campaignInclude, campaignSummaryInclude, toCampaignDetail, toCampaignSummaries, toSendDto } from "../lib/serialize.js";
 import {
@@ -24,6 +25,7 @@ import {
 } from "../services/campaign-service.js";
 import { sentInLast24h } from "../services/send-worker.js";
 import { kickBackground } from "../services/background.js";
+import { getPersonalMailboxStatus } from "../services/personal-mailbox.js";
 import { getCampaignAnalytics, recordSendOutcome } from "../services/analytics-service.js";
 import { selectTemplateForRecipient, type EligibleTemplate, type SelectionContext } from "../services/template-selection.js";
 import { inferPersonaFromTitle, inferSegmentFromCompany } from "../services/classification.js";
@@ -44,6 +46,12 @@ import {
   TestSendInputSchema,
 } from "../../shared/types.js";
 import {
+  AddCollaboratorSchema,
+  canAct,
+  type CampaignAccessRole,
+  type SessionUser,
+} from "../../shared/auth.js";
+import {
   approveFollowUpSend,
   approveAllPendingFollowUps,
   pauseRecipientSequence,
@@ -56,9 +64,41 @@ import {
 
 const router = Router();
 
-async function loadDetail(id: string) {
+export type CampaignAccessLevel = "VIEW" | "EDIT" | "ADMIN";
+
+export function checkCampaignAccess(
+  campaign: { createdById?: string | null; collaborators?: { userId: string; role: CampaignAccessRole }[] },
+  user: SessionUser,
+  required: CampaignAccessLevel
+): boolean {
+  if (user.role === "FOUNDER" || user.role === "FOUNDER_OFFICE") return true;
+  if (campaign.createdById === user.id) return true;
+
+  const collaborator = campaign.collaborators?.find((c) => c.userId === user.id);
+  if (!collaborator) return false;
+
+  if (required === "VIEW") return true;
+  if (required === "EDIT") return collaborator.role === "OWNER" || collaborator.role === "EDITOR";
+  if (required === "ADMIN") return collaborator.role === "OWNER";
+
+  return false;
+}
+
+async function loadDetail(id: string, user?: SessionUser, requiredAccess: CampaignAccessLevel = "VIEW") {
   const campaign = await prisma.campaign.findUnique({ where: { id }, include: campaignInclude });
   if (!campaign) throw AppError.notFound("CAMPAIGN_NOT_FOUND", "That campaign no longer exists.");
+
+  if (user) {
+    const hasAccess = checkCampaignAccess(campaign, user, requiredAccess);
+    if (!hasAccess) {
+      const canView = checkCampaignAccess(campaign, user, "VIEW");
+      if (canView) {
+        throw AppError.forbidden("PERMISSION_DENIED", "You do not have sufficient permissions for this campaign.");
+      }
+      throw AppError.notFound("CAMPAIGN_NOT_FOUND", "That campaign no longer exists.");
+    }
+  }
+
   const detail = await toCampaignDetail(campaign);
   const sent24h = await sentInLast24h();
   return {
@@ -70,13 +110,13 @@ async function loadDetail(id: string) {
   };
 }
 
-async function assertReferences(templateId: string, contactListId: string) {
+async function assertReferences(templateId: string, contactListId: string, user: NonNullable<Express.Request["user"]>) {
   const [template, list] = await Promise.all([
     prisma.template.findUnique({ where: { id: templateId } }),
     prisma.contactList.findUnique({ where: { id: contactListId } }),
   ]);
-  if (!template) throw AppError.badRequest("TEMPLATE_NOT_FOUND", "Choose a template that still exists.");
-  if (!list) throw AppError.badRequest("LIST_NOT_FOUND", "Choose a list that still exists.");
+  assertTemplateAccessible(template, user);
+  assertListAccessible(list, user);
 }
 
 // ---------------------------------------------------------------------------
@@ -88,10 +128,24 @@ router.get(
   asyncHandler(async (req, res) => {
     const status = CampaignStatusSchema.optional().parse(searchParam(req.query.status));
     const search = searchParam(req.query.search);
-    const where: Prisma.CampaignWhereInput = {
+    const user = req.user!;
+
+    const baseWhere: Prisma.CampaignWhereInput = {
       ...(status ? { status } : {}),
       ...(search ? { name: { contains: search, mode: "insensitive" } } : {}),
     };
+
+    const where: Prisma.CampaignWhereInput =
+      user.role === "FOUNDER" || user.role === "FOUNDER_OFFICE"
+        ? baseWhere
+        : {
+            ...baseWhere,
+            OR: [
+              { createdById: user.id },
+              { collaborators: { some: { userId: user.id } } },
+            ],
+          };
+
     const campaigns = await prisma.campaign.findMany({ where, include: campaignSummaryInclude, orderBy: { updatedAt: "desc" }, take: 200 });
     ok(res, await toCampaignSummaries(campaigns));
   })
@@ -123,11 +177,11 @@ router.post(
       include: {
         members: {
           include: { contact: true },
-          take: 500,
         },
       },
     });
     if (!list) throw AppError.notFound("LIST_NOT_FOUND", "Contact list not found.");
+    assertListAccessible(list, req.user!);
 
     const overrides = campaignId
       ? await prisma.campaignRecipientOverride.findMany({
@@ -142,10 +196,12 @@ router.post(
       where: { id: { in: templateIds } },
     });
     const templateMap = new Map(dbTemplates.map((t) => [t.id, t]));
+    if (defaultTemplateId) assertTemplateAccessible(templateMap.get(defaultTemplateId) ?? null, req.user!);
 
     const eligibleTemplates: EligibleTemplate[] = templates.map((t) => {
       const dbT = templateMap.get(t.templateId);
       if (!dbT) throw AppError.badRequest("TEMPLATE_NOT_FOUND", `Template ${t.templateId} not found`);
+      assertTemplateAccessible(dbT, req.user!);
       return {
         id: dbT.id,
         name: dbT.name,
@@ -337,11 +393,44 @@ router.post(
   requirePermission("campaigns.manage"),
   asyncHandler(async (req, res) => {
     const input = CampaignInputSchema.parse(req.body);
-    await assertReferences(input.templateId, input.contactListId);
-    if (input.templates?.length) {
-      for (const t of input.templates) {
-        const found = await prisma.template.findUnique({ where: { id: t.templateId } });
-        if (!found) throw AppError.badRequest("TEMPLATE_NOT_FOUND", `Template ${t.templateId} not found`);
+    await assertReferences(input.templateId, input.contactListId, req.user!);
+    const additionalTemplateIds = new Set([
+      ...(input.templates ?? []).map((item) => item.templateId),
+      ...(input.rules ?? []).map((item) => item.templateId),
+      ...(input.sequenceSteps ?? []).map((item) => item.templateId),
+    ]);
+    for (const templateId of additionalTemplateIds) {
+      const found = await prisma.template.findUnique({ where: { id: templateId } });
+      assertTemplateAccessible(found, req.user!);
+    }
+
+    let mailboxId: string | null = null;
+    let fromEmail: string | null = null;
+
+    if (input.mailboxId) {
+      const mailbox = await prisma.mailboxAccount.findUnique({
+        where: { id: input.mailboxId },
+        include: { accessList: true },
+      });
+      if (!mailbox) throw AppError.notFound("MAILBOX_NOT_FOUND", "Mailbox not found.");
+      const hasAccess = req.user!.role === "FOUNDER" || mailbox.accessList.some((a) => a.userId === req.user!.id);
+      if (!hasAccess) {
+        throw AppError.forbidden("MAILBOX_ACCESS_DENIED", "You are not authorized to send through this mailbox.");
+      }
+      mailboxId = mailbox.id;
+      fromEmail = mailbox.email;
+    } else {
+      const userDefault = await prisma.mailboxAccess.findFirst({
+        where: { userId: req.user!.id },
+        include: { mailbox: true },
+        orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+      });
+      if (userDefault) {
+        mailboxId = userDefault.mailbox.id;
+        fromEmail = userDefault.mailbox.email;
+      } else {
+        const senderMailbox = await getPersonalMailboxStatus(req.user!.id);
+        fromEmail = senderMailbox?.email ?? null;
       }
     }
 
@@ -353,7 +442,8 @@ router.post(
           templateId: input.templateId,
           contactListId: input.contactListId,
           fromName: input.fromName,
-          fromEmail: input.fromEmail ?? req.user?.sendingEmail ?? req.user?.email ?? null,
+          fromEmail,
+          mailboxId,
           replyTo: input.replyTo,
           sendRatePerMinute: input.sendRatePerMinute,
           automationMode: input.automationMode ?? "APPROVAL_REQUIRED",
@@ -410,6 +500,16 @@ router.post(
         });
       }
 
+      for (const st of stepsToInsert) {
+        if (st.templateId) {
+          await tx.campaignTemplate.upsert({
+            where: { campaignId_templateId: { campaignId: created.id, templateId: st.templateId } },
+            create: { campaignId: created.id, templateId: st.templateId, isFallback: false, priority: 99 },
+            update: {},
+          });
+        }
+      }
+
       if (input.rules?.length) {
         for (const r of input.rules) {
           await tx.campaignRule.create({
@@ -438,7 +538,7 @@ router.post(
 
 router.get(
   "/:id",
-  asyncHandler(async (req, res) => ok(res, await loadDetail(IdSchema.parse(req.params.id))))
+  asyncHandler(async (req, res) => ok(res, await loadDetail(IdSchema.parse(req.params.id), req.user!, "VIEW")))
 );
 
 router.patch(
@@ -446,13 +546,60 @@ router.patch(
   requirePermission("campaigns.manage"),
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "EDIT");
     await assertEditable(id);
     const input = CampaignInputSchema.partial().parse(req.body);
     const current = await prisma.campaign.findUniqueOrThrow({ where: { id } });
-    await assertReferences(input.templateId ?? current.templateId, input.contactListId ?? current.contactListId);
+    if (input.templateId && input.templateId !== current.templateId) {
+      const template = await prisma.template.findUnique({ where: { id: input.templateId } });
+      assertTemplateAccessible(template, req.user!);
+    }
+    if (input.contactListId && input.contactListId !== current.contactListId) {
+      const list = await prisma.contactList.findUnique({ where: { id: input.contactListId } });
+      assertListAccessible(list, req.user!);
+    }
+    const [existingCampaignTemplates, existingRules, existingSequenceSteps, existingOverrides] = await Promise.all([
+      prisma.campaignTemplate.findMany({ where: { campaignId: id }, select: { templateId: true } }),
+      prisma.campaignRule.findMany({ where: { campaignId: id }, select: { templateId: true } }),
+      prisma.campaignSequenceStep.findMany({ where: { campaignId: id }, select: { templateId: true } }),
+      prisma.campaignRecipientOverride.findMany({ where: { campaignId: id }, select: { templateId: true } }),
+    ]);
+    const campaignTemplateIds = new Set([
+      current.templateId,
+      ...existingCampaignTemplates.map((item) => item.templateId),
+      ...existingRules.map((item) => item.templateId),
+      ...existingSequenceSteps.map((item) => item.templateId),
+      ...existingOverrides.map((item) => item.templateId),
+    ]);
+    for (const templateId of [
+      ...(input.templates ?? []).map((item) => item.templateId),
+      ...(input.rules ?? []).map((item) => item.templateId),
+      ...(input.sequenceSteps ?? []).map((item) => item.templateId),
+    ]) {
+      if (!campaignTemplateIds.has(templateId)) {
+        const template = await prisma.template.findUnique({ where: { id: templateId } });
+        assertTemplateAccessible(template, req.user!);
+      }
+    }
 
     await prisma.$transaction(async (tx) => {
       const { templates, rules, sequenceSteps, ...baseData } = input;
+      if (baseData.mailboxId !== undefined) {
+        if (baseData.mailboxId) {
+          const mailbox = await tx.mailboxAccount.findUnique({
+            where: { id: baseData.mailboxId },
+            include: { accessList: true },
+          });
+          if (!mailbox) throw AppError.notFound("MAILBOX_NOT_FOUND", "Mailbox not found.");
+          const hasAccess = req.user!.role === "FOUNDER" || mailbox.accessList.some((a) => a.userId === req.user!.id);
+          if (!hasAccess) {
+            throw AppError.forbidden("MAILBOX_ACCESS_DENIED", "You are not authorized to send through this mailbox.");
+          }
+          baseData.fromEmail = mailbox.email;
+        } else {
+          baseData.mailboxId = null;
+        }
+      }
       await tx.campaign.update({ where: { id }, data: baseData });
 
       if (sequenceSteps) {
@@ -481,6 +628,17 @@ router.patch(
             data: { campaignId: id, templateId: t.templateId, isFallback: t.isFallback, priority: t.priority ?? 0 },
           });
         }
+        if (sequenceSteps) {
+          for (const st of sequenceSteps) {
+            if (st.templateId) {
+              await tx.campaignTemplate.upsert({
+                where: { campaignId_templateId: { campaignId: id, templateId: st.templateId } },
+                create: { campaignId: id, templateId: st.templateId, isFallback: false, priority: 99 },
+                update: {},
+              });
+            }
+          }
+        }
       }
 
       if (rules) {
@@ -504,7 +662,7 @@ router.patch(
     });
 
     await audit(req, { action: "campaign.update", entityType: "Campaign", entityId: id, metadata: { fields: Object.keys(input) } });
-    ok(res, await loadDetail(id));
+    ok(res, await loadDetail(id, req.user!, "VIEW"));
   })
 );
 
@@ -513,25 +671,33 @@ router.post(
   requirePermission("campaigns.manage"),
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
-    const source = await prisma.campaign.findUnique({ where: { id } });
-    if (!source) throw AppError.notFound("CAMPAIGN_NOT_FOUND", "That campaign no longer exists.");
+    const source = await loadDetail(id, req.user!, "VIEW");
     let name = `${source.name} (copy)`;
     for (let n = 2; await prisma.campaign.findUnique({ where: { name } }); n++) name = `${source.name} (copy ${n})`;
+    const userDefault = await prisma.mailboxAccess.findFirst({
+      where: { userId: req.user!.id },
+      include: { mailbox: true },
+      orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+    });
+    const fallbackMailbox = await getPersonalMailboxStatus(req.user!.id);
+    const mailboxId = userDefault?.mailbox.id ?? null;
+    const fromEmail = userDefault?.mailbox.email ?? fallbackMailbox?.email ?? null;
     const copy = await prisma.campaign.create({
       data: {
         name,
         description: source.description,
-        templateId: source.templateId,
-        contactListId: source.contactListId,
+        templateId: source.template.id,
+        contactListId: source.list.id,
         fromName: source.fromName,
-        fromEmail: source.fromEmail,
+        fromEmail,
+        mailboxId,
         replyTo: source.replyTo,
         sendRatePerMinute: source.sendRatePerMinute,
         createdById: req.user!.id,
       },
     });
     await audit(req, { action: "campaign.duplicate", entityType: "Campaign", entityId: copy.id, metadata: { from: source.name } });
-    ok(res, await loadDetail(copy.id), 201);
+    ok(res, await loadDetail(copy.id, req.user!, "VIEW"), 201);
   })
 );
 
@@ -540,6 +706,7 @@ router.delete(
   requirePermission("campaigns.manage"),
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "ADMIN");
     const campaign = await prisma.campaign.findUnique({ where: { id } });
     if (!campaign) throw AppError.notFound("CAMPAIGN_NOT_FOUND", "That campaign no longer exists.");
     const sent = await prisma.send.count({ where: { campaignId: id, status: { in: ["SENT", "UNKNOWN", "CLAIMED"] } } });
@@ -560,7 +727,7 @@ router.get(
   "/:id/templates",
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
-    const detail = await loadDetail(id);
+    const detail = await loadDetail(id, req.user!, "VIEW");
     ok(res, detail.templates);
   })
 );
@@ -570,10 +737,11 @@ router.post(
   requirePermission("campaigns.manage"),
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "EDIT");
     await assertEditable(id);
     const input = CampaignTemplateInputSchema.parse(req.body);
     const template = await prisma.template.findUnique({ where: { id: input.templateId } });
-    if (!template) throw AppError.badRequest("TEMPLATE_NOT_FOUND", "Choose a template that still exists.");
+    assertTemplateAccessible(template, req.user!);
 
     await prisma.$transaction(async (tx) => {
       if (input.isFallback) {
@@ -586,7 +754,7 @@ router.post(
       });
       await audit(req, { action: "campaign.template_add", entityType: "Campaign", entityId: id, metadata: { templateId: input.templateId, templateName: template.name } }, tx);
     });
-    ok(res, await loadDetail(id));
+    ok(res, await loadDetail(id, req.user!, "VIEW"));
   })
 );
 
@@ -596,6 +764,7 @@ router.delete(
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
     const templateId = IdSchema.parse(req.params.templateId);
+    await loadDetail(id, req.user!, "EDIT");
     await assertEditable(id);
     const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id }, include: { campaignTemplates: true } });
     if (campaign.templateId === templateId && campaign.campaignTemplates.length <= 1) {
@@ -607,7 +776,7 @@ router.delete(
       await tx.campaignTemplate.deleteMany({ where: { campaignId: id, templateId } });
       await audit(req, { action: "campaign.template_remove", entityType: "Campaign", entityId: id, metadata: { templateId } }, tx);
     });
-    ok(res, await loadDetail(id));
+    ok(res, await loadDetail(id, req.user!, "VIEW"));
   })
 );
 
@@ -615,7 +784,7 @@ router.get(
   "/:id/rules",
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
-    const detail = await loadDetail(id);
+    const detail = await loadDetail(id, req.user!, "VIEW");
     ok(res, detail.rules);
   })
 );
@@ -625,10 +794,11 @@ router.post(
   requirePermission("campaigns.manage"),
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "EDIT");
     await assertEditable(id);
     const input = CampaignRuleInputSchema.parse(req.body);
     const template = await prisma.template.findUnique({ where: { id: input.templateId } });
-    if (!template) throw AppError.badRequest("TEMPLATE_NOT_FOUND", "Choose a template that still exists.");
+    assertTemplateAccessible(template, req.user!);
 
     const rule = await prisma.campaignRule.create({
       data: {
@@ -645,7 +815,7 @@ router.post(
       include: { template: { select: { id: true, name: true } } },
     });
     await audit(req, { action: "campaign.rule_create", entityType: "CampaignRule", entityId: rule.id, metadata: { priority: rule.priority, template: template.name } });
-    ok(res, await loadDetail(id), 201);
+    ok(res, await loadDetail(id, req.user!, "VIEW"), 201);
   })
 );
 
@@ -655,18 +825,19 @@ router.put(
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
     const ruleId = IdSchema.parse(req.params.ruleId);
+    await loadDetail(id, req.user!, "EDIT");
     await assertEditable(id);
     const input = CampaignRuleInputSchema.partial().parse(req.body);
     if (input.templateId) {
       const template = await prisma.template.findUnique({ where: { id: input.templateId } });
-      if (!template) throw AppError.badRequest("TEMPLATE_NOT_FOUND", "Choose a template that still exists.");
+      assertTemplateAccessible(template, req.user!);
     }
     await prisma.campaignRule.update({
       where: { id: ruleId, campaignId: id },
       data: input,
     });
     await audit(req, { action: "campaign.rule_update", entityType: "CampaignRule", entityId: ruleId });
-    ok(res, await loadDetail(id));
+    ok(res, await loadDetail(id, req.user!, "VIEW"));
   })
 );
 
@@ -676,10 +847,11 @@ router.delete(
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
     const ruleId = IdSchema.parse(req.params.ruleId);
+    await loadDetail(id, req.user!, "EDIT");
     await assertEditable(id);
     await prisma.campaignRule.delete({ where: { id: ruleId, campaignId: id } });
     await audit(req, { action: "campaign.rule_delete", entityType: "CampaignRule", entityId: ruleId });
-    ok(res, await loadDetail(id));
+    ok(res, await loadDetail(id, req.user!, "VIEW"));
   })
 );
 
@@ -687,6 +859,7 @@ router.get(
   "/:id/overrides",
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "VIEW");
     const overrides = await prisma.campaignRecipientOverride.findMany({
       where: { campaignId: id },
       include: { contact: { select: { email: true } }, template: { select: { name: true } } },
@@ -716,6 +889,7 @@ router.post(
   requirePermission("campaigns.manage"),
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "EDIT");
     await assertEditable(id);
     const input = CampaignRecipientOverrideInputSchema.parse(req.body);
 
@@ -728,7 +902,12 @@ router.post(
       prisma.template.findUnique({ where: { id: targetTemplateId } }),
     ]);
     if (!contact) throw AppError.badRequest("CONTACT_NOT_FOUND", "Contact no longer exists.");
-    if (!template) throw AppError.badRequest("TEMPLATE_NOT_FOUND", "Template no longer exists.");
+    const existingOverride = await prisma.campaignRecipientOverride.findUnique({
+      where: { campaignId_contactId: { campaignId: id, contactId: input.contactId } },
+      select: { templateId: true },
+    });
+    if (existingOverride?.templateId !== targetTemplateId) assertTemplateAccessible(template, req.user!);
+    else if (!template) throw AppError.badRequest("TEMPLATE_NOT_FOUND", "Template no longer exists.");
 
     const customBodyText = input.customBodyText || (input.customBodyHtml ? htmlToText(input.customBodyHtml) : null);
     const isCustom = input.isCustom ?? Boolean(input.customSubject && input.customBodyHtml);
@@ -760,7 +939,7 @@ router.post(
       entityId: override.id,
       metadata: { contact: contact.email, template: template.name, isCustom },
     });
-    ok(res, await loadDetail(id));
+    ok(res, await loadDetail(id, req.user!, "VIEW"));
   })
 );
 
@@ -769,6 +948,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
     const contactId = IdSchema.parse(req.params.contactId);
+    await loadDetail(id, req.user!, "VIEW");
 
     const [campaign, contact, override] = await Promise.all([
       prisma.campaign.findUnique({
@@ -911,10 +1091,106 @@ router.delete(
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
     const contactId = IdSchema.parse(req.params.contactId);
+    await loadDetail(id, req.user!, "EDIT");
     await assertEditable(id);
     await prisma.campaignRecipientOverride.deleteMany({ where: { campaignId: id, contactId } });
     await audit(req, { action: "campaign.override_remove", entityType: "Campaign", entityId: id, metadata: { contactId } });
-    ok(res, await loadDetail(id));
+    ok(res, await loadDetail(id, req.user!, "VIEW"));
+  })
+);
+
+// ---------------------------------------------------------------------------
+// Collaborators
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/:id/collaborators",
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "VIEW");
+    const collaborators = await prisma.campaignCollaborator.findMany({
+      where: { campaignId: id },
+      include: { user: { select: { id: true, name: true, email: true } } },
+      orderBy: { addedAt: "asc" },
+    });
+    ok(
+      res,
+      collaborators.map((c) => ({
+        id: c.id,
+        campaignId: c.campaignId,
+        userId: c.userId,
+        userName: c.user.name,
+        userEmail: c.user.email,
+        role: c.role,
+        addedAt: c.addedAt.toISOString(),
+      }))
+    );
+  })
+);
+
+router.post(
+  "/:id/collaborators",
+  requirePermission("campaigns.share"),
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "ADMIN");
+    const input = AddCollaboratorSchema.parse(req.body);
+
+    const targetUser = await prisma.user.findUnique({ where: { id: input.userId } });
+    if (!targetUser) throw AppError.notFound("USER_NOT_FOUND", "User not found.");
+
+    const collaborator = await prisma.campaignCollaborator.upsert({
+      where: { campaignId_userId: { campaignId: id, userId: input.userId } },
+      create: {
+        campaignId: id,
+        userId: input.userId,
+        role: input.role,
+      },
+      update: {
+        role: input.role,
+      },
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
+
+    await audit(req, {
+      action: "campaign.add_collaborator",
+      entityType: "Campaign",
+      entityId: id,
+      metadata: { targetUserId: input.userId, role: input.role },
+    });
+
+    ok(res, {
+      id: collaborator.id,
+      campaignId: collaborator.campaignId,
+      userId: collaborator.userId,
+      userName: collaborator.user.name,
+      userEmail: collaborator.user.email,
+      role: collaborator.role,
+      addedAt: collaborator.addedAt.toISOString(),
+    });
+  })
+);
+
+router.delete(
+  "/:id/collaborators/:userId",
+  requirePermission("campaigns.share"),
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    const userId = IdSchema.parse(req.params.userId);
+    await loadDetail(id, req.user!, "ADMIN");
+
+    await prisma.campaignCollaborator.deleteMany({
+      where: { campaignId: id, userId },
+    });
+
+    await audit(req, {
+      action: "campaign.remove_collaborator",
+      entityType: "Campaign",
+      entityId: id,
+      metadata: { targetUserId: userId },
+    });
+
+    ok(res, { success: true });
   })
 );
 
@@ -924,7 +1200,11 @@ router.delete(
 
 router.get(
   "/:id/review",
-  asyncHandler(async (req, res) => ok(res, await reviewCampaign(IdSchema.parse(req.params.id))))
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "VIEW");
+    ok(res, await reviewCampaign(id));
+  })
 );
 
 router.post(
@@ -932,8 +1212,9 @@ router.post(
   requirePermission("campaigns.request_approval"),
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "EDIT");
     await requestApproval(req, id);
-    ok(res, await loadDetail(id));
+    ok(res, await loadDetail(id, req.user!, "VIEW"));
   })
 );
 
@@ -942,9 +1223,10 @@ router.post(
   requirePermission("campaigns.request_approval"),
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "EDIT");
     const { note } = z.object({ note: z.string().trim().max(500).optional() }).parse(req.body ?? {});
     await withdrawApproval(req, id, note);
-    ok(res, await loadDetail(id));
+    ok(res, await loadDetail(id, req.user!, "VIEW"));
   })
 );
 
@@ -953,8 +1235,9 @@ router.post(
   requirePermission("campaigns.approve"),
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "VIEW");
     await approveCampaign(req, id, ApproveInputSchema.parse(req.body));
-    ok(res, await loadDetail(id));
+    ok(res, await loadDetail(id, req.user!, "VIEW"));
   })
 );
 
@@ -965,22 +1248,53 @@ router.post(
 const control = (fn: (req: Parameters<typeof startCampaign>[0], id: string) => Promise<unknown>) =>
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
+    const user = req.user!;
+    await loadDetail(id, user, "EDIT");
+    if (!canAct(user, "campaigns.control")) {
+      throw AppError.forbidden("PERMISSION_DENIED", "You do not have permission to control campaign sending.");
+    }
     await fn(req, id);
-    ok(res, await loadDetail(id));
+    ok(res, await loadDetail(id, user, "VIEW"));
   });
 
-router.post("/:id/start", requirePermission("campaigns.control"), control(async (req, id) => { await startCampaign(req, id); kickBackground(); }));
-router.post("/:id/pause", requirePermission("campaigns.control"), control((req, id) => pauseCampaign(req, id)));
-router.post("/:id/resume", requirePermission("campaigns.control"), control(async (req, id) => { await resumeCampaign(req, id); kickBackground(); }));
-router.post("/:id/cancel", requirePermission("campaigns.control"), control(cancelCampaign));
-router.post("/:id/retry-failed", requirePermission("campaigns.control"), control(async (req, id) => { await retryFailed(req, id); kickBackground(); }));
+router.post(
+  "/:id/start",
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    const user = req.user!;
+    const campaign = await loadDetail(id, user, "VIEW");
+
+    // Sending gate:
+    // 1. Founder or Founder Office can always start
+    // 2. An employee with explicit sending permission (canSendWithoutApproval === true) can start
+    // 3. An employee without sending permission can ONLY start if the campaign is APPROVED
+    const isFounderOrOffice = user.role === "FOUNDER" || user.role === "FOUNDER_OFFICE";
+    const hasSendPermission = Boolean(user.canSendWithoutApproval);
+    const isApproved = campaign.status === "APPROVED" && Boolean(campaign.approvedBy);
+
+    if (!isFounderOrOffice && !hasSendPermission && !isApproved) {
+      throw AppError.forbidden("SEND_APPROVAL_REQUIRED", "Sending requires approval from Founder Office or explicit sending permission.");
+    }
+
+    await startCampaign(req, id);
+    kickBackground();
+    ok(res, await loadDetail(id, user, "VIEW"));
+  })
+);
+
+router.post("/:id/pause", control((req, id) => pauseCampaign(req, id)));
+router.post("/:id/resume", control(async (req, id) => { await resumeCampaign(req, id); kickBackground(); }));
+router.post("/:id/cancel", control(cancelCampaign));
+router.post("/:id/retry-failed", control(async (req, id) => { await retryFailed(req, id); kickBackground(); }));
 
 router.post(
   "/:id/sends/:sendId/resolve",
   requirePermission("campaigns.control"),
   asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "EDIT");
     const { outcome } = z.object({ outcome: z.enum(["sent", "retry"]) }).parse(req.body);
-    await resolveUnknown(req, IdSchema.parse(req.params.id), IdSchema.parse(req.params.sendId), outcome);
+    await resolveUnknown(req, id, IdSchema.parse(req.params.sendId), outcome);
     if (outcome === "retry") kickBackground();
     ok(res, null);
   })
@@ -990,8 +1304,10 @@ router.post(
   "/:id/test",
   requirePermission("campaigns.send_test"),
   asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "VIEW");
     const { to, contactId, dryRun } = TestSendInputSchema.parse(req.body);
-    ok(res, await sendTest(req, IdSchema.parse(req.params.id), to, contactId, { dryRun }));
+    ok(res, await sendTest(req, id, to, contactId, { dryRun }));
   })
 );
 
@@ -999,6 +1315,7 @@ router.get(
   "/:id/analytics",
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "VIEW");
     ok(res, await getCampaignAnalytics(id));
   })
 );
@@ -1007,6 +1324,8 @@ router.post(
   "/:id/sends/:sendId/outcome",
   requirePermission("campaigns.manage"),
   asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "EDIT");
     const sendId = IdSchema.parse(req.params.sendId);
     const input = z
       .object({
@@ -1048,6 +1367,7 @@ router.get(
   "/:id/sends",
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "VIEW");
     const { page, pageSize } = PaginationQuerySchema.parse(req.query);
     const filter = searchParam(req.query.filter);
     const search = searchParam(req.query.search);
@@ -1069,8 +1389,10 @@ router.get(
 router.get(
   "/:id/sends/:sendId",
   asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "VIEW");
     const send = await prisma.send.findFirst({
-      where: { id: IdSchema.parse(req.params.sendId), campaignId: IdSchema.parse(req.params.id) },
+      where: { id: IdSchema.parse(req.params.sendId), campaignId: id },
       include: { events: { orderBy: { occurredAt: "asc" } } },
     });
     if (!send) throw AppError.notFound("SEND_NOT_FOUND", "That message no longer exists.");
@@ -1115,34 +1437,10 @@ router.get(
   "/:id/sequence",
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
-    const campaign = await prisma.campaign.findUnique({
-      where: { id },
-      include: {
-        sequenceSteps: {
-          include: { template: { select: { id: true, name: true, subject: true } } },
-          orderBy: { stepIndex: "asc" },
-        },
-      },
-    });
-    if (!campaign) throw AppError.notFound("CAMPAIGN_NOT_FOUND", "Campaign not found.");
+    const detail = await loadDetail(id, req.user!, "VIEW");
     ok(res, {
-      automationMode: campaign.automationMode,
-      sequenceSteps: campaign.sequenceSteps.map((st) => ({
-        id: st.id,
-        campaignId: st.campaignId,
-        stepIndex: st.stepIndex,
-        purpose: st.purpose,
-        delayDays: st.delayDays,
-        delayBusinessDaysOnly: st.delayBusinessDaysOnly,
-        subjectMode: st.subjectMode,
-        customSubject: st.customSubject,
-        templateId: st.templateId,
-        templateName: st.template.name,
-        templateSubject: st.template.subject,
-        promptInstructions: st.promptInstructions,
-        createdAt: st.createdAt.toISOString(),
-        updatedAt: st.updatedAt.toISOString(),
-      })),
+      automationMode: detail.automationMode,
+      sequenceSteps: detail.sequenceSteps,
     });
   })
 );
@@ -1152,6 +1450,7 @@ router.put(
   requirePermission("campaigns.manage"),
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "EDIT");
     const campaign = await prisma.campaign.findUnique({ where: { id } });
     if (!campaign) throw AppError.notFound("CAMPAIGN_NOT_FOUND", "Campaign not found.");
     if (campaign.status !== "DRAFT" && campaign.status !== "PAUSED" && campaign.status !== "SENDING") {
@@ -1165,9 +1464,16 @@ router.put(
       })
       .parse(req.body);
 
+    const currentSteps = await prisma.campaignSequenceStep.findMany({
+      where: { campaignId: id },
+      select: { templateId: true },
+    });
+    const currentTemplateIds = new Set(currentSteps.map((step) => step.templateId));
     for (const st of sequenceSteps) {
-      const exists = await prisma.template.findUnique({ where: { id: st.templateId } });
-      if (!exists) throw AppError.badRequest("TEMPLATE_NOT_FOUND", `Template ${st.templateId} not found.`);
+      if (!currentTemplateIds.has(st.templateId)) {
+        const exists = await prisma.template.findUnique({ where: { id: st.templateId } });
+        assertTemplateAccessible(exists, req.user!);
+      }
     }
 
     await prisma.$transaction(async (tx) => {
@@ -1189,11 +1495,18 @@ router.put(
             promptInstructions: st.promptInstructions,
           },
         });
+        if (st.templateId) {
+          await tx.campaignTemplate.upsert({
+            where: { campaignId_templateId: { campaignId: id, templateId: st.templateId } },
+            create: { campaignId: id, templateId: st.templateId, isFallback: false, priority: 99 },
+            update: {},
+          });
+        }
       }
     });
 
     await audit(req, { action: "campaign.sequence.update", entityType: "Campaign", entityId: id, metadata: { stepsCount: sequenceSteps.length, automationMode } });
-    ok(res, await loadDetail(id));
+    ok(res, await loadDetail(id, req.user!, "VIEW"));
   })
 );
 
@@ -1202,6 +1515,7 @@ router.post(
   requirePermission("campaigns.control"),
   asyncHandler(async (req, res) => {
     const campaignId = IdSchema.parse(req.params.id);
+    await loadDetail(campaignId, req.user!, "EDIT");
     const sendId = IdSchema.parse(req.params.sendId);
     await approveFollowUpSend(campaignId, sendId);
     await audit(req, { action: "campaign.followup.approve", entityType: "Send", entityId: sendId, metadata: { campaignId } });
@@ -1214,6 +1528,7 @@ router.post(
   requirePermission("campaigns.control"),
   asyncHandler(async (req, res) => {
     const campaignId = IdSchema.parse(req.params.id);
+    await loadDetail(campaignId, req.user!, "EDIT");
     const count = await approveAllPendingFollowUps(campaignId);
     await audit(req, { action: "campaign.followup.approve_all", entityType: "Campaign", entityId: campaignId, metadata: { count } });
     ok(res, { approvedCount: count });
@@ -1224,6 +1539,7 @@ router.get(
   "/:id/recipients/:email/sequence",
   asyncHandler(async (req, res) => {
     const campaignId = IdSchema.parse(req.params.id);
+    await loadDetail(campaignId, req.user!, "VIEW");
     const email = String(req.params.email).toLowerCase().trim();
     const recipient = await getRecipientSequenceDetails(campaignId, email);
     if (!recipient) throw AppError.notFound("RECIPIENT_NOT_FOUND", "Recipient state not found in this campaign.");
@@ -1254,6 +1570,7 @@ router.post(
   requirePermission("campaigns.control"),
   asyncHandler(async (req, res) => {
     const campaignId = IdSchema.parse(req.params.id);
+    await loadDetail(campaignId, req.user!, "EDIT");
     const email = String(req.params.email).toLowerCase().trim();
     const reason = typeof req.body?.reason === "string" ? req.body.reason : "Paused by user";
     await pauseRecipientSequence(campaignId, email, reason);
@@ -1267,6 +1584,7 @@ router.post(
   requirePermission("campaigns.control"),
   asyncHandler(async (req, res) => {
     const campaignId = IdSchema.parse(req.params.id);
+    await loadDetail(campaignId, req.user!, "EDIT");
     const email = String(req.params.email).toLowerCase().trim();
     await resumeRecipientSequence(campaignId, email);
     await audit(req, { action: "campaign.recipient.resume", entityType: "Campaign", entityId: campaignId, metadata: { email } });
@@ -1279,6 +1597,7 @@ router.post(
   requirePermission("campaigns.control"),
   asyncHandler(async (req, res) => {
     const campaignId = IdSchema.parse(req.params.id);
+    await loadDetail(campaignId, req.user!, "EDIT");
     const email = String(req.params.email).toLowerCase().trim();
     const reason = typeof req.body?.reason === "string" ? req.body.reason : "Stopped by user";
     const cancelledCount = await stopSequenceForRecipient(campaignId, email, reason, "CANCELLED");
@@ -1292,6 +1611,7 @@ router.post(
   requirePermission("campaigns.control"),
   asyncHandler(async (req, res) => {
     const campaignId = IdSchema.parse(req.params.id);
+    await loadDetail(campaignId, req.user!, "EDIT");
     const reason = typeof req.body?.reason === "string" ? req.body.reason : "All follow-ups stopped by user";
     const cancelledCount = await stopAllPendingFollowUps(campaignId, reason);
     await audit(req, { action: "campaign.sequence.stop_all", entityType: "Campaign", entityId: campaignId, metadata: { reason, cancelledCount } });
@@ -1303,6 +1623,8 @@ router.post(
   "/:id/sequence/ai-draft",
   requirePermission("campaigns.manage"),
   asyncHandler(async (req, res) => {
+    const campaignId = IdSchema.parse(req.params.id);
+    await loadDetail(campaignId, req.user!, "EDIT");
     const { stepIndex, purpose, previousSubject, previousBody, instructions } = z
       .object({
         stepIndex: z.coerce.number().int().min(1),

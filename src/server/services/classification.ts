@@ -339,8 +339,10 @@ export function inferSegmentFromCompany(
 
 export function detectProspectListType(
   headers: string[],
-  sampleRows: (string[] | Record<string, unknown>)[] = []
+  sampleRows: (string[] | Record<string, unknown>)[] = [],
+  fileName?: string
 ): import("../../shared/types.js").ProspectListType {
+  const fileNameText = (fileName || "").toLowerCase();
   const allHeadersText = headers.join(" ").toLowerCase();
   const sampleCellsText = sampleRows
     .flatMap((r) => (Array.isArray(r) ? r.slice(0, 8) : Object.values(r).slice(0, 8)))
@@ -348,10 +350,46 @@ export function detectProspectListType(
     .map(String)
     .join(" ")
     .toLowerCase();
-  const combined = `${allHeadersText} ${sampleCellsText}`;
 
-  // Co-marketing partner keywords
+  // 1. Direct filename indications
+  const hasPartnerFileName = /copartnership|co-partnership|copartner|corparneship|co-marketing|\bpartners?\b/i.test(fileNameText);
+  const hasHotelFileName = /hotels?|resorts?|property|properties|\bpalace\b/i.test(fileNameText);
+
+  if (hasPartnerFileName && !hasHotelFileName) {
+    return "CO_MARKETING_PARTNERS";
+  }
+  if (hasHotelFileName && !hasPartnerFileName) {
+    return "HOTEL_PROSPECTS";
+  }
+
+  // 2. Strong Header Signatures
+  // Direct copartnership/partner signatures in headers
+  const partnerHeaderRegex =
+    /copartnership|co-partnership|copartner|corparneship|co-marketing|partner category|partnership category|services provided|service provided|what it does|what they do|potential partnership|partnership opportunity|partnership angle|collaboration type|target audience|\bpartners?\b|\bpartnerships?\b/i;
+
+  // Direct hotel signatures in headers
+  const hotelHeaderRegex =
+    /hotel name|resort name|property name|hotel segment|star rating|room count|\brooms\b|\bkeys\b|\bsuites\b|amenities|booking email|front desk|\bpalace\b|\bhotels?\b|\bresorts?\b|\bhospitality\b/i;
+
+  const hasPartnerHeader = partnerHeaderRegex.test(allHeadersText);
+  const hasHotelHeader = hotelHeaderRegex.test(allHeadersText);
+
+  // If headers clearly indicate a copartnership/partner list, prioritize it even if sample cells mention target hotels
+  if (hasPartnerHeader && !hasHotelHeader) {
+    return "CO_MARKETING_PARTNERS";
+  }
+
+  // If headers clearly indicate a hotel list and not a partner list
+  if (hasHotelHeader && !hasPartnerHeader) {
+    return "HOTEL_PROSPECTS";
+  }
+
+  // 2. Both or neither matched in headers — calculate weighted scores
   const partnerKeywords = [
+    "copartnership",
+    "co-partnership",
+    "copartner",
+    "corparneship",
     "partner",
     "partnership",
     "training provider",
@@ -360,18 +398,22 @@ export function detectProspectListType(
     "consultan",
     "services provided",
     "what it does",
+    "what they do",
     "partnership opportunity",
-    "target customers",
+    "potential partnership",
     "personalization angle",
+    "co-marketing",
+    "collaboration",
+    "affiliate",
     "channel",
   ];
+
   let partnerScore = 0;
   for (const kw of partnerKeywords) {
-    if (combined.includes(kw)) partnerScore += 1;
-    if (allHeadersText.includes(kw)) partnerScore += 2;
+    if (allHeadersText.includes(kw)) partnerScore += 5;
+    else if (sampleCellsText.includes(kw)) partnerScore += 1;
   }
 
-  // Hotel keywords
   const hotelKeywords = [
     "hotel",
     "resort",
@@ -379,6 +421,7 @@ export function detectProspectListType(
     "boutique",
     "rooms",
     "suites",
+    "keys",
     "amenities",
     "facilities",
     "star rating",
@@ -389,17 +432,26 @@ export function detectProspectListType(
     "contactpersona",
     "hospitality",
   ];
+
   let hotelScore = 0;
   for (const kw of hotelKeywords) {
-    if (combined.includes(kw)) hotelScore += 1;
-    if (allHeadersText.includes(kw)) hotelScore += 2;
+    if (allHeadersText.includes(kw)) hotelScore += 5;
+    else if (sampleCellsText.includes(kw)) hotelScore += 1;
   }
 
-  if (partnerScore > hotelScore && partnerScore >= 2) {
+  // Give entity column primacy if present
+  const firstHeader = (headers[0] || "").toLowerCase();
+  if (/partner|copartner|corparner/i.test(firstHeader)) partnerScore += 6;
+  if (/hotel|resort|property/i.test(firstHeader)) hotelScore += 6;
+
+  if (partnerScore > hotelScore && partnerScore >= 3) {
     return "CO_MARKETING_PARTNERS";
   }
-  if (hotelScore >= 2 || /hotel|resort|hospitality/i.test(allHeadersText)) {
+  if (hotelScore >= 3 || hotelHeaderRegex.test(allHeadersText)) {
     return "HOTEL_PROSPECTS";
+  }
+  if (partnerScore >= 2) {
+    return "CO_MARKETING_PARTNERS";
   }
   return "GENERAL_BUSINESS";
 }

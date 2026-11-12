@@ -69,6 +69,7 @@ export function ContactsTable({ listId, listName, emptyAction }: { listId?: stri
         <div className="min-w-0">
           <p className="truncate font-medium">{contactName(c) || c.email}</p>
           {contactName(c) && <p className="truncate text-xs text-ink-subtle">{c.email}</p>}
+          {c.company && <p className="truncate text-xs text-ink-muted sm:hidden">{c.company}</p>}
         </div>
       ),
       className: "max-w-[260px]",
@@ -76,20 +77,24 @@ export function ContactsTable({ listId, listName, emptyAction }: { listId?: stri
     {
       key: "company",
       header: "Company",
+      headerClassName: "hidden sm:table-cell",
       cell: (c) => (
         <div className="min-w-0">
           <p className="truncate">{c.company ?? <span className="text-ink-faint">—</span>}</p>
           {c.title && <p className="truncate text-xs text-ink-subtle">{c.title}</p>}
         </div>
       ),
-      className: "max-w-[200px]",
+      className: "hidden sm:table-cell max-w-[200px]",
     },
     {
       key: "classification",
       header: "Segment & Persona",
+      headerClassName: "hidden md:table-cell",
       cell: (c) => {
         const seg = c.hotelSegment ? (HOTEL_SEGMENT_LABELS[c.hotelSegment as HotelSegment] ?? c.hotelSegment) : null;
         const per = c.contactPersona ? (CONTACT_PERSONA_LABELS[c.contactPersona as ContactPersona] ?? c.contactPersona) : null;
+        const custom = c.customFields && typeof c.customFields === "object" ? (c.customFields as Record<string, unknown>) : null;
+        const partnerCat = custom ? String(custom["partner_category"] || custom["category"] || custom["partnership_category"] || "").trim() : "";
         const isVerified =
           c.hotelSegmentStatus === "VERIFIED" ||
           c.hotelSegmentStatus === "MANUAL" ||
@@ -97,7 +102,7 @@ export function ContactsTable({ listId, listName, emptyAction }: { listId?: stri
           c.contactPersonaStatus === "MANUAL";
         const isGuessed = (c.hotelSegmentStatus === "GUESSED" || c.contactPersonaStatus === "GUESSED") && !isVerified;
 
-        if (!seg && !per) {
+        if (!seg && !per && !partnerCat) {
           return <span className="text-xs text-ink-faint">—</span>;
         }
 
@@ -108,6 +113,11 @@ export function ContactsTable({ listId, listName, emptyAction }: { listId?: stri
                 {seg}
               </span>
             )}
+            {partnerCat ? (
+              <span className="rounded border border-brand/20 bg-brand-soft/50 dark:bg-brand/15 px-1.5 py-0.5 text-[11px] font-medium text-brand-ink dark:text-brand-hover">
+                {partnerCat}
+              </span>
+            ) : null}
             {per && (
               <span className="rounded border border-line bg-surface-muted px-1.5 py-0.5 text-[11px] font-medium text-ink-muted">
                 {per}
@@ -126,11 +136,13 @@ export function ContactsTable({ listId, listName, emptyAction }: { listId?: stri
           </div>
         );
       },
-      className: "max-w-[220px]",
+      className: "hidden md:table-cell max-w-[220px]",
     },
     {
       key: "lists",
       header: "Lists",
+      headerClassName: "hidden lg:table-cell",
+      className: "hidden lg:table-cell",
       cell: (c) =>
         c.suppression ? (
           <Badge tone="warning">{SUPPRESSION_REASON_LABELS[c.suppression.reason]}</Badge>
@@ -140,7 +152,13 @@ export function ContactsTable({ listId, listName, emptyAction }: { listId?: stri
           <span className="text-xs text-ink-faint">No list</span>
         ),
     },
-    { key: "added", header: "Added", cell: (c) => <span className="whitespace-nowrap text-ink-muted">{timeAgo(c.importedAt)}</span> },
+    {
+      key: "added",
+      header: "Added",
+      headerClassName: "hidden sm:table-cell",
+      className: "hidden sm:table-cell",
+      cell: (c) => <span className="whitespace-nowrap text-ink-muted">{timeAgo(c.importedAt)}</span>
+    },
   ];
 
   const total = contacts.data?.pagination?.total;
@@ -149,8 +167,8 @@ export function ContactsTable({ listId, listName, emptyAction }: { listId?: stri
   return (
     <Card>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line p-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Search name, email or company" className="w-72" />
+        <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
+          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Search name, email or company" className="w-full sm:w-72" />
           {!listId && (
             <FilterChips
               label="Filter contacts"

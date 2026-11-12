@@ -1,7 +1,7 @@
 // Branded loading screen (full-screen boot state, or inline for a page area)
 import { useEffect, useState } from "react";
 import { cn } from "../../lib/cn";
-import { BRAND_BLUE, BRAND_NAVY, BRAND_SKY, FocusRealmLogo } from "./FocusRealmLogo";
+import { BRAND_BLUE, BRAND_GOLD, FocusRealmLogo } from "./FocusRealmLogo";
 
 interface FocusRealmLoaderProps {
   size?: number;
@@ -18,14 +18,13 @@ interface FocusRealmLoaderProps {
 }
 
 export function FocusRealmLoader({
-  size = 64,
+  size = 56,
   title = "FocusRealm",
   subtitle = "Mail Merge",
   status = "Loading your workspace…",
   fullScreen = true,
   progress,
-  primaryColor = BRAND_NAVY,
-  accentColor = BRAND_BLUE,
+  accentColor = BRAND_GOLD,
   delayMs = 0,
 }: FocusRealmLoaderProps) {
   const [visible, setVisible] = useState(delayMs === 0);
@@ -36,26 +35,42 @@ export function FocusRealmLoader({
   }, [delayMs]);
 
   const content = (
-    <div role="status" aria-live="polite" className={cn("mx-auto flex max-w-sm select-none flex-col items-center justify-center p-8 text-center", visible ? "animate-fade-in" : "invisible")}>
+    <div
+      role="status"
+      aria-live="polite"
+      className={cn(
+        "mx-auto flex max-w-sm select-none flex-col items-center justify-center p-8 text-center",
+        visible ? "animate-fade-in" : "invisible"
+      )}
+    >
       <div className="relative mb-6">
-        <div className="pointer-events-none absolute inset-0 -z-10 scale-125 rounded-3xl opacity-30 blur-xl motion-safe:animate-pulse" style={{ backgroundColor: accentColor }} />
-        <FocusRealmLogo size={size} accentColor={BRAND_SKY} animated />
+        <div
+          className="pointer-events-none absolute inset-0 -z-10 scale-125 rounded-3xl opacity-25 blur-xl motion-safe:animate-pulse"
+          style={{ backgroundColor: accentColor }}
+        />
+        <FocusRealmLogo size={size} animated />
       </div>
 
-      <p className="text-lg font-semibold tracking-tight" style={{ color: primaryColor }}>
+      <p className="text-lg font-bold tracking-tight text-ink">
         {title}
       </p>
-      <p className="mt-0.5 text-2xs font-semibold uppercase tracking-[0.14em] text-ink-subtle">{subtitle}</p>
+      <p className="mt-0.5 text-2xs font-semibold uppercase tracking-[0.16em] text-ink-subtle">{subtitle}</p>
 
-      <div className="relative mt-6 h-1 w-52 overflow-hidden rounded-full bg-line">
+      <div className="relative mt-6 h-1 w-48 overflow-hidden rounded-full bg-line">
         {progress !== undefined ? (
-          <div className="h-full rounded-full transition-[width] duration-300 ease-out" style={{ width: `${Math.min(100, Math.max(0, progress))}%`, backgroundColor: accentColor }} />
+          <div
+            className="h-full rounded-full transition-[width] duration-300 ease-out bg-brand"
+            style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
+          />
         ) : (
-          <div className="h-full w-2/5 rounded-full motion-safe:animate-loader-bar" style={{ background: `linear-gradient(90deg, transparent, ${accentColor}, ${primaryColor}, transparent)` }} />
+          <div
+            className="h-full w-2/5 rounded-full motion-safe:animate-loader-bar"
+            style={{ background: `linear-gradient(90deg, transparent, ${BRAND_BLUE}, ${BRAND_GOLD}, transparent)` }}
+          />
         )}
       </div>
 
-      {status && <p className="mt-3.5 text-xs font-medium tracking-tight text-ink-faint">{status}</p>}
+      {status && <p className="mt-4 text-xs font-medium tracking-tight text-ink-subtle">{status}</p>}
     </div>
   );
 
@@ -69,13 +84,13 @@ export function FocusRealmLoader({
  * Branded splash over the first paint of every full page load. It stays for a moment even when the
  * app is ready sooner, so the brand reads as intentional rather than as a flicker, then fades out.
  */
-export function BootSplash({ minMs = 1100 }: { minMs?: number }) {
+export function BootSplash({ minMs = 900 }: { minMs?: number }) {
   const [phase, setPhase] = useState<"shown" | "leaving" | "gone">("shown");
   useEffect(() => {
-    // At least ~0.65s on screen even when the first load itself was slow
-    const wait = Math.max(650, minMs - performance.now());
+    // At least ~0.55s on screen even when the first load itself was slow
+    const wait = Math.max(550, minMs - performance.now());
     const leave = setTimeout(() => setPhase("leaving"), wait);
-    const gone = setTimeout(() => setPhase("gone"), wait + 320);
+    const gone = setTimeout(() => setPhase("gone"), wait + 280);
     return () => {
       clearTimeout(leave);
       clearTimeout(gone);
@@ -83,7 +98,10 @@ export function BootSplash({ minMs = 1100 }: { minMs?: number }) {
   }, [minMs]);
   if (phase === "gone") return null;
   return (
-    <div className={cn("fixed inset-0 z-toast transition-opacity duration-300", phase === "leaving" && "pointer-events-none opacity-0")} aria-hidden={phase === "leaving"}>
+    <div
+      className={cn("fixed inset-0 z-toast transition-opacity duration-300", phase === "leaving" && "pointer-events-none opacity-0")}
+      aria-hidden={phase === "leaving"}
+    >
       <FocusRealmLoader />
     </div>
   );

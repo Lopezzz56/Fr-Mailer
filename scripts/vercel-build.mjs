@@ -17,30 +17,24 @@ if (!process.env.PUBLIC_URL) {
     : "https://fr-mailer.vercel.app";
 }
 
-if (!process.env.DIRECT_URL && process.env.DATABASE_URL) {
-  process.env.DIRECT_URL = process.env.DATABASE_URL;
-}
-
-if (!process.env.APP_SECRET) {
-  // Temporary build-safe fallback if not yet set in Vercel settings
-  process.env.APP_SECRET = "ac7506d283ac6f3ddb23963f95a055e60161c2a8a9f484cd1932fb52b8519cba";
-}
-
-if (!process.env.DATABASE_URL) {
-  console.error(
-    `\nMissing environment variable: DATABASE_URL.\nAdd it in Vercel → Project → Settings → Environment Variables.`
-  );
-  process.exit(1);
+for (const name of ["DATABASE_URL", "APP_SECRET"]) {
+  if (!process.env[name]) {
+    console.error(`\nMissing environment variable: ${name}.\nAdd it in Vercel → Project → Settings → Environment Variables.`);
+    process.exit(1);
+  }
 }
 
 run("npx prisma generate");
 if (process.env.VERCEL_ENV === "production" && process.env.SKIP_BUILD_MIGRATE !== "true") {
+  if (!process.env.DIRECT_URL) {
+    console.error("\nMissing environment variable: DIRECT_URL. Set a reachable direct or session-pooler database URL for production migrations.");
+    process.exit(1);
+  }
   console.log("\n> npx prisma migrate deploy");
   const r = spawnSync("npx prisma migrate deploy", { stdio: "inherit", shell: true });
   if (r.status !== 0) {
-    console.warn(
-      "\n[Notice] Database unreachable during build-time migration. Continuing build without failing, since local migrations are already applied."
-    );
+    console.error("\nProduction database migrations failed. The deployment was stopped to avoid running application code against an outdated schema.");
+    process.exit(r.status ?? 1);
   }
 } else {
   console.log(

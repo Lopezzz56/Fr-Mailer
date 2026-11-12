@@ -42,13 +42,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {createPortal(
         <div className="pointer-events-none fixed bottom-4 right-4 z-toast flex w-full max-w-sm flex-col gap-2" aria-live="polite">
           {toasts.map((t) => (
-            <div key={t.id} className="pointer-events-auto flex items-start gap-3 rounded-lg border border-line bg-surface p-3.5 shadow-pop animate-pop-in" role={t.tone === "error" ? "alert" : "status"}>
+            <div key={t.id} className="pointer-events-auto flex items-start gap-3 rounded-xl border border-line bg-surface p-4 shadow-pop animate-pop-in backdrop-blur-xs" role={t.tone === "error" ? "alert" : "status"}>
               {t.tone === "success" ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" /> : <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />}
               <div className="min-w-0 flex-1">
-                <p className="text-[13px] font-medium text-ink">{t.title}</p>
-                {t.description && <p className={cn("mt-0.5 text-[13px] leading-5 text-ink-subtle")}>{t.description}</p>}
+                <p className="text-[13px] font-semibold text-ink">{t.title}</p>
+                {t.description && <p className={cn("mt-0.5 text-xs leading-relaxed text-ink-subtle")}>{t.description}</p>}
               </div>
-              <button className="text-ink-faint hover:text-ink" onClick={() => dismiss(t.id)} aria-label="Dismiss">
+              <button className="text-ink-faint hover:text-ink transition-colors p-0.5" onClick={() => dismiss(t.id)} aria-label="Dismiss">
                 <X className="h-4 w-4" />
               </button>
             </div>

@@ -114,9 +114,27 @@ describe("classification service", () => {
       expect(detectProspectListType(headers, rows)).toBe("HOTEL_PROSPECTS");
     });
 
+    it("identifies hotel prospect lists when hotel format columns are uploaded", () => {
+      const headers = ["Property", "City", "Rooms", "Hotel Segment", "General Manager", "Email"];
+      const rows = [{ Property: "The Ritz", City: "Paris", Rooms: "150", "Hotel Segment": "Luxury", Email: "gm@ritz.com" }];
+      expect(detectProspectListType(headers, rows)).toBe("HOTEL_PROSPECTS");
+    });
+
     it("identifies co-marketing partner lists from partnership headers", () => {
       const headers = ["Company Name", "Email", "Partner Category", "Services Provided", "Partnership Angle"];
       const rows = [{ "Company Name": "Hospitality Academy", "Email": "partner@academy.com" }];
+      expect(detectProspectListType(headers, rows)).toBe("CO_MARKETING_PARTNERS");
+    });
+
+    it("identifies copartnership format even when target customer cells contain hotel keywords", () => {
+      const headers = ["Partner Name", "Email", "Category", "Services Provided", "Target Customers"];
+      const rows = [{ "Partner Name": "Peak Influencers", Email: "alex@peak.io", Category: "Influencer Marketing", "Services Provided": "Brand Outreach", "Target Customers": "Boutique Hotels and Luxury Resorts" }];
+      expect(detectProspectListType(headers, rows)).toBe("CO_MARKETING_PARTNERS");
+    });
+
+    it("identifies copartnerships with copartner or co-partnership in headers", () => {
+      const headers = ["Copartnership Organization", "Contact", "Email", "Services Offered"];
+      const rows = [{ "Copartnership Organization": "Spa Connect", Contact: "Sarah", Email: "sarah@spaconnect.com" }];
       expect(detectProspectListType(headers, rows)).toBe("CO_MARKETING_PARTNERS");
     });
 

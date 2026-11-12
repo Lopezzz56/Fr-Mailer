@@ -17,6 +17,9 @@ const EnvSchema = z.object({
   HOST: z.string().default("0.0.0.0"),
 
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
+  SUPABASE_URL: optionalString.pipe(z.string().url().optional()),
+  SUPABASE_SERVICE_ROLE_KEY: optionalString,
+  SUPABASE_STORAGE_BUCKET: optionalString.default("template-attachments"),
 
   // Externally reachable origin of this app — used for links inside emails (unsubscribe, invites)
   PUBLIC_URL: z
@@ -33,7 +36,7 @@ const EnvSchema = z.object({
         ? "https://fr-mailer.vercel.app"
         : "https://fr-mailer.vercel.app"
     ),
-  // Signs unsubscribe links. Generate with: openssl rand -hex 32
+  // Signs unsubscribe links and encrypts user mailbox credentials. Keep stable after mailbox setup.
   APP_SECRET: z.string().min(32, "APP_SECRET must be at least 32 characters"),
 
   // SpaceMail SMTP — optional so the app runs without it; sending is then disabled with a clear reason
@@ -91,10 +94,10 @@ export const isServerless = Boolean(process.env.VERCEL);
 export const smtpConfigured =Boolean(env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS && env.SMTP_FROM_EMAIL);
 export const imapConfigured = Boolean(env.IMAP_HOST && env.IMAP_USER && env.IMAP_PASS);
 export const aiConfigured = Boolean(env.GEMINI_API_KEY);
+export const templateStorageConfigured = Boolean(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY);
 
 /** Why live sending is unavailable, or null if it is available */
 export function liveSendingBlocker(): string | null {
-  if (!smtpConfigured) return "The sending mailbox isn't configured on the server.";
   if (!env.ALLOW_LIVE_SENDING) return "Live sending is switched off on this server (ALLOW_LIVE_SENDING).";
   return null;
 }

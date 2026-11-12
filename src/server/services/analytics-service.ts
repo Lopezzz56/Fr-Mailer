@@ -1,6 +1,7 @@
 import prisma from "../db.js";
 import type { Prisma } from "@prisma/client";
 import { AppError } from "../middleware/error-handler.js";
+import { visibleTemplatesWhere } from "../lib/resource-visibility.js";
 import type {
   CampaignAnalyticsSummaryDto,
   TemplatePerformanceItemDto,
@@ -150,6 +151,27 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
     }
   >();
 
+  const timelineMap = new Map<string, { date: string; sent: number; replied: number; bounced: number }>();
+  const getTimelineRow = (dStr: string) => {
+    let row = timelineMap.get(dStr);
+    if (!row) {
+      row = { date: dStr, sent: 0, replied: 0, bounced: 0 };
+      timelineMap.set(dStr, row);
+    }
+    return row;
+  };
+
+  const outcomeBreakdown = {
+    noResponse: 0,
+    replied: 0,
+    interested: 0,
+    notInterested: 0,
+    meetingBooked: 0,
+    bounced: 0,
+    unsubscribed: 0,
+    pending: 0,
+  };
+
   for (const send of sends) {
     attemptedSends += Math.max(1, send.attempts);
     const isSent = send.status === "SENT";
@@ -162,14 +184,30 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
     if (isReplied) repliedCount++;
     if (isUnsubscribed) unsubscribedCount++;
 
+    // Track activity in timeline
+    if (send.sentAt) {
+      const d = send.sentAt.toISOString().slice(0, 10);
+      getTimelineRow(d).sent++;
+    }
+    if (send.repliedAt) {
+      const d = send.repliedAt.toISOString().slice(0, 10);
+      getTimelineRow(d).replied++;
+    }
+    if (send.bouncedAt) {
+      const d = send.bouncedAt.toISOString().slice(0, 10);
+      getTimelineRow(d).bounced++;
+    }
+
     // Check for positive replies or meetings booked from events
     let isPositive = false;
+    let isNegative = false;
     let isMeeting = false;
 
     for (const ev of send.events) {
       const d = ev.detail as Record<string, unknown> | null;
       if (d) {
         if (d.classification === "POSITIVE" || d.sentiment === "positive") isPositive = true;
+        if (d.classification === "NEGATIVE" || d.sentiment === "negative") isNegative = true;
         if (d.meetingBooked === true || d.meetingOutcome === "BOOKED" || d.meetingOutcome === "QUALIFIED") {
           isMeeting = true;
         }
@@ -178,6 +216,27 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
 
     if (isPositive) positiveRepliesCount++;
     if (isMeeting) meetingsBookedCount++;
+
+    // Recipient outcome breakdown attribution
+    if (isUnsubscribed) {
+      outcomeBreakdown.unsubscribed++;
+    } else if (isBounced) {
+      outcomeBreakdown.bounced++;
+    } else if (isReplied) {
+      if (isMeeting) {
+        outcomeBreakdown.meetingBooked++;
+      } else if (isPositive) {
+        outcomeBreakdown.interested++;
+      } else if (isNegative) {
+        outcomeBreakdown.notInterested++;
+      } else {
+        outcomeBreakdown.replied++;
+      }
+    } else if (isSent) {
+      outcomeBreakdown.noResponse++;
+    } else {
+      outcomeBreakdown.pending++;
+    }
 
     // Template attribution
     const tId = send.templateId || campaign.templateId;
@@ -270,6 +329,13 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
     s.replyRate = s.sentCount > 0 ? Number(((s.repliedCount / s.sentCount) * 100).toFixed(1)) : 0;
   }
 
+  const byTemplate = [...templateMap.values()].map((t) => ({
+    ...t,
+    replyRate: t.sentCount > 0 ? Number(((t.repliedCount / t.sentCount) * 100).toFixed(1)) : 0,
+  }));
+
+  const timeline = [...timelineMap.values()].sort((a, b) => a.date.localeCompare(b.date));
+
   // Denominator: Provider-accepted sends (never count rejected attempts or total list size as delivered)
   const denominator = Math.max(1, providerAcceptedCount);
 
@@ -288,13 +354,16 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
       bounceRate: Number(((bouncedCount / denominator) * 100).toFixed(1)),
       replyRate: Number(((repliedCount / denominator) * 100).toFixed(1)),
       positiveReplyRate: Number(((positiveRepliesCount / denominator) * 100).toFixed(1)),
+      positiveOutcomeRate: repliedCount > 0 ? Number((((positiveRepliesCount + meetingsBookedCount) / repliedCount) * 100).toFixed(1)) : 0,
       meetingRate: Number(((meetingsBookedCount / denominator) * 100).toFixed(1)),
       unsubscribeRate: Number(((unsubscribedCount / denominator) * 100).toFixed(1)),
     },
-    byTemplate: [...templateMap.values()],
+    byTemplate,
     byHotelSegment: [...segmentMap.values()],
     byContactPersona: [...personaMap.values()],
     bySequenceStep: [...stepMap.values()],
+    timeline,
+    outcomeBreakdown,
   };
 }
 
@@ -342,6 +411,7 @@ export async function recordSendOutcome(
 }
 
 export async function getWorkspaceTemplateAnalytics(
+  userId: string,
   query: TemplateAnalyticsQuery = {}
 ): Promise<WorkspaceTemplateAnalyticsDto> {
   const { campaignId, dateRange, hotelSegment, contactPersona, templateId } = query;
@@ -355,6 +425,7 @@ export async function getWorkspaceTemplateAnalytics(
   // Fetch all templates and campaigns
   const [allTemplates, allCampaigns, sends] = await Promise.all([
     prisma.template.findMany({
+      where: visibleTemplatesWhere(userId),
       orderBy: { name: "asc" },
       select: { id: true, name: true, subject: true, version: true },
     }),
@@ -437,6 +508,7 @@ export async function getWorkspaceTemplateAnalytics(
   for (const send of sends) {
     const assignedTemplateId = send.templateId || send.campaign.templateId;
     if (templateId && assignedTemplateId !== templateId) continue;
+    if (!templateMap.has(assignedTemplateId)) continue;
 
     let stat = templateMap.get(assignedTemplateId);
     if (!stat) {
@@ -691,4 +763,3 @@ export async function getWorkspaceTemplateAnalytics(
     },
   };
 }
-

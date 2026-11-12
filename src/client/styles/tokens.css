@@ -2,38 +2,85 @@
    Values are RGB channels so Tailwind can apply opacity: rgb(var(--brand) / 0.1). */
 
 :root {
-  /* Surfaces */
-  --canvas: 244 247 252; /* #F4F7FC pale blue-grey workspace */
-  --surface: 255 255 255; /* cards, panels */
-  --surface-muted: 248 250 253; /* table headers, quiet panels */
-  --surface-sunken: 236 241 248; /* inputs on muted, code */
+  /* Surfaces — Light Mode (Calm, pale slate/blue workspace like Stripe/Linear) */
+  --canvas: 246 248 252; /* #F6F8FC */
+  --surface: 255 255 255; /* #FFFFFF cards, panels */
+  --surface-muted: 248 250 253; /* #F8FAFD table headers, quiet panels */
+  --surface-sunken: 238 242 249; /* #EEF2F9 inputs, badges */
 
   /* Lines */
-  --line: 223 229 239; /* #DFE5EF default borders */
-  --line-strong: 199 209 224;
+  --line: 226 232 240; /* #E2E8F0 default borders */
+  --line-strong: 203 213 225; /* #CBD5E1 */
 
-  /* Text */
-  --ink: 16 24 40; /* #101828 navy body text */
-  --ink-muted: 71 84 103; /* #475467 secondary */
-  --ink-subtle: 102 112 133; /* #667085 meta, captions */
-  --ink-faint: 152 162 179; /* #98A2B3 placeholders, disabled */
-  --navy: 13 27 62; /* #0D1B3E brand navy (wordmark, dark brand panels) */
+  /* Text & Inks */
+  --ink: 15 23 42; /* #0F172A deep dark navy body text */
+  --ink-muted: 71 85 105; /* #475569 secondary text */
+  --ink-subtle: 100 116 139; /* #64748B meta, captions */
+  --ink-faint: 148 163 184; /* #94A3B8 placeholders, disabled */
+  --navy: 11 20 46; /* #0B142E brand navy */
 
-  /* Brand — FocusRealm blue */
-  --brand: 33 104 232; /* #2168E8 */
-  --brand-hover: 25 88 204; /* #1958CC */
+  /* Brand — Royal Sapphire Blue */
+  --brand: 30 90 230; /* #1E5AE6 */
+  --brand-hover: 22 75 200; /* #164BC8 */
   --brand-soft: 235 242 254; /* #EBF2FE selected, info backgrounds */
   --brand-ink: 21 72 168; /* #1548A8 text on brand-soft */
 
+  /* Accent — Subtle Champagne Gold */
+  --gold: 196 154 85; /* #C49A55 */
+  --gold-soft: 253 249 240; /* #FDF9F0 */
+  --gold-border: 235 216 170; /* #EBD8AA */
+  --gold-ink: 138 101 28; /* #8A651C */
+
   /* Semantic */
-  --success: 15 124 82; /* #0F7C52 */
-  --success-soft: 231 246 239;
-  --warning: 176 98 6; /* #B06206 */
-  --warning-soft: 253 243 225;
-  --danger: 196 40 40; /* #C42828 */
-  --danger-hover: 168 30 30;
-  --danger-soft: 253 236 236;
+  --success: 16 149 93; /* #10955D */
+  --success-soft: 234 248 241; /* #EAF8F1 */
+  --warning: 180 102 8; /* #B46608 */
+  --warning-soft: 254 244 228; /* #FEF4E4 */
+  --danger: 214 48 48; /* #D63030 */
+  --danger-hover: 184 34 34; /* #B82222 */
+  --danger-soft: 254 238 238; /* #FEEEEE */
 
   /* Type */
   --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Dark Mode — Luxury Midnight Navy (Intentional Attio/Linear feel, not inverted gray) */
+.dark {
+  /* Surfaces */
+  --canvas: 11 16 30; /* #0B101E rich midnight navy */
+  --surface: 18 26 44; /* #121A2C elevated deep slate navy */
+  --surface-muted: 24 35 58; /* #18233A subtle dark card/header */
+  --surface-sunken: 13 19 33; /* #0D1321 sunken input/well */
+
+  /* Lines */
+  --line: 33 46 74; /* #212E4A refined dark navy borders */
+  --line-strong: 47 64 99; /* #2F4063 */
+
+  /* Text & Inks */
+  --ink: 248 250 252; /* #F8FAFC bright crisp text */
+  --ink-muted: 203 213 225; /* #CBD5E1 high-contrast secondary */
+  --ink-subtle: 148 163 184; /* #94A3B8 meta captions */
+  --ink-faint: 100 116 139; /* #64748B placeholders, disabled */
+  --navy: 18 28 52; /* #121C34 deep midnight navy (never pure white) */
+
+  /* Brand */
+  --brand: 59 130 246; /* #3B82F6 luminous sapphire blue */
+  --brand-hover: 96 165 250; /* #60A5FA */
+  --brand-soft: 22 40 76; /* #16284C translucent glowing blue */
+  --brand-ink: 147 197 253; /* #93C5FD text on brand-soft */
+
+  /* Accent — Champagne Gold in Dark */
+  --gold: 226 195 134; /* #E2C386 glowing champagne */
+  --gold-soft: 42 36 24; /* #2A2418 */
+  --gold-border: 88 74 46; /* #584A2E */
+  --gold-ink: 243 218 168; /* #F3DAA8 */
+
+  /* Semantic */
+  --success: 46 196 130; /* #2EC482 */
+  --success-soft: 18 48 35; /* #123023 */
+  --warning: 234 163 56; /* #EAA338 */
+  --warning-soft: 50 36 16; /* #322410 */
+  --danger: 248 113 113; /* #F87171 */
+  --danger-hover: 239 68 68; /* #EF4444 */
+  --danger-soft: 54 22 22; /* #361616 */
 }

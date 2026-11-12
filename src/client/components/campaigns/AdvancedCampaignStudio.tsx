@@ -36,6 +36,7 @@ import {
   type CampaignDetailDto,
   type HotelSegment,
   type ContactPersona,
+  type TemplateDto,
 } from "@shared/types";
 import { htmlToText, plainTextToHtml } from "@shared/merge";
 import { api, errorMessage } from "../../lib/api";
@@ -50,6 +51,10 @@ import { Callout } from "../ui/Feedback";
 import { Dialog, ConfirmDialog } from "../ui/Overlay";
 import { PageLoader } from "../ui/Spinner";
 import { EmailPreview } from "../email/EmailPreview";
+import { NewListDialog } from "../contacts/ContactDialogs";
+import { ImportPage } from "../../pages/audience/ImportPage";
+import { TemplateEditorPage } from "../../pages/templates/TemplateEditorPage";
+import { CampaignWorkflowSteps } from "./CampaignWorkflowSteps";
 import { num, plural } from "../../lib/format";
 
 export interface StudioSequenceStep {
@@ -131,11 +136,22 @@ export function AdvancedCampaignStudio({
   const { user } = useAuth();
   const mailboxQuery = useMailbox();
   const existingQuery = useCampaign(campaignId ?? "");
+  const mailboxSenderEmail =
+    mailboxQuery.data?.data.smtp.fromEmail || mailboxQuery.data?.data.smtp.user || "";
+  const defaultSenderEmail = mailboxSenderEmail;
 
   // Form Basic Info
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [contactListId, setContactListId] = useState("");
+  const [wizardStep, setWizardStep] = useState(0);
+  const [audienceMode, setAudienceMode] = useState<"select" | "import">("select");
+  const [emailMode, setEmailMode] = useState<"select" | "create" | "edit">("select");
+  const [editingTemplateId, setEditingTemplateId] = useState<string | null>(null);
+  const [targetSequenceStep, setTargetSequenceStep] = useState<number | null>(null);
+  const [previewTemplateItem, setPreviewTemplateItem] = useState<SelectedTemplateItem | null>(null);
+  const [createListOpen, setCreateListOpen] = useState(false);
+  const [mailboxId, setMailboxId] = useState("");
   const [fromName, setFromName] = useState("");
   const [fromEmail, setFromEmail] = useState("");
   const [replyTo, setReplyTo] = useState("");
@@ -223,10 +239,19 @@ export function AdvancedCampaignStudio({
 
   // Initialize from mailbox / existing campaign
   useEffect(() => {
-    if (isNew && (mailboxQuery.data || user) && !senderInitializedRef.current) {
+    const accessibleMailboxes = mailboxQuery.data?.data.accessibleMailboxes ?? [];
+    const defaultBox = accessibleMailboxes.find((m) => m.isDefault) || accessibleMailboxes[0];
+
+    if (isNew && mailboxQuery.isFetched && !senderInitializedRef.current) {
       senderInitializedRef.current = true;
-      setFromName(user?.senderName || user?.name || mailboxQuery.data?.data.smtp.fromName || "FocusRealm");
-      setFromEmail(user?.sendingEmail || user?.email || mailboxQuery.data?.data.smtp.fromEmail || "");
+      if (defaultBox) {
+        setMailboxId(defaultBox.id);
+        setFromEmail(defaultBox.email);
+        setFromName(defaultBox.senderName || user?.senderName || user?.name || defaultBox.fromName || "FocusRealm");
+      } else {
+        setFromName(user?.senderName || user?.name || mailboxQuery.data?.data.smtp.fromName || "FocusRealm");
+        setFromEmail(defaultSenderEmail);
+      }
     }
     if (!isNew && existingQuery.data && !senderInitializedRef.current) {
       senderInitializedRef.current = true;
@@ -236,6 +261,7 @@ export function AdvancedCampaignStudio({
       setContactListId(c.list.id);
       setFromName(c.fromName);
       setFromEmail(c.fromEmail ?? "");
+      setMailboxId(c.mailboxId ?? "");
       setReplyTo(c.replyTo ?? "");
       setSendRatePerMinute(String(c.sendRatePerMinute));
 
@@ -294,23 +320,7 @@ export function AdvancedCampaignStudio({
         );
       }
     }
-  }, [isNew, mailboxQuery.data, existingQuery.data]);
-
-  // Auto-seed first template if empty and templates query loaded
-  useEffect(() => {
-    if (isNew && selectedTemplates.length === 0 && templatesQuery.data?.data && templatesQuery.data.data.length > 0) {
-      const first = templatesQuery.data.data[0]!;
-      setSelectedTemplates([
-        {
-          templateId: first.id,
-          name: first.name,
-          subject: first.subject,
-          isFallback: true,
-          priority: 0,
-        },
-      ]);
-    }
-  }, [isNew, selectedTemplates.length, templatesQuery.data]);
+  }, [isNew, mailboxQuery.data, mailboxQuery.isFetched, existingQuery.data, user, defaultSenderEmail]);
 
   // Keep sequence steps templateId populated if empty
   useEffect(() => {
@@ -332,13 +342,6 @@ export function AdvancedCampaignStudio({
       }
     }
   }, [selectedTemplates]);
-
-  // Auto-seed first contact list if empty and lists query loaded
-  useEffect(() => {
-    if (isNew && !contactListId && listsQuery.data?.data && listsQuery.data.data.length > 0) {
-      setContactListId(listsQuery.data.data[0]!.id);
-    }
-  }, [isNew, contactListId, listsQuery.data]);
 
   // Simulation Query for live recipient & template distribution analysis
   const simulationQuery = useQuery({
@@ -373,13 +376,54 @@ export function AdvancedCampaignStudio({
   });
 
   // Template Management Helpers
-  const makeFallback = (templateId: string) => {
-    setSelectedTemplates((prev) =>
-      prev.map((t) => ({
-        ...t,
-        isFallback: t.templateId === templateId,
-      }))
-    );
+  const choosePrimaryTemplate = (templateId: string) => {
+    const template = templatesQuery.data?.data.find((item) => item.id === templateId);
+    if (!template) return;
+    setSelectedTemplates((prev) => {
+      const current = prev.find((item) => item.templateId === templateId);
+      const primary: SelectedTemplateItem = current
+        ? { ...current, isFallback: true, priority: 0 }
+        : { templateId, name: template.name, subject: template.subject, isFallback: true, priority: 0 };
+      return [
+        primary,
+        ...prev
+          .filter((item) => item.templateId !== templateId)
+          .map((item, index) => ({ ...item, isFallback: false, priority: index + 1 })),
+      ];
+    });
+    setSequenceSteps((prev) => prev.map((step, index) => index === 0 ? { ...step, templateId } : step));
+  };
+
+  const useCreatedTemplate = (template: TemplateDto) => {
+    const isFirst = selectedTemplates.length === 0;
+    setSelectedTemplates((prev) => {
+      const exists = prev.some((item) => item.templateId === template.id);
+      if (exists) {
+        return prev.map((item) =>
+          item.templateId === template.id
+            ? { ...item, name: template.name, subject: template.subject }
+            : item
+        );
+      }
+      return [
+        ...prev,
+        {
+          templateId: template.id,
+          name: template.name,
+          subject: template.subject,
+          isFallback: isFirst || prev.length === 0,
+          priority: prev.length,
+        },
+      ];
+    });
+    if (isFirst) {
+      setSequenceSteps((prev) =>
+        prev.map((step, index) => (index === 0 ? { ...step, templateId: template.id } : step))
+      );
+    }
+    setEmailMode("select");
+    void templatesQuery.refetch();
+    toast.success("Campaign template added", `"${template.name}" added to this campaign.`);
   };
 
   const removeTemplate = (templateId: string) => {
@@ -392,6 +436,10 @@ export function AdvancedCampaignStudio({
       filtered[0]!.isFallback = true;
     }
     setSelectedTemplates(filtered);
+    const newDefaultId = filtered.find((t) => t.isFallback)?.templateId ?? filtered[0]?.templateId ?? "";
+    setSequenceSteps((prev) =>
+      prev.map((s) => (s.templateId === templateId ? { ...s, templateId: newDefaultId } : s))
+    );
     // Remove rules that target this removed template
     setRules((prev) => prev.filter((r) => r.templateId !== templateId));
   };
@@ -400,18 +448,33 @@ export function AdvancedCampaignStudio({
     if (!templateToAddId) return;
     const t = templatesQuery.data?.data.find((item) => item.id === templateToAddId);
     if (!t) return;
-    setSelectedTemplates((prev) => [
-      ...prev,
-      {
-        templateId: t.id,
-        name: t.name,
-        subject: t.subject,
-        isFallback: false,
-        priority: prev.length,
-      },
-    ]);
+    const isFirst = selectedTemplates.length === 0;
+    setSelectedTemplates((prev) => {
+      if (prev.some((item) => item.templateId === t.id)) return prev;
+      return [
+        ...prev,
+        {
+          templateId: t.id,
+          name: t.name,
+          subject: t.subject,
+          isFallback: isFirst,
+          priority: prev.length,
+        },
+      ];
+    });
+    if (targetSequenceStep !== null) {
+      setSequenceSteps((prev) =>
+        prev.map((s, idx) => (idx === targetSequenceStep ? { ...s, templateId: t.id } : s))
+      );
+      setTargetSequenceStep(null);
+    } else if (isFirst) {
+      setSequenceSteps((prev) =>
+        prev.map((s, idx) => (idx === 0 ? { ...s, templateId: t.id } : s))
+      );
+    }
     setTemplateToAddId("");
     setAddTemplateModalOpen(false);
+    toast.success("Template added to campaign", `"${t.name}" added to this campaign.`);
   };
 
   // Rule Management Helpers
@@ -699,6 +762,9 @@ export function AdvancedCampaignStudio({
         bodyHtml: plainTextToHtml(aiDraftResult.body),
         bodyText: aiDraftResult.body,
         description: `AI-assisted follow-up template for step ${aiDraftStepIndex}: ${aiDraftPurpose}`,
+        category: "Follow-up",
+        campaignId: campaignId || undefined,
+        scope: "CAMPAIGN",
       });
       await templatesQuery.refetch();
       // Assign this template to the step
@@ -791,7 +857,8 @@ export function AdvancedCampaignStudio({
         contactListId,
         templateId: fallback.templateId,
         fromName: fromName.trim() || user?.senderName || user?.name || mailboxQuery.data?.data.smtp.fromName || "FocusRealm",
-        fromEmail: fromEmail.trim() || user?.sendingEmail || user?.email || mailboxQuery.data?.data.smtp.fromEmail || null,
+        fromEmail: fromEmail.trim() || defaultSenderEmail || null,
+        mailboxId: mailboxId || undefined,
         replyTo: replyTo.trim() || null,
         sendRatePerMinute: parseInt(sendRatePerMinute, 10) || 20,
         automationMode,
@@ -853,13 +920,64 @@ export function AdvancedCampaignStudio({
 
   const selectedList = listsQuery.data?.data.find((l) => l.id === contactListId);
   const sim = simulationQuery.data;
+  const advanceWizard = () => {
+    if (wizardStep === 0 && !name.trim()) {
+      toast.error("Add a campaign name", "Name your campaign before continuing.");
+      return;
+    }
+    if (wizardStep === 0 && !contactListId) {
+      toast.error("Choose a contact list", "Select a list or create/import one here.");
+      return;
+    }
+    if (wizardStep === 1) {
+      if (selectedTemplates.length === 0) {
+        toast.error("Choose campaign templates", "Add at least one template before configuring the sequence.");
+        return;
+      }
+      const defaultTpl = selectedTemplates.find((t) => t.isFallback) ?? selectedTemplates[0]!;
+      setSequenceSteps((prev) =>
+        prev.map((step, idx) => (idx === 0 && !step.templateId ? { ...step, templateId: defaultTpl.templateId } : step))
+      );
+    }
+    setWizardStep((step) => Math.min(step + 1, 4));
+  };
 
   return (
     <div className="space-y-6">
-      {/* 1. Audience & Sender Settings */}
-      <Panel
-        title="1. Campaign Details & Target Audience"
-        description="Select the recipient audience list and configure sender identification."
+      <CampaignWorkflowSteps
+        activeStep={wizardStep}
+        onStepChange={audienceMode === "import" || emailMode !== "select" ? undefined : setWizardStep}
+      />
+
+      {/* Core campaign setup */}
+      {wizardStep === 0 && audienceMode === "import" && (
+        <Panel>
+          <ImportPage
+            embedded
+            onCancel={() => setAudienceMode("select")}
+            onImportComplete={(list) => {
+              setContactListId(list.id);
+              setAudienceMode("select");
+              toast.success("Audience imported", `${list.name} is selected for this campaign.`);
+            }}
+          />
+        </Panel>
+      )}
+      {wizardStep === 0 && audienceMode === "select" && <Panel
+        title="Contacts & campaign details"
+        description="Name the campaign and choose the contact list to reach."
+        actions={
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<RefreshCw className={`h-3.5 w-3.5 ${listsQuery.isFetching ? "animate-spin" : ""}`} />}
+              onClick={() => listsQuery.refetch()}
+            >
+              Refresh
+            </Button>
+          </div>
+        }
       >
         <div className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-2">
@@ -884,6 +1002,15 @@ export function AdvancedCampaignStudio({
             />
           </div>
 
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="secondary" onClick={() => setCreateListOpen(true)}>
+              Create New List
+            </Button>
+            <Button size="sm" variant="secondary" icon={<Plus className="h-3.5 w-3.5" />} onClick={() => setAudienceMode("import")}>
+              Import Excel / CSV
+            </Button>
+          </div>
+
           <TextField
             label="Internal Note"
             optional
@@ -894,11 +1021,69 @@ export function AdvancedCampaignStudio({
 
           <div className="grid gap-4 sm:grid-cols-2 pt-2">
             <div>
+              <label className="block text-xs font-medium text-ink mb-1.5">
+                Authorized Sending Mailbox
+              </label>
+              {(mailboxQuery.data?.data.accessibleMailboxes ?? []).length > 1 ? (
+                <div>
+                  <select
+                    value={mailboxId}
+                    onChange={(e) => {
+                      const newId = e.target.value;
+                      setMailboxId(newId);
+                      const found = (mailboxQuery.data?.data.accessibleMailboxes ?? []).find((m) => m.id === newId);
+                      if (found) {
+                        setFromEmail(found.email);
+                        if (found.senderName) setFromName(found.senderName);
+                      }
+                    }}
+                    className="w-full rounded-lg border border-line bg-surface px-3 py-2 text-xs font-medium text-ink shadow-sm focus:border-brand focus:outline-none"
+                  >
+                    {(mailboxQuery.data?.data.accessibleMailboxes ?? []).map((box) => (
+                      <option key={box.id} value={box.id}>
+                        {box.email} ({box.senderName || box.fromName})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-[11px] text-ink-subtle">
+                    Sends from SpaceMail with authenticated SMTP/IMAP credentials.
+                  </p>
+                </div>
+              ) : (mailboxQuery.data?.data.accessibleMailboxes ?? []).length === 1 ? (
+                <div className="rounded-lg border border-line bg-surface-muted/30 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-ink">
+                      {(mailboxQuery.data?.data.accessibleMailboxes ?? [])[0].email}
+                    </span>
+                    <span className="rounded bg-emerald-100 text-emerald-800 text-[10px] font-semibold px-1.5 py-0.5">
+                      SpaceMail Connected
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-ink-subtle">
+                    Campaign sending uses this authenticated mailbox.
+                  </p>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-line bg-surface-muted/30 p-3">
+                  <p className="text-xs font-semibold text-ink">{mailboxSenderEmail || "No mailbox assigned"}</p>
+                  <p className="mt-1 text-[11px] text-ink-subtle">
+                    {!mailboxSenderEmail ? "You need an assigned SpaceMail mailbox to send outreach." : "Sends from your configured mailbox."}
+                  </p>
+                  {!mailboxSenderEmail && (
+                    <ButtonLink to="/settings/mailbox" size="sm" variant="secondary" className="mt-2">
+                      Mailbox Settings
+                    </ButtonLink>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div>
               <TextField
                 label="Sender Display Name"
                 value={fromName}
                 onChange={(e) => setFromName(e.target.value)}
-                placeholder="e.g. Founder’s Office, Sehej Sharma, FocusRealm"
+                placeholder="e.g. Founder’s Office, Rahul Sharma, FocusRealm"
                 hint="Friendly name recipients see in their inbox"
                 required
               />
@@ -914,42 +1099,6 @@ export function AdvancedCampaignStudio({
                       onClick={() => setFromName(preset)}
                       className={`rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors ${
                         fromName === preset
-                          ? "bg-primary text-white"
-                          : "bg-canvas-subtle text-ink-muted hover:bg-line hover:text-ink"
-                      }`}
-                    >
-                      {preset}
-                    </button>
-                  ))}
-              </div>
-            </div>
-
-            <div>
-              <TextField
-                label="Sender Email Address"
-                type="email"
-                value={fromEmail}
-                onChange={(e) => setFromEmail(e.target.value)}
-                placeholder={user?.email || mailboxQuery.data?.data.smtp.fromEmail || "employee@focusrealm.org"}
-                hint={
-                  <span className="flex items-center justify-between gap-1 text-[11px]">
-                    <span>Address displayed to recipients</span>
-                    <ButtonLink to="/settings/account" size="sm" variant="ghost" className="text-primary hover:underline text-[11px] p-0 h-auto">Your Profile</ButtonLink>
-                  </span>
-                }
-              />
-              <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-ink-subtle">
-                <span className="text-[10px] uppercase font-semibold text-ink-muted">Quick:</span>
-                {[user?.sendingEmail, user?.email, mailboxQuery.data?.data.smtp.fromEmail]
-                  .filter((v): v is string => Boolean(v && v.trim()))
-                  .filter((v, i, a) => a.indexOf(v) === i)
-                  .map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      onClick={() => setFromEmail(preset)}
-                      className={`rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors ${
-                        fromEmail === preset
                           ? "bg-primary text-white"
                           : "bg-canvas-subtle text-ink-muted hover:bg-line hover:text-ink"
                       }`}
@@ -983,11 +1132,512 @@ export function AdvancedCampaignStudio({
             </div>
           </div>
         </div>
-      </Panel>
+      </Panel>}
+      {wizardStep === 0 && (
+        <NewListDialog
+          open={createListOpen}
+          onClose={() => setCreateListOpen(false)}
+          onCreated={(list) => {
+            setContactListId(list.id);
+            setCreateListOpen(false);
+          }}
+        />
+      )}
 
-      {/* 2. Controlled Automation Mode & Sending Safeguards */}
+      {wizardStep === 1 && emailMode === "create" && (
+        <div className="space-y-4">
+          <TemplateEditorPage
+            embedded
+            campaignId={campaignId}
+            initialScope="CAMPAIGN"
+            cancelLabel="Back to Campaign Templates"
+            onCancel={() => {
+              setEmailMode("select");
+              if (targetSequenceStep !== null) {
+                setWizardStep(2);
+                setTargetSequenceStep(null);
+              }
+            }}
+            onSaved={(saved) => {
+              useCreatedTemplate(saved);
+              if (targetSequenceStep !== null) {
+                setSequenceSteps((prev) =>
+                  prev.map((step, idx) =>
+                    idx === targetSequenceStep ? { ...step, templateId: saved.id } : step
+                  )
+                );
+                setWizardStep(2);
+                setTargetSequenceStep(null);
+              }
+            }}
+          />
+        </div>
+      )}
+
+      {wizardStep === 1 && emailMode === "edit" && editingTemplateId && (
+        <div className="space-y-4">
+          <TemplateEditorPage
+            embedded
+            initialTemplateId={editingTemplateId}
+            campaignId={campaignId}
+            cancelLabel="Back to Campaign Templates"
+            onCancel={() => {
+              setEditingTemplateId(null);
+              setEmailMode("select");
+            }}
+            onSaved={(saved) => {
+              setSelectedTemplates((prev) =>
+                prev.map((t) =>
+                  t.templateId === saved.id
+                    ? { ...t, name: saved.name, subject: saved.subject }
+                    : t
+                )
+              );
+              setEditingTemplateId(null);
+              setEmailMode("select");
+              void templatesQuery.refetch();
+              toast.success("Template updated", `Saved "${saved.name}".`);
+            }}
+          />
+        </div>
+      )}
+
+      {wizardStep === 1 && emailMode === "select" && (
+        <div className="space-y-6">
+          <Panel
+            title="Campaign Templates"
+            description="All templates attached and available for this campaign. You can attach reusable templates from your library or write new ones specifically for this campaign."
+            actions={
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={<Plus className="h-3.5 w-3.5" />}
+                  onClick={async () => {
+                    const refreshed = await templatesQuery.refetch();
+                    const latestTemplates = refreshed.data?.data ?? templatesQuery.data?.data ?? [];
+                    const currentIds = new Set(selectedTemplates.map((t) => t.templateId));
+                    const remaining = latestTemplates.filter((t) => !currentIds.has(t.id));
+                    if (remaining.length > 0) {
+                      setTemplateToAddId(remaining[0]!.id);
+                    }
+                    setAddTemplateModalOpen(true);
+                  }}
+                >
+                  Add Existing Template
+                </Button>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  icon={<FileText className="h-3.5 w-3.5" />}
+                  onClick={() => {
+                    setTargetSequenceStep(null);
+                    setEmailMode("create");
+                  }}
+                >
+                  Create New Template
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon={<RefreshCw className={`h-3.5 w-3.5 ${templatesQuery.isFetching ? "animate-spin" : ""}`} />}
+                  onClick={() => {
+                    void templatesQuery.refetch();
+                    toast.success("Templates refreshed", "Fetched latest templates from your workspace.");
+                  }}
+                  title="Refresh workspace templates"
+                >
+                  Refresh
+                </Button>
+              </div>
+            }
+          >
+            {selectedTemplates.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-line bg-surface-muted/30 p-8 text-center">
+                <FileText className="mx-auto mb-3 h-8 w-8 text-ink-faint" />
+                <p className="font-semibold text-ink text-sm">No templates attached to this campaign</p>
+                <p className="mt-1 text-xs text-ink-subtle max-w-md mx-auto">
+                  Every campaign needs at least one template. Attach an existing template from your library or write a new one for this outreach.
+                </p>
+                <div className="mt-4 flex items-center justify-center gap-3">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    icon={<Plus className="h-3.5 w-3.5" />}
+                    onClick={() => setAddTemplateModalOpen(true)}
+                  >
+                    Add Existing Template
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    icon={<FileText className="h-3.5 w-3.5" />}
+                    onClick={() => {
+                      setTargetSequenceStep(null);
+                      setEmailMode("create");
+                    }}
+                  >
+                    Create New Template
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between text-xs text-ink-subtle">
+                  <span>
+                    <strong className="text-ink font-semibold">{selectedTemplates.length}</strong> {selectedTemplates.length === 1 ? "template" : "templates"} attached to this campaign collection
+                  </span>
+                  <span className="text-[11px] text-ink-muted">
+                    Assign these templates in the Sequence step
+                  </span>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {selectedTemplates.map((t) => {
+                    const assignedSteps = sequenceSteps
+                      .map((s, idx) => ({ step: s, idx }))
+                      .filter(({ step }) => step.templateId === t.templateId);
+
+                    return (
+                      <div
+                        key={t.templateId}
+                        className={`relative flex flex-col justify-between rounded-xl border p-4 transition-all ${
+                          t.isFallback
+                            ? "border-brand/40 bg-brand-soft/15 shadow-2xs"
+                            : "border-line bg-surface hover:border-line-hover"
+                        }`}
+                      >
+                        <div>
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="font-semibold text-sm text-ink truncate" title={t.name}>
+                              {t.name}
+                            </span>
+                            {t.isFallback ? (
+                              <Badge tone="brand" className="shrink-0 flex items-center gap-1">
+                                <Star className="h-3 w-3 fill-current" /> Primary Default
+                              </Badge>
+                            ) : (
+                              <Badge tone="neutral" className="shrink-0">
+                                Follow-up / Variant
+                              </Badge>
+                            )}
+                          </div>
+                          <p className="mt-1 line-clamp-2 text-xs text-ink-subtle font-mono">
+                            {t.subject || "No subject set"}
+                          </p>
+
+                          <div className="mt-3 flex flex-wrap gap-1">
+                            {assignedSteps.length > 0 ? (
+                              assignedSteps.map(({ idx }) => (
+                                <span
+                                  key={idx}
+                                  className="inline-flex items-center rounded bg-brand-soft/30 px-1.5 py-0.5 text-[10px] font-medium text-brand dark:text-brand-hover border border-brand/20"
+                                >
+                                  {idx === 0 ? "Initial Email (Day 0)" : `Follow-up Step ${idx}`}
+                                </span>
+                              ))
+                            ) : (
+                              <span className="inline-block text-[10px] text-ink-faint italic">
+                                Not assigned in sequence yet
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="mt-4 flex items-center justify-between border-t border-line/60 pt-3 text-xs">
+                          <div className="flex items-center gap-2">
+                            {!t.isFallback ? (
+                              <button
+                                type="button"
+                                className="text-xs font-medium text-brand hover:underline"
+                                onClick={() => choosePrimaryTemplate(t.templateId)}
+                              >
+                                Set Default
+                              </button>
+                            ) : (
+                              <span className="text-ink-subtle text-[11px] font-medium">Default</span>
+                            )}
+                            <span className="text-line-strong">·</span>
+                            <button
+                              type="button"
+                              className="text-xs font-medium text-ink hover:text-brand"
+                              onClick={() => {
+                                setEditingTemplateId(t.templateId);
+                                setEmailMode("edit");
+                              }}
+                            >
+                              Edit
+                            </button>
+                            <span className="text-line-strong">·</span>
+                            <button
+                              type="button"
+                              className="text-xs font-medium text-ink hover:text-brand"
+                              onClick={() => setPreviewTemplateItem(t)}
+                            >
+                              Preview
+                            </button>
+                          </div>
+
+                          {selectedTemplates.length > 1 && (
+                            <button
+                              type="button"
+                              className="text-danger hover:underline text-xs flex items-center gap-1"
+                              onClick={() => removeTemplate(t.templateId)}
+                              title="Remove from campaign (does not delete original template)"
+                            >
+                              <Trash2 className="h-3 w-3" /> Remove
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </Panel>
+
+          <details className="rounded-xl border border-line bg-surface-muted/20">
+            <summary className="cursor-pointer list-none px-4 py-3.5 text-sm font-semibold text-ink marker:hidden flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span>Audience Targeting & Persona Rules (Optional)</span>
+                <span className="text-xs font-normal text-ink-subtle">
+                  Route Step 0 contacts to specific templates based on hotel segment, persona, or city
+                </span>
+              </div>
+              <Badge tone="neutral">{rules.length} rule{rules.length === 1 ? "" : "s"}</Badge>
+            </summary>
+            <div className="space-y-4 border-t border-line p-3">
+
+              <Panel
+                title="Targeting rules"
+                description="Rules route contacts matching specific criteria to their dedicated template. Contacts not matching any rule automatically receive the Fallback template."
+                actions={
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      icon={<Sparkles className="h-3.5 w-3.5 text-brand" />}
+                      onClick={autoAssignRulesByAudience}
+                      disabled={selectedTemplates.length === 0}
+                    >
+                      Auto-Assign Audience Rules
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      icon={<Plus className="h-3.5 w-3.5" />}
+                      onClick={openNewRuleModal}
+                      disabled={selectedTemplates.length === 0}
+                    >
+                      Add Targeting Rule
+                    </Button>
+                  </div>
+                }
+              >
+                <div className="space-y-4">
+                  {/* Visual Targeting Guide & Quick Presets */}
+                  <div className="rounded-lg bg-brand-soft/20 border border-brand/20 p-4">
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-brand text-white text-[11px] font-bold">
+                          ?
+                        </span>
+                        <h4 className="text-xs font-semibold text-ink">How Targeting Rules Work (Simple Guide)</h4>
+                      </div>
+                      <span className="text-[11px] font-medium text-brand">Top-to-Bottom Priority &bull; First Match Wins</span>
+                    </div>
+                    <p className="text-xs text-ink-muted leading-relaxed">
+                      Targeting rules let you send different templates to different audiences in the same list.
+                      When a recipient matches Rule #1, they get that template immediately. If not, the system tests Rule #2.
+                      Anyone who doesn't match any rule automatically receives your primary <strong>Fallback Template</strong> (
+                      <span className="text-brand font-medium">
+                        {selectedTemplates.find((t) => t.isFallback)?.name ?? "Primary Default"}
+                      </span>
+                      ).
+                    </p>
+
+                    <div className="mt-3 pt-3 border-t border-brand/10">
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className="text-[11px] font-semibold text-ink-subtle uppercase tracking-wider flex items-center gap-1.5">
+                          <Sparkles className="h-3 w-3 text-brand" /> Quick Targeting Presets:
+                        </span>
+                        <span className="text-[11px] text-ink-subtle italic">Click to pre-fill a targeting rule</span>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="text-xs"
+                          icon={<GraduationCap className="h-3.5 w-3.5 text-brand" />}
+                          onClick={() => applyRulePreset("INSTITUTE", "", "Campus & Institute Hiring Outreach")}
+                          disabled={selectedTemplates.length === 0}
+                        >
+                          Target Institutes (Hiring)
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="text-xs"
+                          icon={<Handshake className="h-3.5 w-3.5 text-brand" />}
+                          onClick={() => applyRulePreset("CO_PARTNERSHIP", "", "Co-Marketing & Brand Partners")}
+                          disabled={selectedTemplates.length === 0}
+                        >
+                          Target Co-Partnerships
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="text-xs"
+                          icon={<Building2 className="h-3.5 w-3.5 text-brand" />}
+                          onClick={() => applyRulePreset("HOTEL", "", "All Hotel & Resort Properties")}
+                          disabled={selectedTemplates.length === 0}
+                        >
+                          Target All Hotels
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="text-xs"
+                          icon={<Crown className="h-3.5 w-3.5 text-brand" />}
+                          onClick={() => applyRulePreset("LUXURY", "GENERAL_MANAGER", "Luxury General Managers")}
+                          disabled={selectedTemplates.length === 0}
+                        >
+                          Target Luxury GMs
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="text-xs"
+                          icon={<MapPin className="h-3.5 w-3.5 text-brand" />}
+                          onClick={() => applyRulePreset("", "", "Specific City Focus", "Goa")}
+                          disabled={selectedTemplates.length === 0}
+                        >
+                          Target by City
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {rules.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-line bg-surface-muted/30 p-6 text-center text-xs text-ink-muted">
+                      <Filter className="mx-auto mb-2 h-5 w-5 text-ink-faint" />
+                      <p className="font-medium text-ink">No specific targeting rules configured</p>
+                      <p className="mt-1 text-ink-subtle">
+                        All contacts in the selected list will receive the default fallback template.
+                      </p>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="mt-3"
+                        onClick={openNewRuleModal}
+                        disabled={selectedTemplates.length === 0}
+                      >
+                        Configure First Rule
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-line rounded-lg border border-line bg-surface overflow-hidden">
+                      {rules.map((rule, idx) => {
+                        const targetTemplate = selectedTemplates.find((t) => t.templateId === rule.templateId);
+                        return (
+                          <div key={rule.id} className="flex flex-wrap items-center justify-between gap-3 p-3.5 text-xs hover:bg-surface-muted/20 transition-colors">
+                            <div className="flex items-center gap-3">
+                              <div className="flex flex-col items-center gap-0.5">
+                                <button
+                                  type="button"
+                                  title="Move rule up in priority"
+                                  disabled={idx === 0}
+                                  onClick={() => moveRuleUp(idx)}
+                                  className="p-1 rounded text-ink-subtle hover:text-ink hover:bg-surface-muted disabled:opacity-20 disabled:cursor-not-allowed"
+                                >
+                                  <ArrowUp className="h-3.5 w-3.5" />
+                                </button>
+                                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-surface-muted font-bold text-ink-subtle text-[10px]">
+                                  {idx + 1}
+                                </span>
+                                <button
+                                  type="button"
+                                  title="Move rule down in priority"
+                                  disabled={idx === rules.length - 1}
+                                  onClick={() => moveRuleDown(idx)}
+                                  className="p-1 rounded text-ink-subtle hover:text-ink hover:bg-surface-muted disabled:opacity-20 disabled:cursor-not-allowed"
+                                >
+                                  <ArrowDown className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="font-semibold text-brand text-[11px] uppercase tracking-wide">
+                                    Priority #{rule.priority ?? idx + 1}:
+                                  </span>
+                                  <span className="font-medium text-ink">
+                                    Send: <strong className="text-brand">{targetTemplate?.name ?? "Unknown Template"}</strong>
+                                  </span>
+                                </div>
+                                <div className="mt-1 flex flex-wrap items-center gap-1.5 text-ink-muted">
+                                  {rule.hotelSegment && (
+                                    <Badge tone="info">
+                                      {rule.hotelSegment === "HOTEL"
+                                        ? "All Hotel Properties"
+                                        : HOTEL_SEGMENT_LABELS[rule.hotelSegment as HotelSegment] ?? rule.hotelSegment}
+                                    </Badge>
+                                  )}
+                                  {rule.contactPersona && (
+                                    <Badge tone="neutral">
+                                      {CONTACT_PERSONA_LABELS[rule.contactPersona as ContactPersona] ?? rule.contactPersona}
+                                    </Badge>
+                                  )}
+                                  {rule.city && <Badge tone="neutral">City: {rule.city}</Badge>}
+                                  {rule.requiresVerified && (
+                                    <Badge tone="success" className="flex items-center gap-1">
+                                      <ShieldCheck className="h-3 w-3" /> Verified Only
+                                    </Badge>
+                                  )}
+                                  {rule.minConfidence !== null && rule.minConfidence !== undefined && (
+                                    <Badge tone="neutral">Conf: &ge; {Math.round(rule.minConfidence * 100)}%</Badge>
+                                  )}
+                                  {!rule.hotelSegment && !rule.contactPersona && !rule.city && (
+                                    <span className="text-ink-subtle italic">Matches all contacts in priority</span>
+                                  )}
+                                </div>
+                                {rule.description && (
+                                  <p className="mt-0.5 text-[11px] text-ink-subtle italic">{rule.description}</p>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <Button size="sm" variant="ghost" onClick={() => openEditRuleModal(rule)}>
+                                Edit
+                              </Button>
+                              <Button size="sm" variant="ghost" className="text-danger" onClick={() => deleteRule(rule.id)}>
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </Panel>
+            </div>
+          </details>
+        </div>
+      )}
+
+      {wizardStep === 2 && (
+        <>
+      <details className="rounded-xl border border-line bg-surface-muted/20">
+        <summary className="cursor-pointer list-none px-4 py-3.5 text-sm font-semibold text-ink marker:hidden">
+          Sending options
+          <span className="ml-2 text-xs font-normal text-ink-subtle">Approval, automation and safeguards</span>
+        </summary>
+        <div className="border-t border-line p-3">
       <Panel
-        title="2. Controlled Automation Mode & Sending Safeguards"
+        title="Sending mode"
         description="Choose how outreach and follow-ups are dispatched. Safety stopping rules are strictly enforced across all modes."
       >
         <div className="space-y-4">
@@ -1093,10 +1743,12 @@ export function AdvancedCampaignStudio({
           </div>
         </div>
       </Panel>
+        </div>
+          </details>
 
-      {/* 3. Follow-up Sequence & Cadence */}
-      <Panel
-        title="3. Follow-up Sequence & Cadence"
+          {/* Sequence */}
+          <Panel
+            title="Email sequence"
         description="Design multi-touch outreach. Day 0 delivers the initial introduction; subsequent steps send after elapsed business days if no reply is detected."
         actions={
           <div className="flex items-center gap-2">
@@ -1123,7 +1775,7 @@ export function AdvancedCampaignStudio({
 
             <div className="flex flex-col md:flex-row items-stretch md:items-center gap-2 overflow-x-auto pb-2">
               {sequenceSteps.map((step, idx) => {
-                const tpl = (templatesQuery.data?.data ?? []).find((t) => t.id === step.templateId);
+                const tpl = selectedTemplates.find((t) => t.templateId === step.templateId) || (templatesQuery.data?.data ?? []).find((t) => t.id === step.templateId);
                 return (
                   <div key={idx} className="flex flex-1 items-center gap-2 min-w-[210px]">
                     <div className="flex-1 rounded-lg border border-line bg-surface p-3 shadow-2xs">
@@ -1159,7 +1811,6 @@ export function AdvancedCampaignStudio({
           <div className="space-y-4">
             {sequenceSteps.map((step, idx) => {
               const isInitial = idx === 0;
-              const allTemplates = templatesQuery.data?.data ?? [];
               return (
                 <div
                   key={idx}
@@ -1214,16 +1865,48 @@ export function AdvancedCampaignStudio({
                       placeholder="e.g. Case study & social proof"
                     />
 
-                    <SelectField
-                      label="Assigned Email Template"
-                      value={step.templateId}
-                      onChange={(e) => updateSequenceStep(idx, { templateId: e.target.value })}
-                      options={allTemplates.map((t) => ({
-                        value: t.id,
-                        label: `${t.name}${t.subject ? ` — "${t.subject}"` : ""}`,
-                      }))}
-                      required
-                    />
+                    <div className="space-y-1">
+                      <SelectField
+                        label="Assigned Email Template"
+                        value={step.templateId}
+                        onChange={(e) => updateSequenceStep(idx, { templateId: e.target.value })}
+                        options={selectedTemplates.map((t) => ({
+                          value: t.templateId,
+                          label: `${t.name}${t.subject ? ` — "${t.subject}"` : ""}${t.isFallback ? " (Default)" : ""}`,
+                        }))}
+                        placeholder={selectedTemplates.length === 0 ? "No campaign templates added" : "Choose from campaign templates"}
+                        required
+                      />
+                      <div className="flex flex-wrap items-center justify-between gap-1 pt-0.5 text-[11px] text-ink-subtle">
+                        <span>
+                          {selectedTemplates.length} {selectedTemplates.length === 1 ? "template" : "templates"} available in this campaign
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            className="text-brand font-medium hover:underline inline-flex items-center gap-1"
+                            onClick={() => {
+                              setTargetSequenceStep(idx);
+                              setEmailMode("create");
+                              setWizardStep(1);
+                            }}
+                          >
+                            <Plus className="h-3 w-3" /> Create another campaign template
+                          </button>
+                          <span className="text-line-strong">·</span>
+                          <button
+                            type="button"
+                            className="text-ink-muted hover:text-brand font-medium hover:underline"
+                            onClick={() => {
+                              setTargetSequenceStep(idx);
+                              setAddTemplateModalOpen(true);
+                            }}
+                          >
+                            Attach existing
+                          </button>
+                        </div>
+                      </div>
+                    </div>
 
                     {!isInitial ? (
                       <div className="grid grid-cols-2 gap-2">
@@ -1253,7 +1936,7 @@ export function AdvancedCampaignStudio({
                   </div>
 
                   {!isInitial && (
-                    <div className="flex items-center justify-between text-xs pt-1">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-xs pt-1">
                       <Checkbox
                         label="Business days only (skips Saturdays and Sundays)"
                         checked={step.delayBusinessDaysOnly}
@@ -1300,340 +1983,15 @@ export function AdvancedCampaignStudio({
         </div>
       </Panel>
 
-      {/* 4. Eligible Email Templates */}
-      <Panel
-        title="4. Initial Email Templates & Fallback"
-        description="Select multiple email templates for Step 0. Contacts matching targeting rules will receive their specific template; unmatched contacts receive the default fallback."
-        actions={
-          <div className="flex items-center gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              icon={<Plus className="h-3.5 w-3.5" />}
-              onClick={async () => {
-                const refreshed = await templatesQuery.refetch();
-                const latestTemplates = refreshed.data?.data ?? templatesQuery.data?.data ?? [];
-                const currentIds = new Set(selectedTemplates.map((t) => t.templateId));
-                const remaining = latestTemplates.filter((t) => !currentIds.has(t.id));
-                if (remaining.length > 0) {
-                  setTemplateToAddId(remaining[0]!.id);
-                }
-                setAddTemplateModalOpen(true);
-              }}
-            >
-              Add Template
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              icon={<RefreshCw className={`h-3.5 w-3.5 ${templatesQuery.isFetching ? "animate-spin" : ""}`} />}
-              onClick={() => {
-                templatesQuery.refetch();
-                toast.success("Templates refreshed", "Fetched latest templates from your workspace.");
-              }}
-              title="Refresh workspace templates"
-            >
-              Refresh
-            </Button>
-            <ButtonLink
-              to="/templates/new"
-              size="sm"
-              target="_blank"
-              icon={<FileText className="h-3.5 w-3.5" />}
-            >
-              Write New
-            </ButtonLink>
-          </div>
-        }
-      >
-        <div className="space-y-3">
-          {selectedTemplates.length === 0 ? (
-            <Callout tone="warning" title="No templates selected">
-              Please select at least one email template to send.
-            </Callout>
-          ) : (
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {selectedTemplates.map((t) => {
-                return (
-                  <div
-                    key={t.templateId}
-                    className={`relative flex flex-col justify-between rounded-lg border p-4 transition-all ${
-                      t.isFallback
-                        ? "border-brand/40 bg-brand-soft/20 shadow-sm"
-                        : "border-line bg-surface hover:border-line-strong"
-                    }`}
-                  >
-                    <div>
-                      <div className="flex items-start justify-between gap-2">
-                        <span className="font-semibold text-sm text-ink truncate" title={t.name}>
-                          {t.name}
-                        </span>
-                        {t.isFallback ? (
-                          <Badge tone="brand" className="shrink-0 flex items-center gap-1">
-                            <Star className="h-3 w-3 fill-current" /> Fallback
-                          </Badge>
-                        ) : (
-                          <Badge tone="neutral" className="shrink-0">
-                            Eligible
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="mt-1 line-clamp-2 text-xs text-ink-subtle">
-                        {t.subject || "No subject set"}
-                      </p>
-                    </div>
+        </>
+      )}
 
-                    <div className="mt-4 flex items-center justify-between border-t border-line/60 pt-3 text-xs">
-                      {!t.isFallback ? (
-                        <button
-                          type="button"
-                          className="link text-xs font-medium"
-                          onClick={() => makeFallback(t.templateId)}
-                        >
-                          Make Fallback
-                        </button>
-                      ) : (
-                        <span className="text-ink-subtle text-[11px]">Primary Default</span>
-                      )}
 
-                      {selectedTemplates.length > 1 && (
-                        <button
-                          type="button"
-                          className="text-danger hover:underline text-xs flex items-center gap-1"
-                          onClick={() => removeTemplate(t.templateId)}
-                        >
-                          <Trash2 className="h-3 w-3" /> Remove
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </Panel>
 
-      {/* 5. Segment & Persona Targeting Rules */}
-      <Panel
-        title="5. Segment & Persona Targeting Rules"
-        description="Rules route contacts matching specific criteria to their dedicated template. Contacts not matching any rule automatically receive the Fallback template."
-        actions={
-          <div className="flex items-center gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              icon={<Sparkles className="h-3.5 w-3.5 text-brand" />}
-              onClick={autoAssignRulesByAudience}
-              disabled={selectedTemplates.length === 0}
-            >
-              Auto-Assign Audience Rules
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              icon={<Plus className="h-3.5 w-3.5" />}
-              onClick={openNewRuleModal}
-              disabled={selectedTemplates.length === 0}
-            >
-              Add Targeting Rule
-            </Button>
-          </div>
-        }
-      >
-        <div className="space-y-4">
-          {/* Visual Targeting Guide & Quick Presets */}
-          <div className="rounded-lg bg-brand-soft/20 border border-brand/20 p-4">
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <div className="flex items-center gap-2">
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-brand text-white text-[11px] font-bold">
-                  ?
-                </span>
-                <h4 className="text-xs font-semibold text-ink">How Targeting Rules Work (Simple Guide)</h4>
-              </div>
-              <span className="text-[11px] font-medium text-brand">Top-to-Bottom Priority &bull; First Match Wins</span>
-            </div>
-            <p className="text-xs text-ink-muted leading-relaxed">
-              Targeting rules let you send different templates to different audiences in the same list.
-              When a recipient matches Rule #1, they get that template immediately. If not, the system tests Rule #2.
-              Anyone who doesn't match any rule automatically receives your primary <strong>Fallback Template</strong> (
-              <span className="text-brand font-medium">
-                {selectedTemplates.find((t) => t.isFallback)?.name ?? "Primary Default"}
-              </span>
-              ).
-            </p>
-
-            <div className="mt-3 pt-3 border-t border-brand/10">
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <span className="text-[11px] font-semibold text-ink-subtle uppercase tracking-wider flex items-center gap-1.5">
-                  <Sparkles className="h-3 w-3 text-brand" /> Quick Targeting Presets:
-                </span>
-                <span className="text-[11px] text-ink-subtle italic">Click to pre-fill a targeting rule</span>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  className="text-xs"
-                  icon={<GraduationCap className="h-3.5 w-3.5 text-brand" />}
-                  onClick={() => applyRulePreset("INSTITUTE", "", "Campus & Institute Hiring Outreach")}
-                  disabled={selectedTemplates.length === 0}
-                >
-                  Target Institutes (Hiring)
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  className="text-xs"
-                  icon={<Handshake className="h-3.5 w-3.5 text-brand" />}
-                  onClick={() => applyRulePreset("CO_PARTNERSHIP", "", "Co-Marketing & Brand Partners")}
-                  disabled={selectedTemplates.length === 0}
-                >
-                  Target Co-Partnerships
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  className="text-xs"
-                  icon={<Building2 className="h-3.5 w-3.5 text-brand" />}
-                  onClick={() => applyRulePreset("HOTEL", "", "All Hotel & Resort Properties")}
-                  disabled={selectedTemplates.length === 0}
-                >
-                  Target All Hotels
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  className="text-xs"
-                  icon={<Crown className="h-3.5 w-3.5 text-brand" />}
-                  onClick={() => applyRulePreset("LUXURY", "GENERAL_MANAGER", "Luxury General Managers")}
-                  disabled={selectedTemplates.length === 0}
-                >
-                  Target Luxury GMs
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  className="text-xs"
-                  icon={<MapPin className="h-3.5 w-3.5 text-brand" />}
-                  onClick={() => applyRulePreset("", "", "Specific City Focus", "Goa")}
-                  disabled={selectedTemplates.length === 0}
-                >
-                  Target by City
-                </Button>
-              </div>
-            </div>
-          </div>
-
-        {rules.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-line bg-surface-muted/30 p-6 text-center text-xs text-ink-muted">
-            <Filter className="mx-auto mb-2 h-5 w-5 text-ink-faint" />
-            <p className="font-medium text-ink">No specific targeting rules configured</p>
-            <p className="mt-1 text-ink-subtle">
-              All contacts in the selected list will receive the default fallback template.
-            </p>
-            <Button
-              size="sm"
-              variant="secondary"
-              className="mt-3"
-              onClick={openNewRuleModal}
-              disabled={selectedTemplates.length === 0}
-            >
-              Configure First Rule
-            </Button>
-          </div>
-        ) : (
-          <div className="divide-y divide-line rounded-lg border border-line bg-surface overflow-hidden">
-            {rules.map((rule, idx) => {
-              const targetTemplate = selectedTemplates.find((t) => t.templateId === rule.templateId);
-              return (
-                <div key={rule.id} className="flex flex-wrap items-center justify-between gap-3 p-3.5 text-xs hover:bg-surface-muted/20 transition-colors">
-                  <div className="flex items-center gap-3">
-                    <div className="flex flex-col items-center gap-0.5">
-                      <button
-                        type="button"
-                        title="Move rule up in priority"
-                        disabled={idx === 0}
-                        onClick={() => moveRuleUp(idx)}
-                        className="p-1 rounded text-ink-subtle hover:text-ink hover:bg-surface-muted disabled:opacity-20 disabled:cursor-not-allowed"
-                      >
-                        <ArrowUp className="h-3.5 w-3.5" />
-                      </button>
-                      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-surface-muted font-bold text-ink-subtle text-[10px]">
-                        {idx + 1}
-                      </span>
-                      <button
-                        type="button"
-                        title="Move rule down in priority"
-                        disabled={idx === rules.length - 1}
-                        onClick={() => moveRuleDown(idx)}
-                        className="p-1 rounded text-ink-subtle hover:text-ink hover:bg-surface-muted disabled:opacity-20 disabled:cursor-not-allowed"
-                      >
-                        <ArrowDown className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold text-brand text-[11px] uppercase tracking-wide">
-                          Priority #{rule.priority ?? idx + 1}:
-                        </span>
-                        <span className="font-medium text-ink">
-                          Send: <strong className="text-brand">{targetTemplate?.name ?? "Unknown Template"}</strong>
-                        </span>
-                      </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-ink-muted">
-                        {rule.hotelSegment && (
-                          <Badge tone="info">
-                            {rule.hotelSegment === "HOTEL"
-                              ? "All Hotel Properties"
-                              : HOTEL_SEGMENT_LABELS[rule.hotelSegment as HotelSegment] ?? rule.hotelSegment}
-                          </Badge>
-                        )}
-                        {rule.contactPersona && (
-                          <Badge tone="neutral">
-                            {CONTACT_PERSONA_LABELS[rule.contactPersona as ContactPersona] ?? rule.contactPersona}
-                          </Badge>
-                        )}
-                        {rule.city && <Badge tone="neutral">City: {rule.city}</Badge>}
-                        {rule.requiresVerified && (
-                          <Badge tone="success" className="flex items-center gap-1">
-                            <ShieldCheck className="h-3 w-3" /> Verified Only
-                          </Badge>
-                        )}
-                        {rule.minConfidence !== null && rule.minConfidence !== undefined && (
-                          <Badge tone="neutral">Conf: &ge; {Math.round(rule.minConfidence * 100)}%</Badge>
-                        )}
-                        {!rule.hotelSegment && !rule.contactPersona && !rule.city && (
-                          <span className="text-ink-subtle italic">Matches all contacts in priority</span>
-                        )}
-                      </div>
-                      {rule.description && (
-                        <p className="mt-0.5 text-[11px] text-ink-subtle italic">{rule.description}</p>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <Button size="sm" variant="ghost" onClick={() => openEditRuleModal(rule)}>
-                      Edit
-                    </Button>
-                    <Button size="sm" variant="ghost" className="text-danger" onClick={() => deleteRule(rule.id)}>
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-        </div>
-      </Panel>
-
-      {/* 6. Live Recipient & Sequence Simulation */}
-      <Panel
-        title="6. Live Recipient & Sequence Simulation"
-        description="Real-time distribution breakdown and simulated matching for the selected audience."
+      {/* Review */}
+      {wizardStep === 3 && <Panel
+        title="Review recipients"
+        description="Check the recipient distribution and preview the personalized sequence."
         actions={
           sim && sim.sample && sim.sample.length > 0 && (
             <Button
@@ -1710,11 +2068,31 @@ export function AdvancedCampaignStudio({
               </div>
             )}
 
-            {/* Missing Info Warning */}
+            {/* Missing Info Warning & Breakdown */}
             {sim.missingFields.length > 0 && (
-              <Callout tone="warning" title={`${plural(sim.missingFields.length, "contact")} have missing merge fields`}>
-                They will be skipped during sending. Add fallback values in the template or update the contacts.
-              </Callout>
+              <div className="rounded-lg border border-warning/40 bg-warning-soft/30 p-4 space-y-3">
+                <Callout tone="warning" title={`${plural(sim.missingFields.length, "contact")} won't receive this email`}>
+                  They will be skipped during sending because required merge fields are blank. Fill in the missing data in Contacts, or add fallback values in the template (e.g. <code className="rounded bg-surface px-1 font-mono text-xs">{"{{company|your team}}"}</code>).
+                </Callout>
+                <div>
+                  <p className="text-xs font-semibold text-ink uppercase tracking-wider mb-1.5">
+                    Contacts Missing Information ({num(sim.missingFields.length)})
+                  </p>
+                  <ul className="max-h-48 overflow-y-auto divide-y divide-line rounded-md border border-line bg-surface text-xs">
+                    {sim.missingFields.slice(0, 20).map((item) => (
+                      <li key={item.email} className="flex items-center justify-between px-3 py-2">
+                        <span className="font-medium text-ink">{item.email}</span>
+                        <span className="text-ink-subtle">missing {item.fields.join(", ")}</span>
+                      </li>
+                    ))}
+                    {sim.missingFields.length > 20 && (
+                      <li className="px-3 py-2 text-center text-ink-subtle bg-surface-muted/50 font-medium">
+                        + {num(sim.missingFields.length - 20)} more contacts with missing fields
+                      </li>
+                    )}
+                  </ul>
+                </div>
+              </div>
             )}
 
             {/* Sample Recipient Matching Table */}
@@ -1795,34 +2173,69 @@ export function AdvancedCampaignStudio({
             )}
           </div>
         )}
-      </Panel>
+      </Panel>}
+
+      {wizardStep === 4 && (
+        <Panel title={isNew ? "Ready to create your campaign?" : "Ready to save your changes?"}>
+          <div className="space-y-3">
+            <p className="text-sm text-ink-muted">
+              {isNew
+                ? "This saves your campaign as a draft and opens its existing review and approval screen."
+                : "This saves your campaign changes and returns to its existing review screen."}
+            </p>
+            <p className="text-sm font-medium text-ink">
+              Nothing will be sent by this step. Sending remains subject to the campaign's existing approval and send controls.
+            </p>
+            <div className="text-xs text-ink-subtle">
+              {name || "Untitled campaign"}{selectedList ? ` · ${selectedList.name}` : ""} · {selectedTemplates.length} email template{selectedTemplates.length === 1 ? "" : "s"} · {sequenceSteps.length} sequence step{sequenceSteps.length === 1 ? "" : "s"}
+            </div>
+          </div>
+        </Panel>
+      )}
 
       {/* Action Footer */}
-      <div className="flex items-center justify-between rounded-lg border border-line bg-surface p-4">
-        <ButtonLink to="/campaigns" variant="secondary">
-          Cancel
-        </ButtonLink>
-
-        <div className="flex items-center gap-3">
-          <Button
-            variant="secondary"
-            icon={<FlaskConical className="h-4 w-4" />}
-            onClick={openTestModal}
-            disabled={selectedTemplates.length === 0 || !contactListId}
-          >
-            Send Test Email
-          </Button>
-
-          <Button
-            variant="primary"
-            loading={saveMutation.isPending}
-            onClick={() => saveMutation.mutate()}
-            icon={<Send className="h-4 w-4" />}
-          >
-            {isNew ? "Create Multi-Template Campaign" : "Save Changes"}
-          </Button>
+      {audienceMode === "select" && emailMode === "select" && <div className="flex flex-col-reverse sm:flex-row sm:items-center justify-between gap-3 rounded-lg border border-line bg-surface p-4">
+        <div className="flex gap-2">
+          {wizardStep > 0 ? (
+            <Button variant="secondary" onClick={() => setWizardStep((step) => Math.max(step - 1, 0))}>
+              Back
+            </Button>
+          ) : (
+            <ButtonLink to="/campaigns" variant="secondary" className="text-center justify-center">
+              Cancel
+            </ButtonLink>
+          )}
         </div>
-      </div>
+
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 sm:gap-3 w-full sm:w-auto">
+          {wizardStep === 3 && (
+            <Button
+              variant="secondary"
+              icon={<FlaskConical className="h-4 w-4" />}
+              onClick={openTestModal}
+              disabled={selectedTemplates.length === 0 || !contactListId}
+              className="w-full sm:w-auto justify-center"
+            >
+              Send Test Email
+            </Button>
+          )}
+          {wizardStep < 4 ? (
+            <Button variant="primary" icon={<ArrowRight className="h-4 w-4" />} onClick={advanceWizard}>
+              Continue
+            </Button>
+          ) : (
+            <Button
+              variant="primary"
+              loading={saveMutation.isPending}
+              onClick={() => saveMutation.mutate()}
+              icon={<Send className="h-4 w-4" />}
+              className="w-full sm:w-auto justify-center"
+            >
+              {isNew ? "Create & Review Campaign" : "Save Changes"}
+            </Button>
+          )}
+        </div>
+      </div>}
 
       {/* Dialog: Add Template */}
       <Dialog
@@ -2297,7 +2710,7 @@ export function AdvancedCampaignStudio({
 
               {previewTab === "preview" && (
                 <EmailPreview
-                  from={`${fromName || user?.senderName || user?.name || "FocusRealm"} <${fromEmail || user?.sendingEmail || user?.email || mailboxQuery.data?.data.smtp.fromEmail || "namaste@misehotel.com"}>`}
+                  from={`${fromName || user?.senderName || user?.name || "FocusRealm"} <${fromEmail || defaultSenderEmail || "namaste@misehotel.com"}>`}
                   to={previewSample.email}
                   replyTo={replyTo || (fromEmail && fromEmail !== mailboxQuery.data?.data.smtp.fromEmail ? fromEmail : undefined)}
                   subject={previewSample.subject}
@@ -2477,6 +2890,39 @@ export function AdvancedCampaignStudio({
           )}
         </div>
       </Dialog>
+
+      {/* Dialog: Preview Campaign Template */}
+      {previewTemplateItem && (
+        <Dialog
+          open={!!previewTemplateItem}
+          onClose={() => setPreviewTemplateItem(null)}
+          title={previewTemplateItem.name}
+          description="Campaign template preview"
+          footer={
+            <Button variant="secondary" onClick={() => setPreviewTemplateItem(null)}>
+              Close
+            </Button>
+          }
+        >
+          {(() => {
+            const t = (templatesQuery.data?.data ?? []).find((item) => item.id === previewTemplateItem.templateId);
+            return (
+              <div className="space-y-3">
+                <div className="rounded-lg border border-line bg-surface-muted/30 p-3">
+                  <span className="text-2xs font-semibold uppercase tracking-wider text-ink-subtle">Subject</span>
+                  <p className="mt-0.5 text-sm font-semibold text-ink">{t?.subject || previewTemplateItem.subject || "(No subject)"}</p>
+                </div>
+                <div className="rounded-lg border border-line bg-surface p-4 max-h-[60vh] overflow-y-auto">
+                  <div
+                    className="prose prose-sm max-w-none text-ink text-xs leading-relaxed"
+                    dangerouslySetInnerHTML={{ __html: t?.bodyHtml || plainTextToHtml(t?.bodyText || "") }}
+                  />
+                </div>
+              </div>
+            );
+          })()}
+        </Dialog>
+      )}
     </div>
   );
 }

@@ -11,8 +11,8 @@ function run(middleware: (req: Request, res: Response, next: (err?: unknown) => 
   return err instanceof AppError ? err.statusCode : err === undefined ? "next" : err;
 }
 
-const founder: SessionUser = { id: "u1", email: "f@focusrealm.com", name: "F", role: "FOUNDER", status: "ACTIVE" };
-const employee: SessionUser = { ...founder, id: "u2", role: "EMPLOYEE" };
+const founder: SessionUser = { id: "u1", email: "f@focusrealm.com", name: "F", role: "FOUNDER", status: "ACTIVE", canSendWithoutApproval: true };
+const employee: SessionUser = { ...founder, id: "u2", role: "EMPLOYEE", canSendWithoutApproval: false };
 
 describe("requireAuth", () => {
   it("rejects anonymous requests with 401", () => expect(run(requireAuth)).toBe(401));

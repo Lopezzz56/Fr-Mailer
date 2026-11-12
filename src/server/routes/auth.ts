@@ -29,6 +29,7 @@ import {
   LoginSchema,
   ResetPasswordSchema,
   UpdateUserSchema,
+  canAct,
   type TeamMemberDto,
 } from "../../shared/auth.js";
 
@@ -201,11 +202,31 @@ usersRouter.post(
 
 usersRouter.patch(
   "/:id",
-  requirePermission("users.manage"),
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
     const input = UpdateUserSchema.parse(req.body);
-    if (id === req.user!.id && (input.status === "DISABLED" || input.role === "EMPLOYEE")) {
+    const targetUser = await prisma.user.findUnique({ where: { id } });
+    if (!targetUser) throw AppError.notFound("USER_NOT_FOUND", "That person isn't on the team.");
+
+    const isRoleOrStatusChange = input.role !== undefined || input.status !== undefined || input.name !== undefined;
+    const isSendPermissionChange = input.canSendWithoutApproval !== undefined;
+
+    // Modifying role, status, or identity requires users.manage (Founder only)
+    if (isRoleOrStatusChange && !req.user || (isRoleOrStatusChange && req.user!.role !== "FOUNDER")) {
+      throw AppError.forbidden("PERMISSION_DENIED", "Only founders can change member roles, statuses, or account details.");
+    }
+
+    // Granting or revoking send permissions requires users.grant_send (Founder or Founder Office)
+    if (isSendPermissionChange && !canAct(req.user!, "users.grant_send")) {
+      throw AppError.forbidden("PERMISSION_DENIED", "You don't have permission to modify sending rights.");
+    }
+
+    // Founder Office cannot modify a Founder account
+    if (req.user!.role === "FOUNDER_OFFICE" && targetUser.role === "FOUNDER") {
+      throw AppError.forbidden("PERMISSION_DENIED", "Founder Office cannot modify Founder accounts.");
+    }
+
+    if (id === req.user!.id && (input.status === "DISABLED" || (input.role && input.role !== "FOUNDER"))) {
       throw AppError.badRequest("SELF_CHANGE", "You can't disable yourself or remove your own founder role.");
     }
     ok(res, toSessionUser(await updateUser(req, id, input)));

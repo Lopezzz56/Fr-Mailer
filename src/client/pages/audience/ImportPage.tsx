@@ -29,7 +29,7 @@ import { PageHeader } from "../../components/ui/Navigation";
 import { Panel, Stat } from "../../components/ui/Card";
 import { Button, ButtonLink } from "../../components/ui/Button";
 import { Badge } from "../../components/ui/Badge";
-import { ChoiceCard, SelectField, TextField } from "../../components/ui/Field";
+import { Checkbox, ChoiceCard, SelectField, TextField } from "../../components/ui/Field";
 import { Callout } from "../../components/ui/Feedback";
 import {
   ALL_SHEETS,
@@ -72,10 +72,10 @@ function Stepper({ step }: { step: Step }) {
   return (
     <ol className="mb-6 flex flex-wrap items-center gap-2 text-[13px]">
       {STEPS.map((s, i) => (
-        <li key={s.key} className="flex items-center gap-2">
+        <li key={s.key} className="flex items-center gap-1.5 sm:gap-2">
           <span
             className={cn(
-              "flex h-6 w-6 items-center justify-center rounded-full text-xs font-semibold",
+              "flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold",
               i < index
                 ? "bg-success text-white"
                 : i === index
@@ -85,10 +85,10 @@ function Stepper({ step }: { step: Step }) {
           >
             {i < index ? "✓" : i + 1}
           </span>
-          <span className={cn(i === index ? "font-medium text-ink" : "text-ink-subtle")}>
+          <span className={cn("text-xs sm:text-[13px] whitespace-nowrap", i === index ? "font-medium text-ink" : "text-ink-subtle")}>
             {s.label}
           </span>
-          {i < STEPS.length - 1 && <span className="mx-1 h-px w-8 bg-line" aria-hidden="true" />}
+          {i < STEPS.length - 1 && <span className="hidden sm:inline-block mx-1 h-px w-6 lg:w-8 bg-line" aria-hidden="true" />}
         </li>
       ))}
     </ol>
@@ -221,8 +221,16 @@ function ProblemRows({
   );
 }
 
-export function ImportPage() {
-  useTitle("Import contacts");
+export function ImportPage({
+  embedded = false,
+  onImportComplete,
+  onCancel,
+}: {
+  embedded?: boolean;
+  onImportComplete?: (list: { id: string; name: string }) => void;
+  onCancel?: () => void;
+}) {
+  useTitle(embedded ? "New campaign" : "Import contacts");
   const [params] = useSearchParams();
   const invalidate = useInvalidate();
   const lists = useLists();
@@ -236,7 +244,8 @@ export function ImportPage() {
   const [fixes, setFixes] = useState<Record<string, string>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [analysis, setAnalysis] = useState<ImportAnalysisDto | null>(null);
-  const [policy, setPolicy] = useState<DuplicatePolicy>("fill_empty");
+  const [policy, setPolicy] = useState<DuplicatePolicy>("skip");
+  const [autoRemoveMissingEmails, setAutoRemoveMissingEmails] = useState(true);
   const [listChoice, setListChoice] = useState<string>(params.get("list") ?? "new");
   const [newListName, setNewListName] = useState("");
   const [result, setResult] = useState<ImportResultDto | null>(null);
@@ -304,7 +313,15 @@ export function ImportPage() {
     onSuccess: (res, opts) => {
       setAnalysis(res.data);
       setMultiEmail(opts.multiEmail);
-      setFixes(opts.fixes);
+      const updatedFixes = { ...opts.fixes };
+      if (autoRemoveMissingEmails) {
+        for (const p of res.data.problems) {
+          if (!p.raw || !p.raw.trim() || p.kind === "invalid" || !EMAIL_SHAPE.test(p.raw.trim())) {
+            updatedFixes[p.ref] = "";
+          }
+        }
+      }
+      setFixes(updatedFixes);
       const open = new Set(res.data.problems.map((p) => p.ref));
       setDrafts((d) => Object.fromEntries(Object.entries(d).filter(([ref]) => open.has(ref))));
       setStep("review");
@@ -329,6 +346,7 @@ export function ImportPage() {
       setResult(res.data);
       setStep("done");
       await invalidate("contacts", "lists", "overview");
+      if (embedded && res.data.list) onImportComplete?.(res.data.list);
     },
   });
 
@@ -479,20 +497,30 @@ export function ImportPage() {
 
   return (
     <>
-      <PageHeader
-        back={{ to: "/contacts", label: "Contacts" }}
-        title="Import contacts"
-        description="CSV or Excel (.xlsx, any number of sheets), up to 4 MB and 50,000 rows."
-        actions={
-          <Button
-            variant="secondary"
-            icon={<HelpCircle className="h-4 w-4" />}
-            onClick={() => setPrepModalOpen(true)}
-          >
-            Data Preparation Guide
-          </Button>
-        }
-      />
+      {embedded ? (
+        <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-ink">Import a spreadsheet</h2>
+            <p className="mt-1 text-[13px] text-ink-subtle">CSV or Excel (.xlsx), up to 4 MB and 50,000 rows.</p>
+          </div>
+          <Button variant="secondary" onClick={onCancel}>Back to audience</Button>
+        </div>
+      ) : (
+        <PageHeader
+          back={{ to: "/contacts", label: "Contacts" }}
+          title="Import contacts"
+          description="CSV or Excel (.xlsx, any number of sheets), up to 4 MB and 50,000 rows."
+          actions={
+            <Button
+              variant="secondary"
+              icon={<HelpCircle className="h-4 w-4" />}
+              onClick={() => setPrepModalOpen(true)}
+            >
+              Data Preparation Guide
+            </Button>
+          }
+        />
+      )}
       <Stepper step={step} />
 
       {step === "upload" && (
@@ -601,7 +629,7 @@ export function ImportPage() {
               {fileError ?? errorMessage(previewMutation.error)}
             </Callout>
           )}
-          <RecentImports />
+          {!embedded && <RecentImports />}
         </div>
       )}
 
@@ -964,13 +992,22 @@ export function ImportPage() {
                   {errorMessage(analyzeMutation.error)}
                 </Callout>
               )}
-              <div className="flex justify-between">
-                <Button onClick={restart}>Choose another file</Button>
+              <div className="rounded-xl border border-line bg-surface-muted/50 p-3.5">
+                <Checkbox
+                  checked={autoRemoveMissingEmails}
+                  onChange={(e) => setAutoRemoveMissingEmails(e.target.checked)}
+                  label="Automatically remove rows without an email address (Recommended)"
+                  description="Rows with blank or missing email cells will be skipped automatically so your outreach import proceeds smoothly."
+                />
+              </div>
+              <div className="flex flex-col-reverse sm:flex-row justify-between gap-3">
+                <Button onClick={restart} className="w-full sm:w-auto">Choose another file</Button>
                 <Button
                   variant="primary"
                   loading={analyzeMutation.isPending}
                   disabled={!emailColumn || duplicateTargets.length > 0 || previewMutation.isPending}
                   onClick={() => analyzeMutation.mutate(options())}
+                  className="w-full sm:w-auto"
                 >
                   Check emails
                 </Button>
@@ -1085,13 +1122,13 @@ export function ImportPage() {
               {errorMessage(analyzeMutation.error)}
             </Callout>
           )}
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <Button onClick={() => setStep("map")} disabled={analyzeMutation.isPending}>
+          <div className="flex flex-col-reverse sm:flex-row sm:items-center justify-between gap-3">
+            <Button onClick={() => setStep("map")} disabled={analyzeMutation.isPending} className="w-full sm:w-auto">
               Back
             </Button>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
               {analysis.problemCount > 0 && (
-                <span className="text-[13px] text-ink-subtle">
+                <span className="text-xs sm:text-[13px] text-ink-subtle">
                   {plural(analysis.problemCount, "row")} without a usable email will be left out.
                 </span>
               )}
@@ -1099,6 +1136,7 @@ export function ImportPage() {
                 variant="primary"
                 disabled={!analysis.contacts || pendingDrafts.length > 0 || analyzeMutation.isPending}
                 onClick={() => setStep("destination")}
+                className="w-full sm:w-auto"
               >
                 Continue
               </Button>
@@ -1148,8 +1186,16 @@ export function ImportPage() {
                   value={p}
                   checked={policy === p}
                   onSelect={() => setPolicy(p)}
-                  title={DUPLICATE_POLICY_LABELS[p].label + (p === "fill_empty" ? " (recommended)" : "")}
-                  description={DUPLICATE_POLICY_LABELS[p].description}
+                  title={
+                    p === "skip"
+                      ? "Skip (Recommended — if already present, don't bother)"
+                      : DUPLICATE_POLICY_LABELS[p].label
+                  }
+                  description={
+                    p === "skip"
+                      ? "Existing contacts in FocusRealm are left untouched. New contacts from this file are added."
+                      : DUPLICATE_POLICY_LABELS[p].description
+                  }
                 />
               ))}
             </div>
@@ -1160,8 +1206,8 @@ export function ImportPage() {
               {errorMessage(importMutation.error)}
             </Callout>
           )}
-          <div className="flex justify-between">
-            <Button onClick={() => setStep("review")} disabled={importMutation.isPending}>
+          <div className="flex flex-col-reverse sm:flex-row justify-between gap-3">
+            <Button onClick={() => setStep("review")} disabled={importMutation.isPending} className="w-full sm:w-auto">
               Back
             </Button>
             <Button
@@ -1169,6 +1215,7 @@ export function ImportPage() {
               loading={importMutation.isPending}
               disabled={listChoice === "new" && !newListName.trim()}
               onClick={() => importMutation.mutate()}
+              className="w-full sm:w-auto"
             >
               Import {plural(analysis.contacts, "contact")}
             </Button>

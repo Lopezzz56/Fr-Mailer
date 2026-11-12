@@ -12,8 +12,10 @@ import { contactInclude, toContactDtos, toSendDto } from "../lib/serialize.js";
 import { parseWorkbook, planImport, runImport, selectSheet, suggestMapping, validateMapping } from "../services/contact-import.js";
 import { computeImportQuality, detectProspectListType } from "../services/classification.js";
 import { invalidateOverviewCache } from "./overview.js";
+import { visibleListsWhere } from "../lib/resource-visibility.js";
 import {
   ALL_SHEETS,
+  ContactBatchInputSchema,
   ContactInputSchema,
   IdSchema,
   ImportConfigSchema,
@@ -33,12 +35,12 @@ function requireFile(file: Express.Multer.File | undefined): Express.Multer.File
 
 // ---------------------------------------------------------------------------
 // List & search
-let cachedDefaultContacts: { data: any[]; total: number; expiresAt: number } | null = null;
+const cachedDefaultContacts = new Map<string, { data: any[]; total: number; expiresAt: number }>();
 let cachedContactFields: { data: { name: string; count: number }[]; expiresAt: number } | null = null;
 const CONTACTS_CACHE_TTL_MS = 20_000;
 
 export function invalidateContactsCache(): void {
-  cachedDefaultContacts = null;
+  cachedDefaultContacts.clear();
   cachedContactFields = null;
 }
 
@@ -54,8 +56,10 @@ router.get(
 
     const isDefaultQuery = !search && !listId && !filter && page === 1 && pageSize === 25;
     const now = Date.now();
-    if (isDefaultQuery && cachedDefaultContacts && cachedDefaultContacts.expiresAt > now) {
-      return okPage(res, cachedDefaultContacts.data, page, pageSize, cachedDefaultContacts.total);
+    const userId = req.user!.id;
+    const cached = cachedDefaultContacts.get(userId);
+    if (isDefaultQuery && cached && cached.expiresAt > now) {
+      return okPage(res, cached.data, page, pageSize, cached.total);
     }
 
     const where: Prisma.ContactWhereInput = {};
@@ -73,9 +77,9 @@ router.get(
       prisma.contact.findMany({ where, include: contactInclude, orderBy: { importedAt: "desc" }, ...skipTake(page, pageSize) }),
       prisma.contact.count({ where }),
     ]);
-    const dtos = await toContactDtos(rows);
+    const dtos = await toContactDtos(rows, userId);
     if (isDefaultQuery) {
-      cachedDefaultContacts = { data: dtos, total, expiresAt: now + CONTACTS_CACHE_TTL_MS };
+      cachedDefaultContacts.set(userId, { data: dtos, total, expiresAt: now + CONTACTS_CACHE_TTL_MS });
     }
     okPage(res, dtos, page, pageSize, total);
   })
@@ -120,8 +124,8 @@ router.post(
     const sheets = await parseWorkbook(file.buffer, file.originalname);
     const requested = typeof req.body.sheet === "string" && req.body.sheet ? req.body.sheet : sheets[0]!.name;
     const table = selectSheet(sheets, requested);
-    const suggestedMapping = suggestMapping(table.headers);
     const suggestedListType = detectProspectListType(table.headers, table.rows.slice(0, 10));
+    const suggestedMapping = suggestMapping(table.headers, suggestedListType);
     const qualityBreakdown = computeImportQuality(table.headers, suggestedMapping, suggestedListType);
 
     const data: ImportPreviewDto = {
@@ -218,11 +222,95 @@ router.get(
 // ---------------------------------------------------------------------------
 
 router.post(
+  "/bulk",
+  requirePermission("contacts.manage"),
+  asyncHandler(async (req, res) => {
+    const input = ContactBatchInputSchema.parse(req.body);
+    const { emails, listIds, ...contactData } = input;
+    const contactIds = await prisma.$transaction(async (tx) => {
+      if (listIds.length) {
+        const found = await tx.contactList.findMany({
+          where: { id: { in: listIds }, AND: [visibleListsWhere(req.user!.id)] },
+          select: { id: true },
+        });
+        if (found.length !== listIds.length) throw AppError.notFound("LIST_NOT_FOUND", "One or more selected lists no longer exist.");
+      }
+
+      const ids: string[] = [];
+      for (const email of emails) {
+        const existing = await tx.contact.findUnique({ where: { email }, select: { id: true } });
+        const contact = existing
+          ? await tx.contact.update({
+              where: { id: existing.id },
+              data: { memberships: { connectOrCreate: listIds.map((contactListId) => ({
+                where: { contactId_contactListId: { contactId: existing.id, contactListId } },
+                create: { contactListId },
+              })) } },
+              select: { id: true },
+            })
+          : await tx.contact.create({
+              data: {
+                ...contactData,
+                email,
+                source: "manual",
+                memberships: { create: listIds.map((contactListId) => ({ contactListId })) },
+              },
+              select: { id: true },
+            });
+        ids.push(contact.id);
+      }
+      await audit(req, {
+        action: "contact.create",
+        entityType: "Contact",
+        metadata: { count: ids.length, emailCount: emails.length, multipleAddresses: emails.length > 1 },
+      }, tx);
+      return ids;
+    });
+
+    const contacts = await prisma.contact.findMany({
+      where: { id: { in: contactIds } },
+      include: contactInclude,
+    });
+    const byId = new Map((await toContactDtos(contacts, req.user!.id)).map((contact) => [contact.id, contact]));
+    ok(res, contactIds.map((id) => byId.get(id)).filter(Boolean), 201);
+  })
+);
+
+router.post(
   "/",
   requirePermission("contacts.manage"),
   asyncHandler(async (req, res) => {
     const input = ContactInputSchema.parse(req.body);
     const { listIds } = z.object({ listIds: z.array(IdSchema).max(50).default([]) }).parse(req.body);
+    if (listIds.length) {
+      const lists = await prisma.contactList.findMany({
+        where: { id: { in: listIds }, AND: [visibleListsWhere(req.user!.id)] },
+        select: { id: true },
+      });
+      if (lists.length !== listIds.length) throw AppError.notFound("LIST_NOT_FOUND", "One or more selected lists no longer exist.");
+    }
+
+    const existing = await prisma.contact.findUnique({
+      where: { email: input.email },
+      include: contactInclude,
+    });
+
+    if (existing) {
+      // If contact already exists, link to the target list(s) without failing with duplicate error
+      if (listIds.length > 0) {
+        for (const contactListId of listIds) {
+          await prisma.listMembership.upsert({
+            where: { contactId_contactListId: { contactId: existing.id, contactListId } },
+            create: { contactId: existing.id, contactListId },
+            update: {},
+          });
+        }
+      }
+      const updated = await prisma.contact.findUnique({ where: { id: existing.id }, include: contactInclude });
+      ok(res, (await toContactDtos([updated!], req.user!.id))[0], 200);
+      return;
+    }
+
     const contact = await prisma.contact.create({
       data: {
         ...input,
@@ -232,7 +320,7 @@ router.post(
       include: contactInclude,
     });
     await audit(req, { action: "contact.create", entityType: "Contact", entityId: contact.id, metadata: { email: contact.email } });
-    ok(res, (await toContactDtos([contact]))[0], 201);
+    ok(res, (await toContactDtos([contact], req.user!.id))[0], 201);
   })
 );
 
@@ -249,7 +337,7 @@ router.get(
       include: { campaign: { select: { id: true, name: true } } },
     });
     ok(res, {
-      ...(await toContactDtos([contact]))[0],
+      ...(await toContactDtos([contact], req.user!.id))[0],
       history: sends.map((s) => ({ ...toSendDto(s), campaign: s.campaign })),
     });
   })
@@ -273,7 +361,7 @@ router.patch(
     }
     const contact = await prisma.contact.update({ where: { id }, data, include: contactInclude });
     await audit(req, { action: "contact.update", entityType: "Contact", entityId: id, metadata: { email: contact.email, fields: Object.keys(input) } });
-    ok(res, (await toContactDtos([contact]))[0]);
+    ok(res, (await toContactDtos([contact], req.user!.id))[0]);
   })
 );
 
@@ -307,7 +395,7 @@ router.patch(
       entityId: id,
       metadata: { hotelSegment: contact.hotelSegment, contactPersona: contact.contactPersona },
     });
-    ok(res, (await toContactDtos([contact]))[0]);
+    ok(res, (await toContactDtos([contact], req.user!.id))[0]);
   })
 );
 

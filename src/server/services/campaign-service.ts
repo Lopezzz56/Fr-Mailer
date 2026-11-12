@@ -17,23 +17,38 @@ import { contactMergeData, htmlToText, renderEmail, validateTemplate, type Templ
 import { FOUNDER_SELF_APPROVAL_ALLOWED } from "../../shared/auth.js";
 import { SUPPRESSION_REASON_LABELS, type CampaignReviewDto, type CampaignStatus } from "../../shared/types.js";
 import { getTransport, messageIdDomain } from "./mailer.js";
+import {
+  getMailboxCredentials,
+  getMailboxCredentialsByEmail,
+  getMailboxCredentialsForUser,
+  getPersonalMailboxCredentials,
+} from "./personal-mailbox.js";
 import { unsubscribeHeaders, unsubscribeUrl, withFooter } from "./unsubscribe.js";
 
 import { selectTemplateForRecipient, type EligibleTemplate, type SelectionRule } from "./template-selection.js";
 import { initializeRecipientStates } from "./sequence-service.js";
+import { downloadTemplateAttachment, storedAttachments, type StoredTemplateAttachment } from "./template-storage.js";
 
 type Tx = Prisma.TransactionClient;
 
-export function contentHash(parts: TemplateParts): string {
-  return crypto.createHash("sha256").update(JSON.stringify([parts.subject, parts.bodyHtml, parts.bodyText ?? ""])).digest("hex").slice(0, 16);
+export function contentHash(parts: TemplateParts, attachments: StoredTemplateAttachment[] = []): string {
+  return crypto.createHash("sha256").update(JSON.stringify([
+    parts.subject,
+    parts.bodyHtml,
+    parts.bodyText ?? "",
+    attachments.map(({ id, name, contentType, size }) => [id, name, contentType, size]),
+  ])).digest("hex").slice(0, 16);
 }
 
 export function multiTemplateContentHash(templates: EligibleTemplate[], rules: SelectionRule[] = [], overridesCount = 0): string {
   if (templates.length === 1 && rules.length === 0 && overridesCount === 0) {
     const t = templates[0]!;
-    return contentHash({ subject: t.subject, bodyHtml: t.bodyHtml, bodyText: t.bodyText });
+    return contentHash({ subject: t.subject, bodyHtml: t.bodyHtml, bodyText: t.bodyText }, t.attachments ?? []);
   }
-  const parts = templates.map((t) => [t.id, t.version, t.subject, t.bodyHtml, t.bodyText ?? "", t.isFallback ? 1 : 0]);
+  const parts = templates.map((t) => [
+    t.id, t.version, t.subject, t.bodyHtml, t.bodyText ?? "", t.isFallback ? 1 : 0,
+    (t.attachments ?? []).map(({ id, name, contentType, size }) => [id, name, contentType, size]),
+  ]);
   const ruleParts = rules.map((r) => [r.id, r.priority, r.templateId, r.hotelSegment ?? "", r.contactPersona ?? "", r.requiresVerified ? 1 : 0, r.minConfidence ?? 0, r.city ?? ""]);
   return crypto.createHash("sha256").update(JSON.stringify([parts, ruleParts, overridesCount])).digest("hex").slice(0, 16);
 }
@@ -69,6 +84,7 @@ interface ReadyRecipient {
   rendered: ReturnType<typeof renderEmail>;
   templateId: string;
   templateVersion: number;
+  attachments: StoredTemplateAttachment[];
   templateName: string;
   assignmentSource: "OVERRIDE" | "RULE" | "FALLBACK";
   assignmentReason: string;
@@ -101,6 +117,7 @@ export async function buildReview(campaignId: string, db: Tx | typeof prisma = p
         bodyHtml: ct.template.bodyHtml,
         bodyText: ct.template.bodyText,
         version: ct.template.version,
+        attachments: storedAttachments(ct.template.attachments),
         isFallback: ct.isFallback,
       }))
     : [
@@ -111,6 +128,7 @@ export async function buildReview(campaignId: string, db: Tx | typeof prisma = p
           bodyHtml: campaign.template.bodyHtml,
           bodyText: campaign.template.bodyText,
           version: campaign.template.version,
+          attachments: storedAttachments(campaign.template.attachments),
           isFallback: true,
         },
       ];
@@ -212,6 +230,7 @@ export async function buildReview(campaignId: string, db: Tx | typeof prisma = p
     let targetTemplateId = selection.templateId;
     let targetTemplateVersion = selection.template.version;
     let targetTemplateName = selection.templateName;
+    let targetAttachments = selection.template.attachments ?? [];
     let assignmentSource = selection.assignmentSource;
     let assignmentReason = selection.explanation;
     let isCustom = false;
@@ -230,6 +249,7 @@ export async function buildReview(campaignId: string, db: Tx | typeof prisma = p
         targetTemplateId = customOverride.template.id;
         targetTemplateVersion = customOverride.template.version;
         targetTemplateName = customOverride.template.name;
+        targetAttachments = storedAttachments(customOverride.template.attachments);
       }
     } else {
       const parts: TemplateParts = {
@@ -261,6 +281,7 @@ export async function buildReview(campaignId: string, db: Tx | typeof prisma = p
       rendered,
       templateId: targetTemplateId,
       templateVersion: targetTemplateVersion,
+      attachments: targetAttachments,
       templateName: targetTemplateName,
       assignmentSource,
       assignmentReason,
@@ -288,6 +309,7 @@ export async function buildReview(campaignId: string, db: Tx | typeof prisma = p
     templateName: r.templateName,
     assignmentSource: r.assignmentSource,
     assignmentReason: r.assignmentReason,
+    attachments: r.attachments.map(({ name }) => name),
     isCustom: r.isCustom,
   }));
 
@@ -309,6 +331,7 @@ export async function buildReview(campaignId: string, db: Tx | typeof prisma = p
       templateName: defaultTemplate.name,
       assignmentSource: "FALLBACK",
       assignmentReason: "Sample problem render",
+      attachments: (defaultTemplate.attachments ?? []).map(({ name }) => name),
     });
   }
   return work;
@@ -357,6 +380,25 @@ export async function withdrawApproval(req: Request, id: string, note?: string) 
 
 export async function approveCampaign(req: Request, id: string, seen: { contentHash: string; ready: number }) {
   const user = req.user!;
+  const campaignOwner = await prisma.campaign.findUnique({
+    where: { id },
+    select: { createdById: true, mailboxId: true, fromEmail: true },
+  });
+  if (!campaignOwner) throw AppError.notFound("CAMPAIGN_NOT_FOUND", "That campaign no longer exists.");
+
+  let mailbox = null;
+  if (campaignOwner.mailboxId) {
+    mailbox = await getMailboxCredentials(campaignOwner.mailboxId);
+  } else if (campaignOwner.fromEmail) {
+    mailbox = await getMailboxCredentialsByEmail(campaignOwner.fromEmail);
+  }
+  if (!mailbox && campaignOwner.createdById) {
+    mailbox = await getPersonalMailboxCredentials(campaignOwner.createdById);
+  }
+  if (!mailbox && !smtpConfigured) {
+    throw AppError.conflict("MAILBOX_NOT_CONFIGURED", "A connected SpaceMail mailbox is required before approval.");
+  }
+  const domain = messageIdDomain(mailbox?.email);
   await prisma.$transaction(
     async (tx) => {
       const campaign = await getCampaignOr404(id, tx);
@@ -380,6 +422,7 @@ export async function approveCampaign(req: Request, id: string, seen: { contentH
         {
           status: "APPROVED",
           approvedById: user.id,
+          approvalRole: user.role,
           approvedAt: new Date(),
           subject: campaign.template.subject,
           bodyHtml: campaign.template.bodyHtml,
@@ -389,13 +432,14 @@ export async function approveCampaign(req: Request, id: string, seen: { contentH
         "This campaign isn't waiting for approval."
       );
 
-      const domain = messageIdDomain();
       const rows: Prisma.SendCreateManyInput[] = work.ready.map((r) => {
         const sendId = crypto.randomUUID();
         const content = withFooter(r.rendered.html, r.rendered.text, unsubscribeUrl(sendId), campaign.fromName);
         return {
           id: sendId,
           campaignId: id,
+          mailboxId: mailbox?.accountId ?? campaignOwner.mailboxId ?? null,
+          sentByUserId: campaignOwner.createdById ?? null,
           contactId: r.contactId,
           email: r.email,
           subject: r.rendered.subject,
@@ -409,6 +453,7 @@ export async function approveCampaign(req: Request, id: string, seen: { contentH
           stepIndex: 0,
           scheduledFor: new Date(),
           approvedAt: new Date(),
+          attachments: r.attachments,
         };
       });
       for (const s of work.skipped) {
@@ -428,6 +473,7 @@ export async function approveCampaign(req: Request, id: string, seen: { contentH
           templateVersion: s.templateVersion ?? null,
           assignmentReason: s.assignmentReason ?? null,
           stepIndex: 0,
+          attachments: [],
         });
       }
       for (let i = 0; i < rows.length; i += 1000) {
@@ -446,9 +492,30 @@ export async function approveCampaign(req: Request, id: string, seen: { contentH
 // Sending control
 // ---------------------------------------------------------------------------
 
+async function requireCampaignMailbox(id: string): Promise<void> {
+  const campaign = await prisma.campaign.findUnique({
+    where: { id },
+    select: { createdById: true, mailboxId: true, fromEmail: true },
+  });
+  if (!campaign) throw AppError.notFound("CAMPAIGN_NOT_FOUND", "That campaign no longer exists.");
+  let mailbox = null;
+  if (campaign.mailboxId) {
+    mailbox = await getMailboxCredentials(campaign.mailboxId);
+  } else if (campaign.fromEmail) {
+    mailbox = await getMailboxCredentialsByEmail(campaign.fromEmail);
+  }
+  if (!mailbox && campaign.createdById) {
+    mailbox = await getPersonalMailboxCredentials(campaign.createdById);
+  }
+  if (!mailbox && !smtpConfigured) {
+    throw AppError.conflict("MAILBOX_NOT_CONFIGURED", "A connected SpaceMail mailbox is required before sending.");
+  }
+}
+
 export async function startCampaign(req: Request, id: string) {
   const blocker = liveSendingBlocker();
   if (blocker) throw AppError.conflict("LIVE_SENDING_LOCKED", blocker);
+  await requireCampaignMailbox(id);
   await prisma.$transaction(async (tx) => {
     await transition(tx, id, ["APPROVED"], { status: "SENDING", startedAt: new Date(), pausedReason: null }, "Only approved campaigns can be started.");
     await audit(req, { action: "campaign.start", entityType: "Campaign", entityId: id }, tx);
@@ -465,6 +532,7 @@ export async function pauseCampaign(req: Request | null, id: string, reason?: st
 export async function resumeCampaign(req: Request, id: string) {
   const blocker = liveSendingBlocker();
   if (blocker) throw AppError.conflict("LIVE_SENDING_LOCKED", blocker);
+  await requireCampaignMailbox(id);
   await prisma.$transaction(async (tx) => {
     await transition(tx, id, ["PAUSED"], { status: "SENDING", pausedReason: null }, "Only a paused campaign can be resumed.");
     await audit(req, { action: "campaign.resume", entityType: "Campaign", entityId: id }, tx);
@@ -488,6 +556,7 @@ export async function retryFailed(req: Request, id: string) {
   if (campaign.status === "COMPLETED") {
     const blocker = liveSendingBlocker();
     if (blocker) throw AppError.conflict("LIVE_SENDING_LOCKED", blocker);
+    await requireCampaignMailbox(id);
   }
   return prisma.$transaction(async (tx) => {
     const requeued = await tx.send.updateMany({ where: { campaignId: id, status: "FAILED" }, data: { status: "PENDING", lastError: null } });
@@ -552,8 +621,6 @@ export async function sendTest(
   contactId?: string,
   options?: { dryRun?: boolean }
 ) {
-  if (!smtpConfigured) throw AppError.conflict("MAILBOX_NOT_CONFIGURED", "The sending mailbox isn't configured on the server.");
-
   const normalizedTo = [...new Set(to.map((e) => e.trim().toLowerCase()))];
   const disallowed = normalizedTo.filter((e) => !isPermittedTestRecipient(e));
   if (disallowed.length > 0) {
@@ -574,6 +641,23 @@ export async function sendTest(
   const suppressedMap = new Map(activeSuppressions.map((s) => [s.email.toLowerCase(), s.reason]));
 
   const campaign = await getCampaignOr404(id);
+  let mailbox = null;
+  if (campaign.mailboxId) {
+    mailbox = await getMailboxCredentials(campaign.mailboxId);
+  } else if (campaign.fromEmail) {
+    mailbox = await getMailboxCredentialsByEmail(campaign.fromEmail);
+  }
+  // If campaign has no mailbox bound yet, resolve the current acting user's mailbox (e.g. Frank sending test)
+  if (!mailbox && req.user) {
+    mailbox = await getMailboxCredentialsForUser(req.user.id);
+  }
+  // Then check campaign creator's mailbox
+  if (!mailbox && campaign.createdById) {
+    mailbox = await getPersonalMailboxCredentials(campaign.createdById);
+  }
+  if (!mailbox && !smtpConfigured) {
+    throw AppError.conflict("MAILBOX_NOT_CONFIGURED", "A connected SpaceMail mailbox is required first.");
+  }
 
   const membership = await prisma.listMembership.findFirst({
     where: { contactListId: campaign.contactListId, ...(contactId ? { contactId } : {}) },
@@ -591,6 +675,7 @@ export async function sendTest(
         bodyHtml: ct.template.bodyHtml,
         bodyText: ct.template.bodyText,
         version: ct.template.version,
+        attachments: storedAttachments(ct.template.attachments),
         isFallback: ct.isFallback,
         priority: ct.priority,
       }))
@@ -602,6 +687,7 @@ export async function sendTest(
           bodyHtml: campaign.bodyHtml || campaign.template.bodyHtml,
           bodyText: campaign.bodyText || campaign.template.bodyText,
           version: campaign.template.version,
+          attachments: storedAttachments(campaign.template.attachments),
           isFallback: true,
           priority: 0,
         },
@@ -614,6 +700,7 @@ export async function sendTest(
     bodyHtml: string;
     bodyText?: string | null;
     version: number;
+    attachments?: StoredTemplateAttachment[];
   } = eligibleTemplates[0]!;
   let assignmentExplanation = "Default template";
   let assignmentSource: "RULE" | "OVERRIDE" | "FALLBACK" = "FALLBACK";
@@ -723,7 +810,22 @@ export async function sendTest(
   }
 
   // Live test send
-  const transport = getTransport();
+  const transport = getTransport(mailbox ?? undefined);
+  let testAttachments: { filename: string; contentType: string; content: Buffer }[] = [];
+  if (selectedTemplate.attachments?.length) {
+    try {
+      testAttachments = await Promise.all(
+        selectedTemplate.attachments.map(async (a) => ({
+          filename: a.name,
+          contentType: a.contentType,
+          content: await downloadTemplateAttachment(a.storageKey),
+        }))
+      );
+    } catch (attErr) {
+      console.warn("[campaign] could not load template attachments for test send:", (attErr as Error).message);
+    }
+  }
+
   for (const address of normalizedTo) {
     if (suppressedMap.has(address)) {
       results.push({ to: address, ok: false, suppressed: true, error: `Recipient is suppressed (${suppressedMap.get(address)})` });
@@ -738,6 +840,7 @@ export async function sendTest(
         fromName: campaign.fromName,
         fromEmail: campaign.fromEmail,
         replyTo: campaign.replyTo,
+        attachments: testAttachments.length > 0 ? testAttachments : undefined,
         headers: { "X-FR-Test": "true", ...unsubscribeHeaders(unsubscribeUrl("test-preview")) },
       });
       results.push({ to: address, ok: true });

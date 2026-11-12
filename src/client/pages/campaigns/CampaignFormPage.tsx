@@ -30,7 +30,7 @@ export function CampaignFormPage() {
       <PageHeader
         back={isNew ? { to: "/campaigns", label: "Campaigns" } : { to: `/campaigns/${id}`, label: existing.data?.data.name ?? "Campaign" }}
         title={isNew ? "New campaign" : `Edit ${existing.data?.data.name ?? "campaign"}`}
-        description="Select multiple templates, configure segment targeting rules, and review recipient distribution before approval."
+        description="Choose contacts, build your email and sequence, review recipients, then continue to campaign approval."
       />
       <div className="max-w-5xl">
         <AdvancedCampaignStudio campaignId={id} />

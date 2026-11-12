@@ -5,6 +5,8 @@ import { requirePermission } from "../middleware/session.js";
 import { ok } from "../lib/http.js";
 import { getCampaignAnalytics, getWorkspaceTemplateAnalytics } from "../services/analytics-service.js";
 import { IdSchema, TemplateAnalyticsQuerySchema } from "../../shared/types.js";
+import prisma from "../db.js";
+import { assertTemplateAccessible } from "../lib/resource-visibility.js";
 
 const router = Router();
 
@@ -13,7 +15,11 @@ router.get(
   requirePermission("templates.view"),
   asyncHandler(async (req, res) => {
     const query = TemplateAnalyticsQuerySchema.parse(req.query);
-    const data = await getWorkspaceTemplateAnalytics(query);
+    if (query.templateId) {
+      const template = await prisma.template.findUnique({ where: { id: query.templateId } });
+      assertTemplateAccessible(template, req.user!);
+    }
+    const data = await getWorkspaceTemplateAnalytics(req.user!.id, query);
     ok(res, data);
   })
 );

@@ -168,6 +168,7 @@ export function toSessionUser(user: {
   status: SessionUser["status"];
   senderName?: string | null;
   sendingEmail?: string | null;
+  canSendWithoutApproval?: boolean | null;
 }): SessionUser {
   return {
     id: user.id,
@@ -177,6 +178,7 @@ export function toSessionUser(user: {
     status: user.status,
     senderName: user.senderName ?? null,
     sendingEmail: user.sendingEmail ?? null,
+    canSendWithoutApproval: Boolean(user.canSendWithoutApproval),
   };
 }
 

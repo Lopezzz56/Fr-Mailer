@@ -1,6 +1,6 @@
 // FocusRealm Mail Merge — server entry: HTTP + sending worker + inbox monitor
 import "dotenv/config";
-import { env, imapConfigured, liveSendingBlocker, smtpConfigured } from "./config.js";
+import { env, liveSendingBlocker, smtpConfigured } from "./config.js";
 import { createApp } from "./app.js";
 import prisma from "./db.js";
 import { recoverInterruptedSends, SendWorker } from "./services/send-worker.js";
@@ -20,7 +20,7 @@ async function main() {
 
   const server = createApp().listen(env.PORT, env.HOST, () => {
     console.log(`FocusRealm Mail Merge API on http://${env.HOST}:${env.PORT} (${env.NODE_ENV})`);
-    console.log(`  Mailbox: ${smtpConfigured ? env.SMTP_FROM_EMAIL : "not configured"} · Live sending: ${liveSendingBlocker() ? "off" : "on"} · Inbox monitor: ${imapConfigured && env.IMAP_POLL_ENABLED ? "on" : "off"}`);
+    console.log(`  System mailbox: ${smtpConfigured ? env.SMTP_FROM_EMAIL : "not configured"} · Live sending: ${liveSendingBlocker() ? "off" : "on"} · Inbox monitor: ${env.IMAP_POLL_ENABLED ? "on" : "off"}`);
   });
   server.on("error", (err: NodeJS.ErrnoException) => {
     if (err.code === "EADDRINUSE") {

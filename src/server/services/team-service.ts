@@ -58,13 +58,29 @@ async function activeFounderCount(excludingUserId?: string) {
   return prisma.user.count({ where: { role: "FOUNDER", status: "ACTIVE", ...(excludingUserId ? { id: { not: excludingUserId } } : {}) } });
 }
 
-export async function inviteUser(req: Request, input: { email: string; name: string; role: UserRole; sendEmail: boolean }) {
+export async function inviteUser(req: Request, input: { email: string; name: string; role: UserRole; canSendWithoutApproval?: boolean; sendEmail: boolean }) {
   const existing = await prisma.user.findUnique({ where: { email: input.email } });
   if (existing && existing.status !== "INVITED") throw AppError.conflict("DUPLICATE", "Someone on the team already uses this email.");
 
   const user = existing
-    ? await prisma.user.update({ where: { id: existing.id }, data: { name: input.name, role: input.role } })
-    : await prisma.user.create({ data: { email: input.email, name: input.name, role: input.role, status: "INVITED", invitedById: req.user!.id } });
+    ? await prisma.user.update({
+        where: { id: existing.id },
+        data: {
+          name: input.name,
+          role: input.role,
+          canSendWithoutApproval: input.canSendWithoutApproval ?? false,
+        },
+      })
+    : await prisma.user.create({
+        data: {
+          email: input.email,
+          name: input.name,
+          role: input.role,
+          status: "INVITED",
+          canSendWithoutApproval: input.canSendWithoutApproval ?? false,
+          invitedById: req.user!.id,
+        },
+      });
 
   const token = await createAuthToken(user.id, "INVITE", INVITE_TTL_HOURS);
   const url = link(req, "/accept-invite", token);
@@ -78,11 +94,20 @@ export async function inviteUser(req: Request, input: { email: string; name: str
       )
     : false;
 
-  await audit(req, { action: "team.invite", entityType: "User", entityId: user.id, metadata: { email: user.email, role: input.role, emailed } });
+  await audit(req, {
+    action: "team.invite",
+    entityType: "User",
+    entityId: user.id,
+    metadata: { email: user.email, role: input.role, canSendWithoutApproval: input.canSendWithoutApproval, emailed },
+  });
   return { user, inviteUrl: url, emailed };
 }
 
-export async function updateUser(req: Request, id: string, input: { name?: string; role?: UserRole; status?: "ACTIVE" | "DISABLED" }) {
+export async function updateUser(
+  req: Request,
+  id: string,
+  input: { name?: string; role?: UserRole; status?: "ACTIVE" | "DISABLED"; canSendWithoutApproval?: boolean }
+) {
   const user = await prisma.user.findUnique({ where: { id } });
   if (!user) throw AppError.notFound("USER_NOT_FOUND", "That person isn't on the team.");
 
@@ -97,7 +122,12 @@ export async function updateUser(req: Request, id: string, input: { name?: strin
 
   const updated = await prisma.user.update({
     where: { id },
-    data: { name: input.name, role: input.role, status: input.status },
+    data: {
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.role !== undefined ? { role: input.role } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.canSendWithoutApproval !== undefined ? { canSendWithoutApproval: input.canSendWithoutApproval } : {}),
+    },
   });
   if (input.status === "DISABLED" || (input.role && input.role !== user.role)) await revokeAllSessions(id);
 
@@ -105,7 +135,12 @@ export async function updateUser(req: Request, id: string, input: { name?: strin
     action: "team.update",
     entityType: "User",
     entityId: id,
-    metadata: { email: user.email, ...(input.role && input.role !== user.role ? { role: input.role } : {}), ...(input.status ? { status: input.status } : {}) },
+    metadata: {
+      email: user.email,
+      ...(input.role && input.role !== user.role ? { role: input.role } : {}),
+      ...(input.status ? { status: input.status } : {}),
+      ...(input.canSendWithoutApproval !== undefined ? { canSendWithoutApproval: input.canSendWithoutApproval } : {}),
+    },
   });
   return updated;
 }

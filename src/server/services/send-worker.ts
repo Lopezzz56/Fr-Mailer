@@ -5,14 +5,22 @@
 // - messages left mid-handoff become UNKNOWN for a person to resolve (never auto-resent)
 // Runs either as a long-lived loop (self-hosted: start/stop) or in bounded bursts (serverless: runFor).
 import crypto from "crypto";
+import { Prisma } from "@prisma/client";
 import prisma from "../db.js";
 import { env, liveSendingBlocker } from "../config.js";
+import { AppError } from "../middleware/error-handler.js";
 import { getTransport } from "./mailer.js";
 import { classifySmtpError } from "./smtp-outcome.js";
 import { unsubscribeHeaders, unsubscribeUrl } from "./unsubscribe.js";
 import { pauseCampaign } from "./campaign-service.js";
 import { isInboxMonitoringSafe } from "./inbox-monitor.js";
 import { onStepSent } from "./sequence-service.js";
+import {
+  getMailboxCredentials,
+  getMailboxCredentialsByEmail,
+  getPersonalMailboxCredentials,
+} from "./personal-mailbox.js";
+import { downloadTemplateAttachment, storedAttachments } from "./template-storage.js";
 
 const IDLE_DELAY_MS = 3000;
 
@@ -26,6 +34,7 @@ interface ClaimedSend {
   messageId: string;
   stepIndex: number;
   inReplyToId: string | null;
+  attachments: unknown;
 }
 
 export async function sentInLast24h(): Promise<number> {
@@ -103,7 +112,7 @@ async function claimNext(campaignId: string): Promise<ClaimedSend | null> {
         ORDER BY "stepIndex" ASC, "scheduledFor" ASC NULLS FIRST, "createdAt" ASC, id
         LIMIT 1
         FOR UPDATE SKIP LOCKED)
-    RETURNING id, "campaignId", email, subject, html, text, "messageId", "stepIndex", "inReplyToId"`;
+    RETURNING id, "campaignId", email, subject, html, text, "messageId", "stepIndex", "inReplyToId", attachments`;
   return rows[0] ?? null;
 }
 
@@ -126,7 +135,14 @@ async function finishIfDone(campaignId: string) {
 }
 
 /** Sends one message for the campaign if possible. Returns true if it did any work. */
-export async function sendOne(campaign: { id: string; fromName: string; fromEmail?: string | null; replyTo: string | null }): Promise<boolean> {
+export async function sendOne(campaign: {
+  id: string;
+  fromName: string;
+  fromEmail?: string | null;
+  replyTo: string | null;
+  createdById?: string | null;
+  mailboxId?: string | null;
+}): Promise<boolean> {
   const send = await claimNext(campaign.id);
   if (!send) {
     await finishIfDone(campaign.id);
@@ -176,7 +192,7 @@ export async function sendOne(campaign: { id: string; fromName: string; fromEmai
     }
 
     // 3. Inbox monitoring health check: defer if monitoring is unhealthy or stale
-    const inboxHealth = await isInboxMonitoringSafe();
+    const inboxHealth = await isInboxMonitoringSafe(campaign.createdById ?? undefined);
     if (!inboxHealth.safe) {
       await prisma.send.update({
         where: { id: send.id },
@@ -184,6 +200,66 @@ export async function sendOne(campaign: { id: string; fromName: string; fromEmai
       });
       return false;
     }
+  }
+
+  let mailbox = null;
+  try {
+    if (campaign.mailboxId) {
+      mailbox = await getMailboxCredentials(campaign.mailboxId, campaign.fromName);
+    } else if (campaign.fromEmail) {
+      mailbox = await getMailboxCredentialsByEmail(campaign.fromEmail, campaign.fromName);
+    }
+    if (!mailbox && campaign.createdById) {
+      mailbox = await getPersonalMailboxCredentials(campaign.createdById);
+    }
+  } catch (error) {
+    await prisma.send.update({ where: { id: send.id }, data: { status: "PENDING", attempts: { decrement: 1 } } });
+    if (error instanceof Prisma.PrismaClientKnownRequestError && ["P2021", "P2022"].includes(error.code)) {
+      console.error(`[worker] mailbox database schema is missing for campaign ${campaign.id} (${error.code})`);
+      await pauseCampaign(
+        null,
+        campaign.id,
+        "The mailbox database migration is missing. Deploy the latest database migrations, then resume this campaign."
+      );
+    } else if (error instanceof AppError) {
+      await pauseCampaign(null, campaign.id, error.message);
+    } else {
+      console.error(`[worker] couldn't load the mailbox for campaign ${campaign.id}:`, error);
+      await pauseCampaign(
+        null,
+        campaign.id,
+        "The campaign mailbox could not be loaded. Check the mailbox connection and database, then resume this campaign."
+      );
+    }
+    return true;
+  }
+  if (!mailbox && !env.SMTP_USER) {
+    await prisma.send.update({ where: { id: send.id }, data: { status: "PENDING", attempts: { decrement: 1 } } });
+    await pauseCampaign(null, campaign.id, "The campaign's authorized SpaceMail mailbox is not connected or accessible. Reconnect it in Settings before resuming.");
+    return true;
+  }
+
+  let attachments: { filename: string; contentType: string; content: Buffer }[];
+  try {
+    attachments = await Promise.all(
+      storedAttachments(send.attachments).map(async (attachment) => ({
+        filename: attachment.name,
+        contentType: attachment.contentType,
+        content: await downloadTemplateAttachment(attachment.storageKey),
+      }))
+    );
+  } catch (error) {
+    console.error(`[worker] couldn't load attachments for send ${send.id}:`, error instanceof Error ? error.message : "unknown error");
+    await prisma.send.update({
+      where: { id: send.id },
+      data: {
+        status: "PENDING",
+        attempts: { decrement: 1 },
+        lastError: "A template attachment is unavailable. The campaign was paused before sending.",
+      },
+    });
+    await pauseCampaign(null, campaign.id, "A campaign attachment could not be loaded from storage. Check Supabase Storage, then resume.");
+    return true;
   }
 
   const url = unsubscribeUrl(send.id);
@@ -197,7 +273,7 @@ export async function sendOne(campaign: { id: string; fromName: string; fromEmai
   }
 
   try {
-    await getTransport().send({
+    await getTransport(mailbox ?? undefined).send({
       to: send.email,
       subject: send.subject,
       html: send.html,
@@ -207,6 +283,7 @@ export async function sendOne(campaign: { id: string; fromName: string; fromEmai
       fromEmail: campaign.fromEmail,
       replyTo: campaign.replyTo,
       headers,
+      attachments,
     });
   } catch (err) {
     const outcome = classifySmtpError(err);
@@ -242,7 +319,16 @@ export async function sendOne(campaign: { id: string; fromName: string; fromEmai
   }
 
   // Outside the catch: if this write fails the row stays CLAIMED -> UNKNOWN on next boot, never resent
-  await prisma.send.update({ where: { id: send.id }, data: { status: "SENT", sentAt: new Date(), lastError: null } });
+  await prisma.send.update({
+    where: { id: send.id },
+    data: {
+      status: "SENT",
+      sentAt: new Date(),
+      lastError: null,
+      mailboxId: mailbox?.accountId ?? campaign.mailboxId ?? null,
+      sentByUserId: campaign.createdById ?? null,
+    },
+  });
   await onStepSent(send.id).catch((err) => {
     console.error(`[worker] onStepSent failed for send ${send.id}:`, (err as Error).message);
   });
@@ -338,7 +424,7 @@ export class SendWorker {
   async tick(): Promise<"worked" | "waiting" | "limit" | "idle"> {
     const campaigns = await prisma.campaign.findMany({
       where: { status: "SENDING" },
-      select: { id: true, fromName: true, fromEmail: true, replyTo: true, sendRatePerMinute: true },
+      select: { id: true, fromName: true, fromEmail: true, replyTo: true, sendRatePerMinute: true, createdById: true, mailboxId: true },
       orderBy: { startedAt: "asc" },
     });
     if (!campaigns.length) return "idle";

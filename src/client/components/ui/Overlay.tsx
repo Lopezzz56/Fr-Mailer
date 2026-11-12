@@ -91,17 +91,17 @@ export function Dialog({
   if (!open) return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-modal flex items-start justify-center overflow-y-auto bg-navy/40 p-4 pt-[10vh] animate-fade-in" onMouseDown={(e) => dismissable && e.target === e.currentTarget && onClose()}>
+    <div className="fixed inset-0 z-modal flex items-center sm:items-start justify-center overflow-y-auto bg-black/50 backdrop-blur-xs p-3 sm:p-4 sm:pt-[10vh] animate-fade-in" onMouseDown={(e) => dismissable && e.target === e.currentTarget && onClose()}>
       <div
         ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className={cn("w-full rounded-xl border border-line bg-surface shadow-pop animate-pop-in", size === "sm" && "max-w-md", size === "md" && "max-w-lg", size === "lg" && "max-w-2xl")}
+        className={cn("w-full max-h-[92vh] sm:max-h-[85vh] flex flex-col rounded-2xl border border-line bg-surface shadow-pop animate-pop-in my-auto sm:my-0", size === "sm" && "max-w-md", size === "md" && "max-w-lg", size === "lg" && "max-w-2xl")}
       >
-        <header className="flex items-start justify-between gap-4 px-5 pt-5">
+        <header className="flex shrink-0 items-start justify-between gap-4 px-4 pt-5 sm:px-6 sm:pt-6">
           <div>
-            <h2 id={titleId} className="text-base font-semibold">
+            <h2 id={titleId} className="text-base font-semibold tracking-tight text-ink">
               {title}
             </h2>
             {description && <p className="mt-1 text-[13px] leading-5 text-ink-subtle">{description}</p>}
@@ -112,8 +112,12 @@ export function Dialog({
             </IconButton>
           )}
         </header>
-        {children && <div className="px-5 pb-1 pt-4">{children}</div>}
-        {footer && <footer className="mt-4 flex justify-end gap-2 border-t border-line bg-surface-muted px-5 py-3.5 rounded-b-xl">{footer}</footer>}
+        {children && <div className="flex-1 overflow-y-auto px-4 pb-2 pt-3 sm:px-6 sm:pt-4">{children}</div>}
+        {footer && (
+          <footer className="mt-3 sm:mt-5 flex shrink-0 flex-col-reverse sm:flex-row justify-end gap-2 sm:gap-2.5 border-t border-line bg-surface-muted px-4 py-3 sm:px-6 sm:py-4 rounded-b-2xl">
+            {footer}
+          </footer>
+        )}
       </div>
     </div>,
     document.body
@@ -172,15 +176,15 @@ export function Drawer({ open, onClose, title, subtitle, children, footer, width
   if (!open) return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-drawer flex justify-end bg-navy/30 animate-fade-in" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="fixed inset-0 z-drawer flex justify-end bg-black/50 backdrop-blur-xs animate-fade-in" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div
         ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className={cn("flex h-full w-full flex-col border-l border-line bg-surface shadow-pop animate-slide-in", width === "md" ? "max-w-lg" : "max-w-2xl")}
+        className={cn("flex h-full w-full flex-col border-l border-line bg-surface shadow-pop animate-slide-in", width === "md" ? "max-w-full sm:max-w-lg" : "max-w-full sm:max-w-2xl")}
       >
-        <header className="flex items-start justify-between gap-4 border-b border-line px-6 py-4">
+        <header className="flex items-start justify-between gap-4 border-b border-line px-4 py-3.5 sm:px-6 sm:py-4">
           <div className="min-w-0">
             <h2 id={titleId} className="truncate text-base font-semibold">
               {title}
@@ -191,8 +195,8 @@ export function Drawer({ open, onClose, title, subtitle, children, footer, width
             <X className="h-4 w-4" />
           </IconButton>
         </header>
-        <div className="flex-1 overflow-y-auto px-6 py-5">{children}</div>
-        {footer && <footer className="flex justify-end gap-2 border-t border-line bg-surface-muted px-6 py-3.5">{footer}</footer>}
+        <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5 pb-24 sm:pb-6">{children}</div>
+        {footer && <footer className="flex flex-col-reverse sm:flex-row justify-end gap-2 sm:gap-2.5 border-t border-line bg-surface-muted px-4 py-3 sm:px-6 sm:py-3.5">{footer}</footer>}
       </div>
     </div>,
     document.body

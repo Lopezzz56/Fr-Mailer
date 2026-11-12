@@ -6,6 +6,12 @@ import type { Prisma } from "@prisma/client";
 import prisma from "../db.js";
 import { env, imapConfigured } from "../config.js";
 import { messageIdDomain } from "./mailer.js";
+import {
+  getMailboxCredentials,
+  getMailboxCredentialsForUser,
+  getPersonalMailboxCredentials,
+  listActivePersonalMailboxes,
+} from "./personal-mailbox.js";
 import { classifyIncoming, classifyReplySentiment, type IncomingMessage } from "./inbox-classifier.js";
 import { stopSequenceForRecipient } from "./sequence-service.js";
 
@@ -29,16 +35,21 @@ export interface ImapState {
   }[];
 }
 
-export async function getImapState(): Promise<ImapState> {
-  const row = await prisma.setting.findUnique({ where: { key: STATE_KEY } });
+function stateKey(userId?: string): string {
+  return userId ? `${STATE_KEY}.${userId}` : STATE_KEY;
+}
+
+export async function getImapState(userId?: string): Promise<ImapState> {
+  const row = await prisma.setting.findUnique({ where: { key: stateKey(userId) } });
   return (row?.value as ImapState | undefined) ?? {};
 }
 
-async function saveImapState(state: ImapState) {
+async function saveImapState(state: ImapState, userId?: string) {
+  const key = stateKey(userId);
   await prisma.setting.upsert({
-    where: { key: STATE_KEY },
+    where: { key },
     update: { value: state as Prisma.InputJsonValue },
-    create: { key: STATE_KEY, value: state as Prisma.InputJsonValue },
+    create: { key, value: state as Prisma.InputJsonValue },
   });
 }
 
@@ -59,22 +70,31 @@ function toIncoming(mail: ParsedMail): IncomingMessage {
 }
 
 /** Applies one classified message. Idempotent: re-processing the same message changes nothing. */
-async function applyClassification(message: IncomingMessage, domain: string): Promise<"bounce" | "reply" | null> {
+async function applyClassification(message: IncomingMessage, domain: string, userId?: string): Promise<"bounce" | "reply" | null> {
   const result = classifyIncoming(message, domain);
   if (result.type === "other" || result.type === "auto_reply") return null;
 
-  const sends = await prisma.send.findMany({ where: { messageId: { in: result.messageIds } } });
+  const campaignScope = userId ? { campaign: { createdById: userId } } : {};
+  const sends = await prisma.send.findMany({
+    where: { messageId: { in: result.messageIds }, ...campaignScope },
+  });
   let targets = sends;
   if (!targets.length) {
     if (result.type === "bounce" && result.recipient) {
       // Some servers drop original headers; fall back to most recent send to that address
-      const recent = await prisma.send.findFirst({ where: { email: result.recipient, status: "SENT" }, orderBy: { sentAt: "desc" } });
+      const recent = await prisma.send.findFirst({
+        where: { email: result.recipient, status: "SENT", ...campaignScope },
+        orderBy: { sentAt: "desc" },
+      });
       targets = recent ? [recent] : [];
     } else if (result.type === "reply") {
       // Extract from email from header
       const fromEmail = message.from.match(/<([^>]+)>/)?.[1] || message.from.trim();
       if (fromEmail) {
-        const recent = await prisma.send.findFirst({ where: { email: fromEmail, status: "SENT" }, orderBy: { sentAt: "desc" } });
+        const recent = await prisma.send.findFirst({
+          where: { email: fromEmail, status: "SENT", ...campaignScope },
+          orderBy: { sentAt: "desc" },
+        });
         if (recent) targets = [recent];
       }
     }
@@ -83,7 +103,7 @@ async function applyClassification(message: IncomingMessage, domain: string): Pr
   // If a reply still cannot be matched to any send record, record as unmatched
   if (!targets.length && result.type === "reply") {
     const sentiment = classifyReplySentiment(result.snippet || message.text, message.subject);
-    const state = await getImapState();
+    const state = await getImapState(userId);
     const unmatched = state.unmatchedReplies ?? [];
     unmatched.unshift({
       from: message.from,
@@ -93,7 +113,7 @@ async function applyClassification(message: IncomingMessage, domain: string): Pr
       detectedSentiment: sentiment.sentiment,
     });
     // Keep last 50 unmatched replies
-    await saveImapState({ ...state, unmatchedReplies: unmatched.slice(0, 50) });
+    await saveImapState({ ...state, unmatchedReplies: unmatched.slice(0, 50) }, userId);
     return null;
   }
 
@@ -152,9 +172,19 @@ async function applyClassification(message: IncomingMessage, domain: string): Pr
   return targets.length ? result.type : null;
 }
 
-export async function isInboxMonitoringSafe(): Promise<{ safe: boolean; reason?: string }> {
-  if (!imapConfigured || !env.IMAP_POLL_ENABLED) return { safe: true };
-  const state = await getImapState();
+export async function isInboxMonitoringSafe(userId?: string): Promise<{ safe: boolean; reason?: string }> {
+  if (!env.IMAP_POLL_ENABLED) return { safe: true };
+  if (userId) {
+    try {
+      if (!(await getPersonalMailboxCredentials(userId))) {
+        return { safe: false, reason: "The campaign owner has not connected a SpaceMail mailbox." };
+      }
+    } catch (error) {
+      return { safe: false, reason: "The campaign owner mailbox credentials couldn't be read. Reconnect the mailbox in Settings." };
+    }
+  }
+  if (!userId && !imapConfigured) return { safe: true };
+  const state = await getImapState(userId);
   if (state.lastError) {
     return { safe: false, reason: `Inbox monitoring error: ${state.lastError}` };
   }
@@ -169,15 +199,26 @@ export async function isInboxMonitoringSafe(): Promise<{ safe: boolean; reason?:
   return { safe: true };
 }
 
-export async function checkInbox(): Promise<ImapState> {
-  if (!imapConfigured) throw new Error("IMAP isn't configured.");
-  const state = await getImapState();
-  const domain = messageIdDomain();
+export async function checkInbox(mailboxIdOrUserId?: string): Promise<ImapState> {
+  let personalMailbox = null;
+  if (mailboxIdOrUserId) {
+    personalMailbox = await getMailboxCredentials(mailboxIdOrUserId);
+    if (!personalMailbox) {
+      personalMailbox = await getMailboxCredentialsForUser(mailboxIdOrUserId);
+    }
+  }
+  if (mailboxIdOrUserId && !personalMailbox) throw new Error("Connect your SpaceMail mailbox first.");
+  if (!personalMailbox && !imapConfigured) throw new Error("IMAP isn't configured.");
+  const state = await getImapState(mailboxIdOrUserId);
+  const mailboxEmail = personalMailbox?.email || env.IMAP_USER || env.SMTP_USER || env.SMTP_FROM_EMAIL;
+  const domain = messageIdDomain(mailboxEmail);
   const client = new ImapFlow({
-    host: env.IMAP_HOST!,
-    port: env.IMAP_PORT,
+    host: personalMailbox?.imapHost || env.IMAP_HOST!,
+    port: personalMailbox?.imapPort || env.IMAP_PORT,
     secure: true,
-    auth: { user: env.IMAP_USER!, pass: env.IMAP_PASS! },
+    auth: personalMailbox
+      ? { user: personalMailbox.email, pass: personalMailbox.password }
+      : { user: env.IMAP_USER!, pass: env.IMAP_PASS! },
     logger: false,
   });
 
@@ -198,7 +239,7 @@ export async function checkInbox(): Promise<ImapState> {
     for (const uid of uids) {
       const msg = await client.fetchOne(String(uid), { source: true, size: true }, { uid: true });
       if (msg && msg.source && (msg.size ?? 0) <= MAX_MESSAGE_BYTES) {
-        const outcome = await applyClassification(toIncoming(await simpleParser(msg.source)), domain);
+        const outcome = await applyClassification(toIncoming(await simpleParser(msg.source)), domain, mailboxIdOrUserId);
         if (outcome === "bounce") bounces++;
         if (outcome === "reply") replies++;
       }
@@ -212,14 +253,69 @@ export async function checkInbox(): Promise<ImapState> {
       lastError: null,
       processed: { bounces: (state.processed?.bounces ?? 0) + bounces, replies: (state.processed?.replies ?? 0) + replies },
     };
-    await saveImapState(next);
+    await saveImapState(next, mailboxIdOrUserId);
     return next;
   } catch (err) {
-    const failed: ImapState = { ...state, lastCheckedAt: new Date().toISOString(), lastError: (err as Error).message.slice(0, 300) };
-    await saveImapState(failed);
+    console.error(`[inbox] check failed for ${personalMailbox?.email ?? "system mailbox"}:`, err);
+    const failed: ImapState = {
+      ...state,
+      lastCheckedAt: new Date().toISOString(),
+      lastError: "The mailbox inbox could not be reached. Check the connection and try again.",
+    };
+    await saveImapState(failed, mailboxIdOrUserId);
     throw err;
   } finally {
     await client.logout().catch(() => undefined);
+  }
+}
+
+export async function anyInboxDue(): Promise<boolean> {
+  if (!env.IMAP_POLL_ENABLED) return false;
+  const accounts = await listActivePersonalMailboxes();
+  const systemEmail = (env.IMAP_USER || env.SMTP_USER || env.SMTP_FROM_EMAIL || "").toLowerCase();
+  const states = await Promise.all(accounts.map(({ userId }) => getImapState(userId)));
+  if (states.some((state) => inboxStateDue(state))) return true;
+  if (imapConfigured && !accounts.some((account) => account.email.toLowerCase() === systemEmail)) {
+    return inboxStateDue(await getImapState());
+  }
+  return false;
+}
+
+function inboxStateDue(state: ImapState): boolean {
+  const last = state.lastCheckedAt ? new Date(state.lastCheckedAt).getTime() : 0;
+  return Date.now() - last >= env.IMAP_POLL_INTERVAL_SECONDS * 1000;
+}
+
+export async function checkAllInboxes(dueOnly = false): Promise<void> {
+  if (!env.IMAP_POLL_ENABLED) return;
+  const accounts = await listActivePersonalMailboxes();
+  for (const account of accounts) {
+    if (dueOnly && !inboxStateDue(await getImapState(account.userId))) continue;
+    if (!account.credentials) {
+      const state = await getImapState(account.userId);
+      await saveImapState({
+        ...state,
+        lastCheckedAt: new Date().toISOString(),
+        lastError: account.error?.message ?? "Stored mailbox credentials could not be read. Reconnect this mailbox in Settings.",
+      }, account.userId);
+      continue;
+    }
+    try {
+      await checkInbox(account.userId);
+    } catch (error) {
+      console.error(`[inbox] check failed for ${account.email}:`, (error as Error).message);
+    }
+  }
+
+  const systemEmail = (env.IMAP_USER || env.SMTP_USER || env.SMTP_FROM_EMAIL || "").toLowerCase();
+  if (imapConfigured && !accounts.some((account) => account.email.toLowerCase() === systemEmail)) {
+    if (!dueOnly || inboxStateDue(await getImapState())) {
+      try {
+        await checkInbox();
+      } catch (error) {
+        console.error("[inbox] system mailbox check failed:", (error as Error).message);
+      }
+    }
   }
 }
 
@@ -228,12 +324,12 @@ export class InboxMonitor {
   private busy = false;
 
   start() {
-    if (!imapConfigured || !env.IMAP_POLL_ENABLED || this.timer) return;
+    if (!env.IMAP_POLL_ENABLED || this.timer) return;
     const run = async () => {
       if (this.busy) return;
       this.busy = true;
       try {
-        await checkInbox();
+        await checkAllInboxes(true);
       } catch (err) {
         console.error("[inbox] check failed:", (err as Error).message);
       } finally {

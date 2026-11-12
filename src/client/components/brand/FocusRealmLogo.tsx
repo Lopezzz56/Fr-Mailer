@@ -1,17 +1,16 @@
-// FocusRealm mark: a sealed envelope held inside focus brackets — "outreach, in focus".
-// Static by default; `animated` brings the brackets into focus and re-seals the flap on a loop.
-// Motion is dropped for people who ask for reduced motion (motion-safe: variants).
+// FocusRealm brand mark: Luxury navy rounded square with subtle champagne-gold envelope seal
 import { cn } from "../../lib/cn";
 
-export const BRAND_NAVY = "#0D1B3E";
-export const BRAND_BLUE = "#2168E8";
-export const BRAND_SKY = "#5B9BFF";
+export const BRAND_NAVY = "#0B142E";
+export const BRAND_BLUE = "#1E5AE6";
+export const BRAND_SKY = "#4C8DFF";
+export const BRAND_GOLD = "#D4AF67";
 
-interface FocusRealmLogoProps {
+export interface FocusRealmLogoProps {
   size?: number;
-  /** Tile colour */
+  /** Backward-compatibility prop */
   primaryColor?: string;
-  /** Focus brackets */
+  /** Backward-compatibility prop */
   accentColor?: string;
   animated?: boolean;
   className?: string;
@@ -19,38 +18,33 @@ interface FocusRealmLogoProps {
   title?: string;
 }
 
-export function FocusRealmLogo({ size = 32, primaryColor = "#FFFFFF", accentColor = BRAND_BLUE, animated = false, className, title }: FocusRealmLogoProps) {
+export function FocusRealmLogo({
+  size = 32,
+  animated = false,
+  className,
+  title,
+}: FocusRealmLogoProps) {
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 48 48"
-      fill="none"
-      className={cn("shrink-0", className)}
+    <div
+      style={{ width: size, height: size }}
+      className={cn(
+        "relative shrink-0 select-none overflow-hidden rounded-[24%] transition-transform duration-200",
+        "ring-1 ring-black/10 shadow-[0_2px_8px_-1px_rgba(11,20,46,0.35)] dark:ring-1 dark:ring-white/25 dark:shadow-[0_2px_14px_rgba(59,130,246,0.25)]",
+        animated && "motion-safe:hover:scale-105 motion-safe:transition-all",
+        className
+      )}
       role={title ? "img" : undefined}
       aria-label={title}
       aria-hidden={title ? undefined : true}
     >
-      <rect x="0.5" y="0.5" width="47" height="47" rx="12" fill={primaryColor} stroke="#DFE5EF" />
-
-      <g
-        stroke={accentColor}
-        strokeWidth="2.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        style={{ transformOrigin: "24px 24px" }}
-        className={cn(animated && "motion-safe:animate-fr-focus")}
-      >
-        <path d="M9 16.5V12a3 3 0 0 1 3-3h4.5" />
-        <path d="M31.5 9H36a3 3 0 0 1 3 3v4.5" />
-        <path d="M39 31.5V36a3 3 0 0 1-3 3h-4.5" />
-        <path d="M16.5 39H12a3 3 0 0 1-3-3v-4.5" />
-      </g>
-
-      <g stroke="#fff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="14.5" y="16.5" width="19" height="15" rx="3" fill="#EBF2FE" stroke={BRAND_NAVY} />
-        <path d="M16.5 18.5 24 24.25 31.5 18.5" stroke={accentColor} pathLength={1} strokeDasharray={animated ? 1 : undefined} className={cn(animated && "motion-safe:animate-fr-seal")} />
-      </g>
-    </svg>
+      <img
+        src="/focusrealm_logo.png"
+        alt={title ?? "FocusRealm"}
+        width={size}
+        height={size}
+        className="h-full w-full scale-[1.4] object-cover"
+        loading="eager"
+      />
+    </div>
   );
 }

@@ -29,6 +29,7 @@ Create a PostgreSQL database: Vercel Marketplace → Neon, or Supabase. You need
 The first migration creates the `citext` extension; both Neon and Supabase allow it.
 
 Use a **separate database for Preview deployments**. Preview builds never run migrations, but a preview pointed at the production database could still read and write it.
+Production migrations must be reachable during the build. For Supabase, use the direct connection or a **session pooler** URL for `DIRECT_URL`; the transaction pooler on port `6543` is for runtime queries and may not support migrations. Production deployment stops if migrations fail, so the app cannot start against a schema missing required tables.
 
 ## 2. Project
 
@@ -48,13 +49,17 @@ Use a **separate database for Preview deployments**. Preview builds never run mi
 | `DATABASE_URL` | Pooled connection string |
 | `DIRECT_URL` | Direct connection string |
 | `PUBLIC_URL` | Your production address, e.g. `https://mail.focusrealm.com`. Used in unsubscribe and invite links, and to chain bursts. Must be publicly reachable, not a protected preview URL |
-| `APP_SECRET` | `openssl rand -hex 32`. Signs unsubscribe links; changing it invalidates links in emails already sent |
+| `APP_SECRET` | `openssl rand -hex 32`. Signs unsubscribe links and encrypts connected mailbox passwords. Keep it stable and backed up; changing it makes saved mailbox passwords unreadable |
 | `CRON_SECRET` | `openssl rand -hex 32`. Vercel Cron sends it automatically |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM_EMAIL`, `SMTP_FROM_NAME` | SpaceMail account (`mail.spacemail.com`, `465`, `true`, …) |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM_EMAIL`, `SMTP_FROM_NAME` | Optional legacy/system SpaceMail account. Each user connects their own sender mailbox in **Settings → Mailbox** |
 | `ALLOW_LIVE_SENDING` | `false` until you've verified everything with test sends; then `true` |
 | `DAILY_SEND_LIMIT` | Stay under your SpaceMail plan's daily limit |
-| `IMAP_HOST`, `IMAP_PORT`, `IMAP_USER`, `IMAP_PASS`, `IMAP_POLL_ENABLED` | Optional bounce/reply detection |
+| `IMAP_HOST`, `IMAP_PORT`, `IMAP_USER`, `IMAP_PASS`, `IMAP_POLL_ENABLED` | Optional server-wide IMAP settings and automatic bounce/reply detection. Connected personal mailboxes use their own credentials |
 | `GEMINI_API_KEY`, `GEMINI_MODEL` | Optional AI template drafting. Without a key, the template writer offers starter templates only |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Required for template PDF/PowerPoint attachments. Keep the service-role key server-only |
+| `SUPABASE_STORAGE_BUCKET` | Private Supabase Storage bucket name; defaults to `template-attachments` |
+
+Create a **private** bucket named `template-attachments` in Supabase Storage (or set `SUPABASE_STORAGE_BUCKET` to another private bucket). Uploads are limited to PDF/PPT/PPTX, 10 MB per file and 20 MB/5 files per template. Attachment bytes are fetched server-side only and are added to each recipient email; do not expose the service-role key in client variables.
 
 Vercel sets `NODE_ENV=production` itself. That makes session cookies `Secure`, which is correct because Vercel serves HTTPS.
 
@@ -72,7 +77,7 @@ Open the printed link to set your password. Invite everyone else from **Settings
 
 ## 5. Before the first real campaign
 
-1. Open **Settings → Mailbox → Test connection**. It signs in to SpaceMail and sends nothing.
+1. Connect the campaign creator's SpaceMail mailbox in **Settings → Mailbox**, then use **Test connection**. It verifies SMTP and IMAP and sends nothing.
 2. Create a campaign and **Send test** to yourself. Check the email arrives and that the unsubscribe link opens on your domain.
 3. Set `ALLOW_LIVE_SENDING=true` and redeploy (env changes apply on the next deployment).
 

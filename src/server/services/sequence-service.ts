@@ -6,6 +6,12 @@ import type { Prisma } from "@prisma/client";
 import prisma from "../db.js";
 import { AppError } from "../middleware/error-handler.js";
 import { messageIdDomain } from "./mailer.js";
+import {
+  getMailboxCredentials,
+  getMailboxCredentialsByEmail,
+  getPersonalMailboxCredentials,
+} from "./personal-mailbox.js";
+import { storedAttachments } from "./template-storage.js";
 import { withFooter, unsubscribeUrl } from "./unsubscribe.js";
 import { contactMergeData, renderEmail } from "../../shared/merge.js";
 import type {
@@ -175,7 +181,19 @@ export async function onStepSent(
     mergeData
   );
 
-  const domain = messageIdDomain();
+  let mailbox = null;
+  if (campaign.mailboxId) {
+    mailbox = await getMailboxCredentials(campaign.mailboxId);
+  } else if (campaign.fromEmail) {
+    mailbox = await getMailboxCredentialsByEmail(campaign.fromEmail);
+  }
+  if (!mailbox && campaign.createdById) {
+    mailbox = await getPersonalMailboxCredentials(campaign.createdById);
+  }
+  const previousDomain = send.messageId.match(/@([^>]+)>/)?.[1];
+  const domain = mailbox?.email
+    ? messageIdDomain(mailbox.email)
+    : previousDomain || messageIdDomain();
   const nextSendId = crypto.randomUUID();
   const content = withFooter(rendered.html, rendered.text, unsubscribeUrl(nextSendId), campaign.fromName);
 
@@ -203,6 +221,8 @@ export async function onStepSent(
     create: {
       id: nextSendId,
       campaignId: send.campaignId,
+      mailboxId: mailbox?.accountId ?? campaign.mailboxId ?? null,
+      sentByUserId: campaign.createdById ?? null,
       contactId: send.contactId,
       email: send.email,
       subject: rendered.subject,
@@ -215,6 +235,7 @@ export async function onStepSent(
       approvedAt,
       inReplyToId: send.messageId,
       templateId: nextStep.templateId,
+      attachments: storedAttachments(nextStep.template.attachments),
       assignmentReason: `Sequence Step ${nextStepIndex}: ${nextStep.purpose}`,
     },
   });

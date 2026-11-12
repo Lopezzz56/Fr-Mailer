@@ -8,7 +8,7 @@ export function brandMarkSvg(size = 32): string {
   return `<svg width="${size}" height="${size}" viewBox="0 0 48 48" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
 <rect width="48" height="48" rx="12" fill="${BRAND.navy}"/>
 <g stroke="${BRAND.sky}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 16.5V12a3 3 0 0 1 3-3h4.5"/><path d="M31.5 9H36a3 3 0 0 1 3 3v4.5"/><path d="M39 31.5V36a3 3 0 0 1-3 3h-4.5"/><path d="M16.5 39H12a3 3 0 0 1-3-3v-4.5"/></g>
-<g stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="15" y="17" width="18" height="14" rx="2.5"/><path d="M16.5 19 24 24.75 31.5 19"/></g>
+<g stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="8" width="36" height="32" rx="4"/><path d="M7.5 10 24 23 40.5 10"/></g>
 </svg>`;
 }
 

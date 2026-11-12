@@ -60,11 +60,23 @@ export function errorHandler(err: Error, req: Request, res: Response, _next: Nex
   }
 
   if (err instanceof multer.MulterError) {
-    const message = err.code === "LIMIT_FILE_SIZE" ? "That file is larger than 4 MB. Split it into smaller files." : `Upload failed: ${err.message}`;
+    const message = err.code === "LIMIT_FILE_SIZE"
+      ? req.path.includes("/attachments")
+        ? "That attachment is larger than 10 MB."
+        : "That file is larger than 4 MB. Split it into smaller files."
+      : `Upload failed: ${err.message}`;
     return send(res, 400, "UPLOAD_ERROR", message);
   }
 
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    if (["P1001", "P1002", "P1017", "P2024"].includes(err.code)) {
+      console.error(`[ERROR] ${req.method} ${req.path}: database unavailable (${err.code})`);
+      return send(res, 503, "DATABASE_UNAVAILABLE", "The service can't reach its database right now. Please try again shortly.");
+    }
+    if (err.code === "P2021" || err.code === "P2022") {
+      console.error(`[ERROR] ${req.method} ${req.path}: database schema out of date (${err.code})`);
+      return send(res, 503, "DATABASE_SCHEMA_OUT_OF_DATE", "The service is updating its database. Please try again shortly.");
+    }
     if (err.code === "P2002") {
       return send(res, 409, "DUPLICATE", UNIQUE_MESSAGES[String(err.meta?.modelName)] ?? "That already exists.");
     }
@@ -73,8 +85,8 @@ export function errorHandler(err: Error, req: Request, res: Response, _next: Nex
   }
 
   if (err instanceof Prisma.PrismaClientInitializationError) {
-    console.error(`[ERROR] ${req.method} ${req.path}: database unreachable — ${err.message.split("\n").pop()}`);
-    return send(res, 503, "DATABASE_UNAVAILABLE", "The database isn't reachable. Check that it's running, then try again.");
+    console.error(`[ERROR] ${req.method} ${req.path}: database initialization failed (${err.errorCode ?? "unknown"})`);
+    return send(res, 503, "DATABASE_UNAVAILABLE", "The service can't reach its database right now. Please try again shortly.");
   }
 
   if ((err as { type?: string }).type === "entity.too.large") {
@@ -82,12 +94,7 @@ export function errorHandler(err: Error, req: Request, res: Response, _next: Nex
   }
 
   console.error(`[ERROR] ${req.method} ${req.path}`, err);
-  return send(
-    res,
-    500,
-    "INTERNAL_ERROR",
-    process.env.NODE_ENV === "development" ? err.message : "Something went wrong on our side. Try again in a moment."
-  );
+  return send(res, 500, "INTERNAL_ERROR", "Something went wrong on our side. Try again in a moment.");
 }
 
 export function asyncHandler(fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>) {

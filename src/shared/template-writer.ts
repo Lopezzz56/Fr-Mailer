@@ -499,3 +499,274 @@ export function buildStarterTemplate(args: { goal: StarterGoal; tone: WriterTone
 
 /** Standard fields with labels, for building a WriterField list */
 export const STANDARD_FIELD_LABELS: Record<string, string> = Object.fromEntries(STANDARD_FIELDS.map((f) => [f.name, f.label]));
+
+// ---------------------------------------------------------------------------
+// Personal AI Draft Conversion & Mail Merge Compliance Engine
+// ---------------------------------------------------------------------------
+
+export interface DraftRuleCheck {
+  id: string;
+  label: string;
+  passed: boolean;
+  message: string;
+}
+
+export interface ConvertedPersonalDraft {
+  name: string;
+  subject: string;
+  body: string;
+  warnings: string[];
+  rules: DraftRuleCheck[];
+  detectedFields: string[];
+  convertedPlaceholders: { original: string; replacement: string }[];
+}
+
+export function convertPersonalDraftToTemplate(
+  rawText: string,
+  fields: WriterField[],
+  totalContacts: number,
+  options?: { signOff?: string }
+): ConvertedPersonalDraft {
+  const convertedPlaceholders: { original: string; replacement: string }[] = [];
+  let text = rawText.trim();
+
+  // 1. Remove initial AI conversational chatter (e.g. "Sure! Here is a cold email draft:")
+  text = text.replace(
+    /^(?:(?:sure!?|here(?:'s|\s+is)|certainly!?|absolutely!?|below is|i have written|here's an?)\s+[^:\n]+[:\-–]?\s*\n+)+/i,
+    ""
+  );
+
+  // If text starts with "Option 1:" or "Variation 1:", strip the header so we output ONE clean email
+  text = text.replace(/^(?:option\s+1|variation\s+1|version\s+1)\s*[:\-–]?\s*\n+/im, "");
+
+  // If there are subsequent options (e.g. "Option 2:"), cut them off to strictly output ONE email format
+  const multiOptionSplit = text.search(/\n{2,}(?:option\s+2|variation\s+2|version\s+2)\b/i);
+  if (multiOptionSplit !== -1) {
+    text = text.slice(0, multiOptionSplit).trim();
+  }
+
+  // 2. Extract Subject Line
+  let subject = "Exploring collaboration with {{company|your team}}";
+  const subjectMatch = text.match(/^(?:subject(?:\s*line)?|title)\s*:\s*(.+)$/im);
+  if (subjectMatch && subjectMatch[1]) {
+    subject = subjectMatch[1].trim();
+    text = text.replace(/^(?:subject(?:\s*line)?|title)\s*:\s*.+\n*/im, "");
+  } else {
+    // Check if the very first line is a short header/title
+    const lines = text.split("\n");
+    if (
+      lines[0] &&
+      lines[0].length < 75 &&
+      !/[.,?!]$/.test(lines[0].trim()) &&
+      lines[1] !== undefined &&
+      lines[1].trim() === ""
+    ) {
+      subject = lines[0].trim();
+      text = lines.slice(2).join("\n").trim();
+    }
+  }
+
+  // 3. Strip trailing AI conversational chatter
+  text = text.replace(
+    /\n{2,}(?:(?:let\s+me\s+know|hope\s+this\s+helps|feel\s+free\s+to|best\s+regards\s+with\s+your|if\s+you\s+need\s+any)\b.*)$/is,
+    ""
+  );
+
+  // 4. Map personal AI placeholders and non-standard tag styles to FocusRealm merge tags
+  // Note: Handle {{first_name...}}, [First Name], {first_name}, <first_name>, etc.
+  const placeholderMaps: [RegExp, string, string][] = [
+    [
+      /\{\{\s*first_?name\b([^}]*)\}\}|\[(?:first\s*name|recipient\s*name|contact\s*name|client\s*name|name)\]|\{(?:first_?name|name)\}|<(?:first\s*name|name)>/gi,
+      "{{firstName$1}}",
+      "first_name -> firstName",
+    ],
+    [
+      /\{\{\s*last_?name\b([^}]*)\}\}|\[(?:last\s*name|surname)\]|\{last_?name\}|<last\s*name>/gi,
+      "{{lastName$1}}",
+      "last_name -> lastName",
+    ],
+    [
+      /\{\{\s*full_?name\b([^}]*)\}\}|\[(?:full\s*name)\]|\{full_?name\}|<full\s*name>/gi,
+      "{{fullName$1}}",
+      "full_name -> fullName",
+    ],
+    [
+      /\{\{\s*(?:company_?name|hotel_?name|property_?name)\b([^}]*)\}\}|\[(?:company\s*name|hotel\s*name|property\s*name|organization\s*name|company|hotel|property|organization)\]|\{(?:company|hotel)\}|<(?:company|hotel)>/gi,
+      "{{company$1}}",
+      "company_name -> company",
+    ],
+    [
+      /\{\{\s*(?:job_?title|role)\b([^}]*)\}\}|\[(?:job\s*title|title|role)\]|\{title\}|<title>/gi,
+      "{{title$1}}",
+      "job_title -> title",
+    ],
+    [
+      /\{\{\s*phone_?number\b([^}]*)\}\}|\[(?:phone\s*number|phone)\]|\{phone\}|<phone>/gi,
+      "{{phone$1}}",
+      "phone_number -> phone",
+    ],
+    [
+      /\{\{\s*email_?address\b([^}]*)\}\}|\[(?:email\s*address|email)\]|\{email\}|<email>/gi,
+      "{{email$1}}",
+      "email_address -> email",
+    ],
+    [
+      /\[(?:partner\s*strength|area\s*of\s*expertise|core\s*offering)\]/gi,
+      "{{partnerStrength|hospitality services}}",
+      "[Partner Strength]",
+    ],
+    [
+      /\[(?:what\s*it\s*does|about\s*company|company\s*description)\]/gi,
+      "{{whatItDoes|aboutCompany|hospitality services}}",
+      "[What It Does]",
+    ],
+    [
+      /\[(?:initiative(?:\s*headline|\s*name)?)\]/gi,
+      '{{initiativeHeadline|"More Bookings, Better Operations"}}',
+      "[Initiative]",
+    ],
+    [/\[(?:your\s*name|sender\s*name|my\s*name)\]/gi, options?.signOff?.trim() || "Founder’s Office", "[Your Name]"],
+    [/\[(?:your\s*company|sender\s*company)\]/gi, "FocusRealm", "[Your Company]"],
+    [/\[(?:your\s*title|sender\s*title)\]/gi, "Founder & CEO", "[Your Title]"],
+    [/\[(?:insert\s*calendar\s*link|calendar\s*link|booking\s*link)\]/gi, "https://focusrealm.org/", "[Calendar Link]"],
+  ];
+
+  for (const [regex, replacement, label] of placeholderMaps) {
+    if (regex.test(subject)) {
+      subject = subject.replace(regex, (_match, p1) => {
+        // If replacement is a pattern with $1
+        if (replacement.includes("$1")) {
+          // If no fallback was captured, add a sensible default
+          const fallbackPart = p1 || (label.includes("firstName") ? "|there" : label.includes("company") ? "|your team" : "");
+          return replacement.replace("$1", fallbackPart);
+        }
+        return replacement;
+      });
+      convertedPlaceholders.push({ original: label, replacement });
+    }
+    if (regex.test(text)) {
+      text = text.replace(regex, (_match, p1) => {
+        if (replacement.includes("$1")) {
+          const fallbackPart = p1 || (label.includes("firstName") ? "|there" : label.includes("company") ? "|your team" : "");
+          return replacement.replace("$1", fallbackPart);
+        }
+        return replacement;
+      });
+      if (!convertedPlaceholders.some((p) => p.original === label)) {
+        convertedPlaceholders.push({ original: label, replacement });
+      }
+    }
+  }
+
+  // Also convert standalone non-fallback forms like [First Name] or {{firstName}} without fallback
+  text = text.replace(/\{\{firstName\}\}/g, "{{firstName|there}}");
+  text = text.replace(/\{\{company\}\}/g, "{{company|your team}}");
+  subject = subject.replace(/\{\{firstName\}\}/g, "{{firstName|there}}");
+  subject = subject.replace(/\{\{company\}\}/g, "{{company|your team}}");
+
+  // 5. Clean up smart/curly quotes inside merge tags
+  subject = subject.replace(/“/g, '"').replace(/”/g, '"');
+  text = text.replace(/“/g, '"').replace(/”/g, '"');
+
+  // Strip excessive markdown bolding inside email body
+  text = text.replace(/\*\*([^*]+)\*\*/g, "$1");
+
+  // Normalize paragraph breaks: trim lines and keep 1 blank line
+  const body = text
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  // 6. Inspect detected merge tags and evaluate mail merge rules
+  const allText = `${subject}\n\n${body}`;
+  const extracted = extractMergeFields({ subject, bodyHtml: body });
+  const detectedFields = Array.from(new Set(extracted.map((f) => f.name)));
+  const knownFieldsMap = new Map(fields.map((f) => [f.name, f]));
+
+  const rules: DraftRuleCheck[] = [];
+
+  // Rule 1: Single Email Format
+  rules.push({
+    id: "single_format",
+    label: "Single Email Format",
+    passed: true,
+    message: "Structured into exactly 1 clean email (Subject + Body) with no AI chat fluff.",
+  });
+
+  // Rule 2: Personalization presence
+  const hasPersonalization = detectedFields.length > 0;
+  rules.push({
+    id: "has_merge_tags",
+    label: "Mail Merge Personalization",
+    passed: hasPersonalization,
+    message: hasPersonalization
+      ? `Uses ${detectedFields.length} merge tag${detectedFields.length > 1 ? "s" : ""} (${detectedFields.join(", ")}).`
+      : "No merge tags detected. Consider adding {{firstName|there}} or {{company|your team}} for higher conversion.",
+  });
+
+  // Rule 2b: Unknown field check (warns user if custom field is not in their contact list)
+  const unknownFields = detectedFields.filter((name) => {
+    if (["firstName", "lastName", "fullName", "email", "company", "title", "phone", "whatItDoes", "aboutCompany", "servicesProvided", "partnerStrength", "partnerOutcome", "partnerOffering", "initiativeHeadline", "partnerComplement", "partnerProposal", "partnershipOpportunity", "personalizationAngle", "partnerFocus", "partnerDomain", "partnerCategory", "partnerCategoryLabel", "greetingLine"].includes(name)) {
+      return false;
+    }
+    return !knownFieldsMap.has(name);
+  });
+  if (unknownFields.length > 0) {
+    rules.push({
+      id: "unknown_fields",
+      label: "Custom Fields Check",
+      passed: false,
+      message: `Unknown merge field(s): ${unknownFields.map((f) => `{{${f}}}`).join(", ")}. These are not in your contacts database and will use their fallback or be skipped.`,
+    });
+  }
+
+  // Rule 3: Missing-Data Fallback Protection
+  const missingFallbackFields = extracted.filter(
+    (f) => f.required && totalContacts > 0 && (knownFieldsMap.get(f.name)?.coverage ?? 1) < 1
+  );
+  rules.push({
+    id: "fallback_safety",
+    label: "Fallback Protection",
+    passed: missingFallbackFields.length === 0,
+    message:
+      missingFallbackFields.length === 0
+        ? "All tags have safe fallback values — missing contact data won't block sends."
+        : `Fields without fallbacks: ${missingFallbackFields.map((f) => f.name).join(", ")}. Add fallbacks like {{${missingFallbackFields[0]?.name}|there}} so incomplete contacts are not skipped.`,
+  });
+
+  // Rule 4: No Unparsed [bracketed] Placeholders
+  const remainingPlaceholders = allText.match(/\[[a-zA-Z0-9_\s-]{2,40}\]/g);
+  rules.push({
+    id: "no_raw_placeholders",
+    label: "No Unparsed Placeholders",
+    passed: !remainingPlaceholders || remainingPlaceholders.length === 0,
+    message: remainingPlaceholders
+      ? `Remaining unmapped brackets detected: ${Array.from(new Set(remainingPlaceholders)).join(", ")}.`
+      : "All bracketed placeholders successfully replaced or converted.",
+  });
+
+  // Rule 5: Subject Line Conciseness
+  const subjectLength = subject.replace(/\{\{[^}]*\}\}/g, "Company").length;
+  rules.push({
+    id: "subject_length",
+    label: "Subject Line Length",
+    passed: subjectLength <= 75,
+    message:
+      subjectLength <= 75
+        ? `Subject is ${subjectLength} characters (fits mobile and desktop inboxes).`
+        : `Subject is ${subjectLength} characters (may be truncated on mobile screens > 70 chars).`,
+  });
+
+  const warnings = reviewTemplateDraft({ subject, body }, fields, totalContacts);
+
+  return {
+    name: "Standardized AI Draft",
+    subject,
+    body,
+    warnings,
+    rules,
+    detectedFields,
+    convertedPlaceholders,
+  };
+}

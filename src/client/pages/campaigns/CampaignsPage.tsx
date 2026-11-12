@@ -1,52 +1,66 @@
 import { useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Send, Sparkles } from "lucide-react";
+import { Send } from "lucide-react";
 import { useCampaigns } from "../../lib/queries";
 import { useTitle } from "../../lib/hooks";
 import { useAuth } from "../../lib/auth";
 import { plural, timeAgo } from "../../lib/format";
 import { PageHeader, Tabs } from "../../components/ui/Navigation";
 import { Card } from "../../components/ui/Card";
-import { Button } from "../../components/ui/Button";
+import { ButtonLink } from "../../components/ui/Button";
 import { SearchInput } from "../../components/ui/Field";
 import { DataTable, type Column } from "../../components/ui/DataTable";
 import { CampaignStatusBadge } from "../../components/ui/Badge";
 import { EmptyState, ErrorState } from "../../components/ui/Feedback";
 import { CampaignProgress } from "../../components/campaigns/CampaignProgress";
-import { AdvancedCampaignStudio } from "../../components/campaigns/AdvancedCampaignStudio";
-import type { CampaignStatus, CampaignSummaryDto } from "@shared/types";
+import type { CampaignSummaryDto } from "@shared/types";
 
-type TabKey = "all" | "draft" | "approval" | "active" | "completed" | "cancelled";
-const GROUPS: Record<Exclude<TabKey, "all">, CampaignStatus[]> = {
-  draft: ["DRAFT"],
-  approval: ["PENDING_APPROVAL"],
-  active: ["APPROVED", "SENDING", "PAUSED"],
-  completed: ["COMPLETED"],
-  cancelled: ["CANCELLED"],
-};
+type TabKey = "all" | "mine" | "shared" | "active" | "completed" | "draft";
 
 export function CampaignsPage() {
   useTitle("Campaigns");
   const navigate = useNavigate();
-  const { can } = useAuth();
+  const { can, user } = useAuth();
   const [params, setParams] = useSearchParams();
 
-  // Primary mode: 'studio' (default advanced creation/analysis) vs 'list' (campaign history)
-  const mode = params.get("mode") || (params.get("tab") ? "list" : "studio");
-  const tab = (params.get("tab") as TabKey) || "all";
+  const requestedTab = params.get("tab") as TabKey | null;
+  const tab: TabKey = requestedTab && ["all", "mine", "shared", "active", "completed", "draft"].includes(requestedTab)
+    ? requestedTab
+    : "all";
   const [search, setSearch] = useState("");
   const campaigns = useCampaigns({});
 
   const all = campaigns.data?.data ?? [];
-  const count = (k: Exclude<TabKey, "all">) => all.filter((c) => GROUPS[k].includes(c.status)).length;
+
+  const myCount = all.filter((c) => c.createdById === user?.id || c.createdBy?.id === user?.id).length;
+  const sharedCount = all.filter((c) => Boolean(c.createdById && c.createdById !== user?.id)).length;
+  const activeCount = all.filter((c) => ["APPROVED", "SENDING", "PAUSED"].includes(c.status)).length;
+  const draftCount = all.filter((c) => c.status === "DRAFT").length;
+  const completedCount = all.filter((c) => c.status === "COMPLETED").length;
+
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return all.filter(
-      (c) =>
-        (tab === "all" || GROUPS[tab].includes(c.status)) &&
-        (!q || c.name.toLowerCase().includes(q) || c.list.name.toLowerCase().includes(q))
-    );
-  }, [all, tab, search]);
+    return all.filter((c) => {
+      if (q && !c.name.toLowerCase().includes(q) && !c.list.name.toLowerCase().includes(q) && !(c.template?.name || "").toLowerCase().includes(q)) {
+        return false;
+      }
+      if (tab === "mine") return c.createdById === user?.id || c.createdBy?.id === user?.id;
+      if (tab === "shared") return Boolean(c.createdById && c.createdById !== user?.id);
+      if (tab === "draft") return c.status === "DRAFT";
+      if (tab === "active") return ["APPROVED", "SENDING", "PAUSED"].includes(c.status);
+      if (tab === "completed") return c.status === "COMPLETED";
+      return true;
+    });
+  }, [all, tab, search, user?.id]);
+
+  const tabs = [
+    { key: "all" as const, label: "All", count: all.length },
+    { key: "mine" as const, label: "Mine", count: myCount },
+    { key: "shared" as const, label: "Shared", count: sharedCount },
+    { key: "active" as const, label: "Active", count: activeCount },
+    { key: "completed" as const, label: "Completed", count: completedCount },
+    { key: "draft" as const, label: "Drafts", count: draftCount },
+  ];
 
   const columns: Column<CampaignSummaryDto>[] = [
     {
@@ -54,9 +68,12 @@ export function CampaignsPage() {
       header: "Campaign",
       cell: (c) => (
         <div className="min-w-0">
-          <p className="truncate font-medium">{c.name}</p>
+          <p className="truncate font-semibold text-ink">{c.name}</p>
           <p className="truncate text-xs text-ink-subtle">
             {c.template.name} · {c.list.name}
+          </p>
+          <p className="truncate text-2xs text-ink-muted sm:hidden mt-0.5">
+            {c.counts.total ? `${c.counts.sent} of ${c.counts.total - c.counts.skipped} sent` : plural(c.list.memberCount, "contact")} · {timeAgo(c.updatedAt)}
           </p>
         </div>
       ),
@@ -66,6 +83,8 @@ export function CampaignsPage() {
     {
       key: "progress",
       header: "Recipients",
+      headerClassName: "hidden sm:table-cell",
+      className: "hidden sm:table-cell",
       cell: (c) =>
         c.counts.total ? (
           <CampaignProgress counts={c.counts} compact />
@@ -73,115 +92,75 @@ export function CampaignsPage() {
           <span className="text-ink-muted">{plural(c.list.memberCount, "contact")} in list</span>
         ),
     },
-    { key: "owner", header: "Created by", cell: (c) => <span className="text-ink-muted">{c.createdBy?.name ?? "—"}</span> },
-    { key: "updated", header: "Updated", cell: (c) => <span className="whitespace-nowrap text-ink-muted">{timeAgo(c.updatedAt)}</span> },
+    {
+      key: "owner",
+      header: "Created by",
+      headerClassName: "hidden md:table-cell",
+      className: "hidden md:table-cell",
+      cell: (c) => (
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="truncate text-ink-muted">{c.createdBy?.name ?? "Team"}</span>
+          {(c.createdById === user?.id || c.createdBy?.id === user?.id) && (
+            <span className="rounded bg-surface-sunken px-1.5 py-0.5 text-[10px] font-semibold text-brand">
+              you
+            </span>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: "updated",
+      header: "Updated",
+      headerClassName: "hidden lg:table-cell",
+      className: "hidden lg:table-cell",
+      cell: (c) => <span className="whitespace-nowrap text-ink-muted">{timeAgo(c.updatedAt)}</span>
+    },
   ];
 
   return (
     <>
       <PageHeader
-        title={mode === "studio" ? "Campaign Studio" : "Campaigns"}
-        description={
-          mode === "studio"
-            ? "Multi-template campaign targeting, segment-based rules & recipient preview."
-            : "Every campaign is reviewed and approved by a founder before it sends."
-        }
-        actions={
-          <div className="flex items-center gap-2">
-            {mode === "studio" ? (
-              <Button
-                variant="secondary"
-                icon={<Send className="h-4 w-4" />}
-                onClick={() => setParams({ mode: "list" }, { replace: true })}
-              >
-                View Campaigns List ({all.length})
-              </Button>
-            ) : (
-              can("campaigns.manage") && (
-                <Button
-                  variant="primary"
-                  icon={<Sparkles className="h-4 w-4" />}
-                  onClick={() => setParams({ mode: "studio" }, { replace: true })}
-                >
-                  New Campaign Studio
-                </Button>
-              )
-            )}
-          </div>
-        }
+        title="Campaigns"
+        description="Plan outreach, review delivery, and follow campaign progress."
+        actions={can("campaigns.manage") && <ButtonLink to="/campaigns/new" variant="primary" icon={<Send className="h-4 w-4" />}>New campaign</ButtonLink>}
       />
 
-      {/* Primary Top View Mode Switcher */}
       <Tabs
         className="mb-5"
-        active={mode}
-        onChange={(m) => setParams(m === "studio" ? { mode: "studio" } : { mode: "list", tab: "all" }, { replace: true })}
-        tabs={[
-          { key: "studio", label: "Advanced Campaign Studio" },
-          { key: "list", label: "Campaigns List", count: all.length },
-        ]}
+        active={tab}
+        onChange={(key) => setParams(key === "all" ? {} : { tab: key }, { replace: true })}
+        tabs={tabs}
       />
 
-      {mode === "studio" ? (
-        <div className="max-w-5xl">
-          <AdvancedCampaignStudio onDone={(id) => navigate(`/campaigns/${id}`)} />
+      <Card>
+        <div className="border-b border-line p-4">
+          <SearchInput value={search} onChange={setSearch} placeholder="Search campaigns or lists" className="w-full sm:max-w-sm" />
         </div>
-      ) : (
-        <>
-          <Tabs
-            className="mb-4"
-            active={tab}
-            onChange={(k) => setParams({ mode: "list", ...(k === "all" ? {} : { tab: k }) }, { replace: true })}
-            tabs={[
-              { key: "all", label: "All", count: all.length },
-              { key: "draft", label: "Drafts", count: count("draft") },
-              { key: "approval", label: "Awaiting approval", count: count("approval") },
-              { key: "active", label: "Active", count: count("active") },
-              { key: "completed", label: "Completed", count: count("completed") },
-              { key: "cancelled", label: "Cancelled", count: count("cancelled") },
-            ]}
+        {campaigns.isError ? (
+          <ErrorState error={campaigns.error} onRetry={() => campaigns.refetch()} />
+        ) : (
+          <DataTable
+            columns={columns}
+            rows={campaigns.data ? rows : undefined}
+            rowKey={(c) => c.id}
+            loading={campaigns.isPending}
+            onRowClick={(c) => navigate(`/campaigns/${c.id}`)}
+            caption="Campaigns"
+            empty={
+              all.length === 0 ? (
+                <EmptyState
+                  icon={Send}
+                  title="No campaigns yet"
+                  description="Create a campaign to start personalized outreach."
+                  action={can("campaigns.manage") && <ButtonLink to="/campaigns/new" variant="primary">New campaign</ButtonLink>}
+                />
+              ) : (
+                <EmptyState title="Nothing here" description="No campaigns match this view." />
+              )
+            }
           />
-          <Card>
-            <div className="border-b border-line p-4">
-              <SearchInput value={search} onChange={setSearch} placeholder="Search campaigns or lists" className="max-w-sm" />
-            </div>
-            {campaigns.isError ? (
-              <ErrorState error={campaigns.error} onRetry={() => campaigns.refetch()} />
-            ) : (
-              <DataTable
-                columns={columns}
-                rows={campaigns.data ? rows : undefined}
-                rowKey={(c) => c.id}
-                loading={campaigns.isPending}
-                onRowClick={(c) => navigate(`/campaigns/${c.id}`)}
-                caption="Campaigns"
-                empty={
-                  all.length === 0 ? (
-                    <EmptyState
-                      icon={Send}
-                      title="No campaigns yet"
-                      description="Launch multi-template outreach tailored by hotel segment and persona."
-                      action={
-                        can("campaigns.manage") && (
-                          <Button
-                            variant="primary"
-                            icon={<Sparkles className="h-4 w-4" />}
-                            onClick={() => setParams({ mode: "studio" }, { replace: true })}
-                          >
-                            Open Campaign Studio
-                          </Button>
-                        )
-                      }
-                    />
-                  ) : (
-                    <EmptyState title="Nothing here" description="No campaigns match this view." />
-                  )
-                }
-              />
-            )}
-          </Card>
-        </>
-      )}
+        )}
+      </Card>
     </>
   );
 }

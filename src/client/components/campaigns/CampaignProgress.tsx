@@ -7,7 +7,7 @@ export function CampaignProgress({ counts, compact = false }: { counts: Campaign
   const deliverable = counts.total - counts.skipped;
   if (counts.total === 0) return <span className="text-xs text-ink-subtle">Not approved yet</span>;
   return (
-    <div className={compact ? "w-40" : "w-full"}>
+    <div className={compact ? "w-full sm:w-40 shrink-0" : "w-full"}>
       <ProgressBar
         segments={[
           { value: counts.sent, className: "bg-success", label: "Sent" },

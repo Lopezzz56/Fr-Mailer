@@ -104,10 +104,31 @@ export function SuppressionsPage() {
   });
 
   const columns: Column<SuppressionDto>[] = [
-    { key: "email", header: "Address", cell: (s) => <span className="font-medium">{s.email}</span> },
+    {
+      key: "email",
+      header: "Address",
+      cell: (s) => (
+        <div className="min-w-0">
+          <p className="font-medium truncate">{s.email}</p>
+          <p className="text-2xs text-ink-subtle sm:hidden mt-0.5">Since {formatDate(s.createdAt)}</p>
+        </div>
+      ),
+    },
     { key: "reason", header: "Reason", cell: (s) => <Badge tone={REASON_TONE[s.reason] ?? "neutral"}>{SUPPRESSION_REASON_LABELS[s.reason]}</Badge> },
-    { key: "source", header: "Source", cell: (s) => <span className="text-xs text-ink-subtle">{s.note ?? s.source.replace(/^manual:/, "Added by ")}</span> },
-    { key: "date", header: "Since", cell: (s) => <span className="whitespace-nowrap text-ink-muted">{formatDate(s.createdAt)}</span> },
+    {
+      key: "source",
+      header: "Source",
+      headerClassName: "hidden md:table-cell",
+      className: "hidden md:table-cell",
+      cell: (s) => <span className="text-xs text-ink-subtle">{s.note ?? s.source.replace(/^manual:/, "Added by ")}</span>
+    },
+    {
+      key: "date",
+      header: "Since",
+      headerClassName: "hidden sm:table-cell",
+      className: "hidden sm:table-cell",
+      cell: (s) => <span className="whitespace-nowrap text-ink-muted">{formatDate(s.createdAt)}</span>
+    },
     {
       key: "actions",
       header: "",
@@ -130,13 +151,13 @@ export function SuppressionsPage() {
       />
       <Card>
         <div className="flex flex-wrap items-center gap-3 border-b border-line p-4">
-          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Find an address" className="w-72" />
+          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Find an address" className="w-full sm:w-72" />
           <SelectField
             aria-label="Filter by reason"
             value={reason}
             onChange={(e) => { setReason(e.target.value); setPage(1); }}
             options={[{ value: "", label: "All reasons" }, ...Object.entries(SUPPRESSION_REASON_LABELS).map(([value, label]) => ({ value, label }))]}
-            className="w-52"
+            className="w-full sm:w-52"
           />
           {list.data?.pagination && <span className="tabular ml-auto text-[13px] text-ink-subtle">{plural(list.data.pagination.total, "address", "addresses")}</span>}
         </div>

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
-import { FlaskConical, Inbox, Pause, Pencil, Play, RefreshCw, RotateCcw, Send, ShieldCheck, Undo2 } from "lucide-react";
+import { FlaskConical, Inbox, Pause, Pencil, Play, RefreshCw, RotateCcw, Send, ShieldCheck, Undo2, Users } from "lucide-react";
 import { api, errorMessage } from "../../lib/api";
 import { useCampaign, useInvalidate, useMailbox, useReview, type CampaignDetail } from "../../lib/queries";
 import { useTitle } from "../../lib/hooks";
@@ -20,6 +20,9 @@ import { CampaignProgress } from "../../components/campaigns/CampaignProgress";
 import { ReviewPanel } from "../../components/campaigns/ReviewPanel";
 import { RecipientsPanel } from "../../components/campaigns/RecipientsPanel";
 import { TemplateRulesPanel } from "../../components/campaigns/TemplateRulesPanel";
+import { CampaignAnalyticsPanel } from "../../components/campaigns/CampaignAnalyticsPanel";
+import { CampaignCollaboratorsModal } from "../../components/campaigns/CampaignCollaboratorsModal";
+import { CampaignWorkflowSteps } from "../../components/campaigns/CampaignWorkflowSteps";
 import { EmailPreview } from "../../components/email/EmailPreview";
 import { EmailSchema, type CampaignReviewDto } from "@shared/types";
 
@@ -129,23 +132,37 @@ function ReturnDialog({ campaign, onClose, onDone, asFounder }: { campaign: Camp
 }
 
 function StatusBanner({ c }: { c: CampaignDetail }) {
-  const { can } = useAuth();
+  const { can, user } = useAuth();
+  const requiresApproval = user?.role === "EMPLOYEE" && !user.canSendWithoutApproval;
+
   switch (c.status) {
     case "DRAFT":
-      return <Callout title="Draft">Check the review below and send yourself a test. When it looks right, submit it for a founder's approval.</Callout>;
+      return requiresApproval ? (
+        <Callout tone="info" title="Draft · Founder's Office approval required before sending">
+          Review the message and send yourself a test. Once prepared, submit it to Founder's Office for review and approval to send.
+        </Callout>
+      ) : (
+        <Callout title="Draft">
+          Check the review below and send yourself a test. Direct sending is enabled for your account.
+        </Callout>
+      );
     case "PENDING_APPROVAL":
       return can("campaigns.approve") ? (
         <Callout tone="warning" title="Waiting for your approval">
           Submitted by {c.approvalRequestedBy?.name ?? "a teammate"} {timeAgo(c.approvalRequestedAt)}. Review the recipients and preview, then approve or send it back.
         </Callout>
       ) : (
-        <Callout tone="warning" title="Waiting for a founder">Submitted {timeAgo(c.approvalRequestedAt)}. You'll see it move to Approved here.</Callout>
+        <Callout tone="warning" title="Awaiting Founder's Office review">
+          Submitted {timeAgo(c.approvalRequestedAt)}. Founder's Office will review the audience and message before approving for send.
+        </Callout>
       );
     case "APPROVED":
       return c.liveSendingBlocker ? (
         <Callout tone="warning" title="Approved — but sending is off on this server">{c.liveSendingBlocker}</Callout>
       ) : (
-        <Callout tone="info" title={`Approved by ${c.approvedBy?.name ?? "a founder"} ${timeAgo(c.approvedAt)}`}>Content and recipients are locked. Start sending when you're ready.</Callout>
+        <Callout tone="success" title={`Approved by ${c.approvedBy?.name ?? "Founder's Office"} ${timeAgo(c.approvedAt)}`}>
+          Audience and message content are locked. You can start sending when ready.
+        </Callout>
       );
     case "SENDING":
       return c.waitingReason ? <Callout tone="warning" title="Waiting">{c.waitingReason}</Callout> : <Callout tone="info" title="Sending">About {c.sendRatePerMinute} emails a minute. You can pause at any time.</Callout>;
@@ -168,15 +185,16 @@ export function CampaignDetailPage() {
   const navigate = useNavigate();
   const toast = useToast();
   const invalidate = useInvalidate();
-  const { can } = useAuth();
+  const { can, user } = useAuth();
   const campaign = useCampaign(id);
   const c = campaign.data?.data;
+  const [collaboratorsOpen, setCollaboratorsOpen] = useState(false);
   const preApproval = c?.status === "DRAFT" || c?.status === "PENDING_APPROVAL";
   const review = useReview(id, Boolean(preApproval));
   const [dialog, setDialog] = useState<DialogKey>(null);
   useTitle(c?.name ?? "Campaign");
 
-  const tab = (params.get("tab") ?? (preApproval ? "review" : "recipients")) as "review" | "templates" | "recipients" | "content" | "details";
+  const tab = (params.get("tab") ?? (preApproval ? "review" : "recipients")) as "review" | "templates" | "recipients" | "analytics" | "content" | "details";
   const setTab = (t: string) => setParams({ tab: t }, { replace: true });
 
   const refresh = () => invalidate("campaigns", "overview");
@@ -236,6 +254,10 @@ export function CampaignDetailPage() {
   const deliverable = c.counts.total - c.counts.skipped;
   const etaMinutes = Math.ceil(c.counts.pending / c.sendRatePerMinute);
 
+  const isOwner = c.createdById === user?.id || c.createdBy?.id === user?.id;
+  const isFounderOrOffice = user?.role === "FOUNDER" || user?.role === "FOUNDER_OFFICE";
+  const canStart = can("campaigns.control") || (c.status === "APPROVED" && Boolean(c.approvedBy) && (isOwner || isFounderOrOffice));
+
   // Primary actions for the current state
   const primary = (() => {
     const busy = (p: string) => act.isPending && act.variables === p;
@@ -264,7 +286,7 @@ export function CampaignDetailPage() {
         );
       case "APPROVED":
         return (
-          can("campaigns.control") && (
+          canStart && (
             <>
               {can("campaigns.send_test") && <Button icon={<FlaskConical className="h-4 w-4" />} onClick={() => setDialog("test")}>Send test</Button>}
               <Button variant="primary" icon={<Play className="h-4 w-4" />} disabled={Boolean(c.liveSendingBlocker)} title={c.liveSendingBlocker ?? undefined} onClick={() => setDialog("start")}>
@@ -287,6 +309,7 @@ export function CampaignDetailPage() {
   const tabs = [
     ...(preApproval ? [{ key: "review" as const, label: "Review" }] : [{ key: "recipients" as const, label: "Recipients", count: c.counts.total }]),
     { key: "templates" as const, label: "Templates & Rules", count: (c.templates?.length ?? 1) },
+    ...(!preApproval ? [{ key: "analytics" as const, label: "Performance & Analytics" }] : []),
     ...(!preApproval ? [{ key: "content" as const, label: "Approved content" }] : []),
     { key: "details" as const, label: "Details" },
   ];
@@ -299,6 +322,10 @@ export function CampaignDetailPage() {
         meta={
           <div className="flex items-center gap-2 flex-wrap">
             <CampaignStatusBadge status={c.status} />
+            <span className="inline-flex items-center gap-1 rounded bg-surface-sunken px-2 py-0.5 text-xs font-medium text-ink-muted">
+              Owner: {c.createdBy?.name || "Team"}
+              {isOwner && " (You)"}
+            </span>
             <Badge
               tone={
                 c.automationMode === "AUTOMATIC"
@@ -325,6 +352,16 @@ export function CampaignDetailPage() {
         actions={
           <>
             {primary}
+            {can("campaigns.share") && (
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={<Users className="h-4 w-4" />}
+                onClick={() => setCollaboratorsOpen(true)}
+              >
+                Collaborators
+              </Button>
+            )}
             <ActionMenu
               items={[
                 { label: "Duplicate as new draft", onSelect: () => duplicate.mutate(), hidden: !can("campaigns.manage") },
@@ -351,6 +388,7 @@ export function CampaignDetailPage() {
       />
 
       <div className="space-y-6">
+        <CampaignWorkflowSteps activeStep={c.status === "DRAFT" ? 2 : c.status === "PENDING_APPROVAL" ? 3 : 4} />
         <StatusBanner c={c} />
 
         {!preApproval && (
@@ -427,6 +465,10 @@ export function CampaignDetailPage() {
 
         {tab === "templates" && (
           <TemplateRulesPanel campaign={c} readOnly={c.status !== "DRAFT"} />
+        )}
+
+        {tab === "analytics" && !preApproval && (
+          <CampaignAnalyticsPanel campaignId={id} />
         )}
 
         {tab === "recipients" && !preApproval && <RecipientsPanel campaignId={id} counts={c.counts} live={c.status === "SENDING"} fromLine={fromLine} initialFilter={params.get("filter") ?? undefined} />}
@@ -550,6 +592,14 @@ export function CampaignDetailPage() {
             ))}
           </div>
         </Dialog>
+      )}
+
+      {collaboratorsOpen && (
+        <CampaignCollaboratorsModal
+          campaign={c}
+          open={collaboratorsOpen}
+          onClose={() => setCollaboratorsOpen(false)}
+        />
       )}
     </>
   );

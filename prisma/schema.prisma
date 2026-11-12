@@ -86,7 +86,21 @@ enum EnrichmentStatus {
 // Keep in sync with src/shared/auth.ts (UserRoleSchema / UserStatusSchema)
 enum UserRole {
   FOUNDER
+  FOUNDER_OFFICE
   EMPLOYEE
+}
+
+enum CampaignAccessRole {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+enum TemplateScope {
+  ORGANIZATION
+  PERSONAL
+  SHARED
+  CAMPAIGN
 }
 
 enum UserStatus {
@@ -126,6 +140,8 @@ model Contact {
   contactPersonaConfidence Float?
   contactPersonaStatus     EnrichmentStatus?
 
+  createdById       String?
+  createdBy         User?                      @relation("ContactCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   memberships       ListMembership[]
   enrichments       Enrichment[]
   sends             Send[]
@@ -135,6 +151,7 @@ model Contact {
   @@index([company])
   @@index([hotelSegment])
   @@index([contactPersona])
+  @@index([createdById])
   @@map("contacts")
 }
 
@@ -142,6 +159,9 @@ model ContactList {
   id          String   @id @default(cuid())
   name        String   @unique
   description String?
+  createdById String?
+  isShared    Boolean  @default(false)
+  createdBy   User?    @relation("ContactListCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   createdAt   DateTime @default(now()) @db.Timestamptz
   updatedAt   DateTime @updatedAt @db.Timestamptz
 
@@ -149,6 +169,7 @@ model ContactList {
   campaigns Campaign[]
   imports   ImportBatch[]
 
+  @@index([createdById])
   @@map("contact_lists")
 }
 
@@ -191,15 +212,20 @@ model ImportBatch {
 // ============================================================================
 
 model Template {
-  id          String   @id @default(cuid())
-  name        String   @unique
+  id          String        @id @default(cuid())
+  name        String        @unique
   subject     String
   bodyHtml    String
   bodyText    String?
+  attachments Json          @default("[]")
   description String?
-  version     Int      @default(1)
-  createdAt   DateTime @default(now()) @db.Timestamptz
-  updatedAt   DateTime @updatedAt @db.Timestamptz
+  category    String?
+  version     Int           @default(1)
+  scope       TemplateScope @default(ORGANIZATION)
+  createdById String?
+  createdBy   User?         @relation("TemplateCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime      @default(now()) @db.Timestamptz
+  updatedAt   DateTime      @updatedAt @db.Timestamptz
 
   campaigns         Campaign[]
   campaignTemplates CampaignTemplate[]
@@ -208,6 +234,9 @@ model Template {
   sequenceSteps     CampaignSequenceStep[]
   sends             Send[]
 
+  @@index([scope])
+  @@index([createdById])
+  @@index([category])
   @@map("templates")
 }
 
@@ -224,6 +253,8 @@ model Campaign {
   fromName          String
   fromEmail         String?
   replyTo           String?
+  mailboxId         String?
+  mailbox           MailboxAccount? @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
   sendRatePerMinute Int            @default(20)
   automationMode    CampaignAutomationMode @default(APPROVAL_REQUIRED)
 
@@ -241,6 +272,7 @@ model Campaign {
   approvedById          String?
   approvedByUser        User?     @relation("CampaignApprovedBy", fields: [approvedById], references: [id], onDelete: Restrict)
   approvedAt            DateTime? @db.Timestamptz
+  approvalRole          UserRole?
   // Why sending stopped on its own (e.g. mailbox sign-in failed, daily limit)
   pausedReason          String?
   startedAt             DateTime? @db.Timestamptz
@@ -255,10 +287,30 @@ model Campaign {
   sequenceSteps      CampaignSequenceStep[]
   recipientStates    CampaignRecipientState[]
   sends              Send[]
+  collaborators      CampaignCollaborator[]
 
   @@index([status])
   @@index([contactListId])
+  @@index([createdById])
+  @@index([mailboxId])
   @@map("campaigns")
+}
+
+model CampaignCollaborator {
+  id         String             @id @default(cuid())
+  campaignId String
+  campaign   Campaign           @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User               @relation("UserCampaignCollaborations", fields: [userId], references: [id], onDelete: Cascade)
+  role       CampaignAccessRole @default(EDITOR)
+  addedById  String?
+  addedBy    User?              @relation("CollaboratorAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+  addedAt    DateTime           @default(now()) @db.Timestamptz
+
+  @@unique([campaignId, userId])
+  @@index([userId])
+  @@index([campaignId])
+  @@map("campaign_collaborators")
 }
 
 // One message to one recipient, created (and rendered) when the campaign is approved
@@ -272,6 +324,7 @@ model Send {
   subject          String
   html             String
   text             String
+  attachments      Json           @default("[]")
   status           DeliveryStatus @default(PENDING)
   skipReason       String?
   // Generated before handoff so bounces/replies can be matched and nothing is sent twice
@@ -292,6 +345,10 @@ model Send {
   approvedAt       DateTime?      @db.Timestamptz
   inReplyToId      String?
   isCustom         Boolean        @default(false)
+  mailboxId        String?
+  mailbox          MailboxAccount? @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
+  sentByUserId     String?
+  sentByUser       User?          @relation("SendSentBy", fields: [sentByUserId], references: [id], onDelete: SetNull)
   createdAt        DateTime       @default(now()) @db.Timestamptz
   updatedAt        DateTime       @updatedAt @db.Timestamptz
 
@@ -302,6 +359,8 @@ model Send {
   @@index([campaignId, stepIndex, status])
   @@index([status, scheduledFor])
   @@index([status, sentAt])
+  @@index([mailboxId])
+  @@index([sentByUserId])
   @@index([contactId])
   @@map("sends")
 }
@@ -487,20 +546,76 @@ model User {
   lastLoginAt  DateTime?  @db.Timestamptz
   senderName   String?
   sendingEmail String?
+  canSendWithoutApproval Boolean @default(false)
   createdAt    DateTime   @default(now()) @db.Timestamptz
   updatedAt    DateTime   @updatedAt @db.Timestamptz
 
-  invitedUsers       User[]        @relation("UserInvitedBy")
-  sessions           Session[]
-  authTokens         AuthToken[]
-  campaignsCreated   Campaign[]    @relation("CampaignCreatedBy")
-  campaignsRequested Campaign[]    @relation("CampaignApprovalRequestedBy")
-  campaignsApproved  Campaign[]    @relation("CampaignApprovedBy")
-  auditLogs          AuditLog[]
-  imports            ImportBatch[]
+  invitedUsers           User[]                 @relation("UserInvitedBy")
+  sessions               Session[]
+  authTokens             AuthToken[]
+  campaignsCreated       Campaign[]             @relation("CampaignCreatedBy")
+  campaignsRequested     Campaign[]             @relation("CampaignApprovalRequestedBy")
+  campaignsApproved      Campaign[]             @relation("CampaignApprovedBy")
+  auditLogs              AuditLog[]
+  imports                ImportBatch[]
+  campaignCollaborations CampaignCollaborator[] @relation("UserCampaignCollaborations")
+  collaboratorsAdded     CampaignCollaborator[] @relation("CollaboratorAddedBy")
+  templatesCreated       Template[]             @relation("TemplateCreatedBy")
+  contactsCreated        Contact[]              @relation("ContactCreatedBy")
+  contactListsCreated    ContactList[]          @relation("ContactListCreatedBy")
+  mailboxAccount         UserMailbox?
+  mailboxAccess          MailboxAccess[]        @relation("UserMailboxAccess")
+  sendsInitiated         Send[]                 @relation("SendSentBy")
 
   @@index([role, status])
   @@map("users")
+}
+
+model MailboxAccount {
+  id                 String   @id @default(cuid())
+  email              String   @unique @db.Citext
+  fromName           String
+  encryptedPassword  String
+  lastVerifiedAt     DateTime @db.Timestamptz
+  createdAt          DateTime @default(now()) @db.Timestamptz
+  updatedAt          DateTime @updatedAt @db.Timestamptz
+
+  accessList         MailboxAccess[]
+  campaigns          Campaign[]
+  sends              Send[]
+
+  @@map("mailbox_accounts")
+}
+
+model MailboxAccess {
+  id                 String         @id @default(cuid())
+  mailboxId          String
+  mailbox            MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+  userId             String
+  user               User           @relation("UserMailboxAccess", fields: [userId], references: [id], onDelete: Cascade)
+  senderName         String?
+  isDefault          Boolean        @default(false)
+  createdAt          DateTime       @default(now()) @db.Timestamptz
+  updatedAt          DateTime       @updatedAt @db.Timestamptz
+
+  @@unique([mailboxId, userId])
+  @@index([userId])
+  @@index([mailboxId])
+  @@map("mailbox_access")
+}
+
+model UserMailbox {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email              String   @unique @db.Citext
+  fromName           String
+  encryptedPassword  String
+  lastVerifiedAt     DateTime @db.Timestamptz
+  createdAt          DateTime @default(now()) @db.Timestamptz
+  updatedAt          DateTime @updatedAt @db.Timestamptz
+
+  @@map("user_mailboxes")
 }
 
 model Session {

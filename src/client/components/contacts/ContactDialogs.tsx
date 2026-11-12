@@ -9,20 +9,22 @@ import { SelectField, TextAreaField, TextField } from "../ui/Field";
 import { Callout } from "../ui/Feedback";
 import { Dialog } from "../ui/Overlay";
 import { useToast } from "../ui/Toast";
-import { ContactInputSchema, type ContactListDto } from "@shared/types";
+import { ContactBatchInputSchema, type ContactDto, type ContactListDto } from "@shared/types";
 
 export function NewListDialog({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated?: (list: ContactListDto) => void }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [isShared, setIsShared] = useState(false);
   const invalidate = useInvalidate();
   const toast = useToast();
   const create = useMutation({
-    mutationFn: () => api.post<ContactListDto>("/api/lists", { name, description: description || null }),
+    mutationFn: () => api.post<ContactListDto>("/api/lists", { name, description: description || null, isShared }),
     onSuccess: async (res) => {
       await invalidate("lists");
       toast.success("List created", res.data.name);
       setName("");
       setDescription("");
+      setIsShared(false);
       onCreated?.(res.data);
       onClose();
     },
@@ -44,6 +46,10 @@ export function NewListDialog({ open, onClose, onCreated }: { open: boolean; onC
       <div className="space-y-4">
         <TextField label="Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Goa boutique hotels" data-autofocus />
         <TextAreaField label="Description" optional value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
+        <label className="flex items-start gap-2 text-[13px] text-ink-muted">
+          <input type="checkbox" checked={isShared} onChange={(event) => setIsShared(event.target.checked)} className="mt-0.5 accent-brand" />
+          <span>Share this list with the organization</span>
+        </label>
         {create.isError && <Callout tone="danger">{errorMessage(create.error)}</Callout>}
       </div>
     </Dialog>
@@ -101,18 +107,31 @@ export function NewContactDialog({ open, onClose, defaultListId }: { open: boole
   const invalidate = useInvalidate();
   const toast = useToast();
   const create = useMutation({
-    mutationFn: (body: unknown) => api.post("/api/contacts", body),
-    onSuccess: async () => {
+    mutationFn: (body: unknown) => api.post<ContactDto[]>("/api/contacts/bulk", body),
+    onSuccess: async (res) => {
       await invalidate("contacts", "lists");
-      toast.success("Contact added", form.email);
+      toast.success(`${plural(res.data.length, "contact")} saved`, res.data.map((contact) => contact.email).join(", "));
       setForm(empty);
       onClose();
     },
   });
   const submit = () => {
-    const parsed = ContactInputSchema.safeParse(form);
+    const emails = form.email.split(/[,\n;]+/).map((email) => email.trim()).filter(Boolean);
+    const parsed = ContactBatchInputSchema.safeParse({
+      emails,
+      firstName: form.firstName,
+      lastName: form.lastName,
+      company: form.company,
+      title: form.title,
+      phone: form.phone,
+      listIds: defaultListId ? [defaultListId] : [],
+    });
     if (!parsed.success) {
-      setErrors(Object.fromEntries(Object.entries(parsed.error.flatten().fieldErrors).map(([k, v]) => [k, v?.[0]])));
+      const fieldErrors = parsed.error.flatten().fieldErrors;
+      setErrors({
+        ...Object.fromEntries(Object.entries(fieldErrors).map(([k, v]) => [k === "emails" ? "email" : k, v?.[0]])),
+        ...(emails.length === 0 ? { email: "Enter at least one email address." } : {}),
+      });
       return;
     }
     setErrors({});
@@ -135,7 +154,17 @@ export function NewContactDialog({ open, onClose, defaultListId }: { open: boole
       }
     >
       <div className="grid gap-4 sm:grid-cols-2">
-        <div className="sm:col-span-2">{field("email", "Email", { type: "email" })}</div>
+        <div className="sm:col-span-2">
+          <TextField
+            label="Email addresses"
+            hint="Enter one or more addresses, separated by commas, semicolons, or new lines. Each address becomes a separate contact."
+            value={form.email}
+            onChange={(e) => setForm({ ...form, email: e.target.value })}
+            error={errors.email}
+            placeholder="alex@example.com, alex.work@example.com"
+            autoComplete="email"
+          />
+        </div>
         {field("firstName", "First name", { optional: true })}
         {field("lastName", "Last name", { optional: true })}
         {field("company", "Company", { optional: true })}

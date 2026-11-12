@@ -11,6 +11,7 @@ import {
   STANDARD_FIELD_LABELS,
   WRITER_LENGTHS,
   WRITER_TONES,
+  convertPersonalDraftToTemplate,
   reviewTemplateDraft,
   type TemplateDraftDto,
   type TemplateDraftRequestSchema,
@@ -121,9 +122,19 @@ Personalisation uses merge fields: {{fieldName}} or {{fieldName|fallback}} or ch
 - Any field that not every contact has MUST have a fallback that reads naturally, e.g. "Hi {{firstName|there}}," or "teams like {{company|yours}}".
 - Use personalisation where it helps; don't force every field in.
 
-Facts: use only what the brief and the example state. Don't invent results, numbers, prices, clients, awards, dates or links. Where a detail is unknown, write around it. Never leave [placeholders].
+STRICT SINGLE-EMAIL OUTPUT FORMAT:
+- You must output EXACTLY ONE production email template (one subject line and one plain-text body).
+- NEVER produce "Option 1 / Option 2", multiple versions, bulleted alternatives, commentary, or conversational chat text (e.g. "Here is your draft:").
+- Plain text body, paragraphs separated by one blank line. No HTML, no bullet symbols. Subject under 70 characters.
 
-Format: plain text body, paragraphs separated by one blank line. No HTML, no bullet symbols. Subject under 60 characters.`;
+PERSONAL AI DRAFT INGESTION (CHATGPT / CLAUDE / PERPLEXITY):
+- If the user provides an example or rough draft from their personal AI:
+  1. Identify the core message, positioning, and value proposition.
+  2. Transform any bracketed tokens (e.g. [First Name], [Company Name], [Hotel Name], [Initiative]) into valid FocusRealm merge tags (e.g. {{firstName|there}}, {{company|your team}}).
+  3. Strip away all AI meta-text, options, or conversational fluff.
+  4. Ensure every merge field complies with FocusRealm fallback rules so missing recipient data never breaks sending.
+
+Facts: use only what the brief and the example state. Don't invent results, numbers, prices, clients, awards, dates or links. Where a detail is unknown, write around it. Never leave [placeholders].`;
 
 export function buildPrompt(input: DraftInput, fields: WriterField[], totalContacts: number): string {
   const fieldLines = fields
@@ -262,9 +273,11 @@ export function generateBotDraft(
   const firstTag = has("firstName") ? "{{firstName|there}}" : "there";
   const signOff = input.signOff?.trim() || "Founder’s Office\nFocusRealm\nhttps://misehotel.com/\nhttps://focusrealm.org/";
 
-  // 1. If an example was provided (e.g. the GrowGuest benchmark or user template):
+  // 1. If an example was provided (e.g. personal AI draft or benchmark template):
   if (input.example && input.example.trim().length > 30) {
-    let body = input.example.trim();
+    const converted = convertPersonalDraftToTemplate(input.example, ctx.fields, ctx.totalContacts, { signOff });
+    let body = converted.body;
+    let subject = converted.subject;
 
     // Replace specific company names with dynamic merge tag
     const companyMatch = body.match(/\b(GrowGuest|Concierge Collective|RevOpt Global|HTI India|Webvi Solutions|CleanGreen|Acme|XYZ)\b/gi);
@@ -287,20 +300,12 @@ export function generateBotDraft(
     // Normalize quotes around merge tags
     body = body.replace(/“/g, '"').replace(/”/g, '"');
 
-    // Extract subject if provided
-    let subject = `FocusRealm & ${companyTag} — Collaborative Partnership Opportunity`;
-    const subjectMatch = body.match(/^Subject:\s*(.+)$/im);
-    if (subjectMatch && subjectMatch[1]) {
-      subject = subjectMatch[1].trim();
-      body = body.replace(/^Subject:\s*.+\n+/im, "");
-    }
-
-    if (!body.includes("FocusRealm") || !body.includes("https://")) {
+    if (!body.includes("FocusRealm") && !body.includes("https://")) {
       body += `\n\n${signOff}`;
     }
 
     const draft = {
-      name: "Collaborative Partnership Outreach",
+      name: "Standardized Outreach Template",
       subject: subject.slice(0, 100),
       body: body.replace(/\r\n/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n"),
     };

@@ -1,9 +1,10 @@
 // Pre-approval review: who will receive it, who won't and why, and what they'll see
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { CheckCircle2, Split } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Split } from "lucide-react";
 import type { CampaignReviewDto } from "@shared/types";
 import { num, plural } from "../../lib/format";
+import { useMailbox } from "../../lib/queries";
 import { Panel, Stat } from "../ui/Card";
 import { Badge } from "../ui/Badge";
 import { Callout } from "../ui/Feedback";
@@ -38,6 +39,14 @@ export function ReviewPanel({ review, fromLine }: { review: CampaignReviewDto; f
   const [sampleIndex, setSampleIndex] = useState(0);
   const sample = review.sample[sampleIndex] ?? review.sample[0];
   const skipped = review.total - review.ready;
+  const mailbox = useMailbox();
+
+  const mailboxEmail = mailbox.data?.data.smtp.fromEmail || mailbox.data?.data.smtp.user || "";
+  const mailboxDomain = mailboxEmail.includes("@") ? mailboxEmail.split("@")[1]?.toLowerCase() : "";
+  const senderEmailMatch = fromLine.match(/<([^>]+)>/);
+  const senderEmail = senderEmailMatch ? senderEmailMatch[1] : fromLine;
+  const senderDomain = senderEmail && senderEmail.includes("@") ? senderEmail.split("@")[1]?.toLowerCase() : "";
+  const isDomainMismatch = Boolean(mailboxDomain && senderDomain && mailboxDomain !== senderDomain);
 
   const hasMultiTemplate = (review.templateBreakdown?.length ?? 0) > 1;
 
@@ -145,7 +154,29 @@ export function ReviewPanel({ review, fromLine }: { review: CampaignReviewDto; f
             </div>
           )}
 
+          {!!sample.attachments?.length && (
+            <p className="mb-4 text-xs text-ink-muted">
+              Attachments: {sample.attachments.join(", ")}
+            </p>
+          )}
+
           {sample.missingFields.length > 0 && <Callout tone="warning" className="mb-4">This contact is missing {sample.missingFields.join(", ")} and won't be sent this email.</Callout>}
+          {isDomainMismatch && (
+            <div className="mb-4 rounded-xl border border-amber-300 bg-amber-50/80 p-3.5 text-xs text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-200">
+              <div className="flex items-start gap-2.5">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400 mt-0.5" />
+                <div>
+                  <p className="font-semibold text-[13px] text-amber-900 dark:text-amber-300">
+                    Sender Domain Protection Active (SpaceMail JFE040011)
+                  </p>
+                  <p className="mt-1 leading-relaxed text-amber-900/90 dark:text-amber-300/90">
+                    The campaign sender is set to <span className="font-mono font-medium">{senderEmail}</span>, while the active SMTP mailbox is authenticated as <span className="font-mono font-medium">{mailboxEmail}</span>.
+                    To prevent SpaceMail antispam rejection (554 5.7.1) and protect company domain reputation, the mailer will dispatch via the authenticated mailbox and automatically route all recipient responses to <span className="font-mono font-medium">{senderEmail}</span> via Reply-To.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
           <EmailPreview from={fromLine} to={sample.email} subject={sample.subject} html={sample.html} text={sample.text} />
         </Panel>
       )}

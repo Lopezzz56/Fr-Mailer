@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
-import { Copy, Sparkles, Trash2 } from "lucide-react";
+import { ClipboardPaste, Copy, FileUp, Paperclip, Sparkles, Trash2, X } from "lucide-react";
 import { api, errorMessage } from "../../lib/api";
 import { useContacts, useContactFields, useInvalidate, useTemplate } from "../../lib/queries";
 import { useDebounced, useTitle, useUnsavedChanges } from "../../lib/hooks";
@@ -22,23 +22,27 @@ import { EmailPreview } from "../../components/email/EmailPreview";
 import { UnsavedChangesDialog } from "../../components/layout/UnsavedChangesDialog";
 import { TemplateWriter } from "../../components/templates/TemplateWriter";
 import { STANDARD_FIELDS, contactMergeData, extractMergeFields, htmlToText, isPlainTextTemplate, plainTextToHtml, renderEmail, validateTemplate } from "@shared/merge";
-import type { TemplateDto } from "@shared/types";
+import type { TemplateAttachmentDto, TemplateDto } from "@shared/types";
+import type { TemplateScope } from "@shared/auth";
 import type { TemplateDraftDto } from "@shared/template-writer";
 
 interface Draft {
   name: string;
   description: string;
+  category: string;
   subject: string;
   mode: "text" | "html";
   body: string; // plain text (text mode) or HTML (html mode)
   textAlt: string; // optional plain-text alternative in html mode
+  scope: TemplateScope;
 }
 
-function getEmptyDraft(userName?: string): Draft {
+function getEmptyDraft(userName?: string, defaultScope: TemplateScope = "PERSONAL", defaultCategory = ""): Draft {
   const cleanName = userName && !/demo|founder|admin|test/i.test(userName) ? userName.trim() : "";
   return {
     name: "",
     description: "",
+    category: defaultCategory,
     subject: "Ensuring frontline service execution at {{company|your hotel}}",
     mode: "text",
     body:
@@ -57,6 +61,7 @@ function getEmptyDraft(userName?: string): Draft {
       "https://misehotel.com/\n" +
       "https://focusrealm.org/",
     textAlt: "",
+    scope: defaultScope,
   };
 }
 
@@ -65,10 +70,12 @@ function fromTemplate(t: TemplateDto): Draft {
   return {
     name: t.name,
     description: t.description ?? "",
+    category: t.category ?? "",
     subject: t.subject,
     mode: plain ? "text" : "html",
     body: plain ? t.bodyText! : t.bodyHtml,
     textAlt: plain ? "" : (t.bodyText ?? ""),
+    scope: t.scope ?? "PERSONAL",
   };
 }
 
@@ -80,31 +87,76 @@ function toParts(d: Draft) {
 
 const SAMPLE = { firstName: "Alex", lastName: "Morgan", fullName: "Alex Morgan", email: "alex@example.com", company: "Seaside Hotel", title: "General Manager", phone: "+91 98200 00000" };
 
-export function TemplateEditorPage() {
+export function TemplateEditorPage({
+  embedded = false,
+  onSaved,
+  onCancel,
+  initialScope,
+  initialCategory,
+  initialTemplateId,
+  campaignId,
+  cancelLabel = "Back to Campaign Templates",
+}: {
+  embedded?: boolean;
+  onSaved?: (template: TemplateDto) => void;
+  onCancel?: () => void;
+  initialScope?: TemplateScope;
+  initialCategory?: string;
+  initialTemplateId?: string;
+  campaignId?: string;
+  cancelLabel?: string;
+}) {
   const { id } = useParams();
-  const isNew = !id;
+  const effectiveId = embedded ? initialTemplateId : (id ?? initialTemplateId);
+  const [persistedId, setPersistedId] = useState<string>();
+  const templateId = effectiveId ?? persistedId;
+  const isNew = !templateId;
   const navigate = useNavigate();
   const toast = useToast();
   const invalidate = useInvalidate();
   const { user, can } = useAuth();
   const readOnly = !can("templates.manage");
-  const template = useTemplate(id);
+  const template = useTemplate(templateId);
   const fields = useContactFields();
 
-  const [draft, setDraft] = useState<Draft | null>(() => (isNew ? getEmptyDraft(user?.name) : null));
-  const [saved, setSaved] = useState<Draft | null>(() => (isNew ? getEmptyDraft(user?.name) : null));
+  const [draft, setDraft] = useState<Draft | null>(() =>
+    isNew
+      ? getEmptyDraft(
+          user?.name,
+          initialScope ?? (campaignId ? "CAMPAIGN" : "PERSONAL"),
+          initialCategory ?? ""
+        )
+      : null
+  );
+  const [saved, setSaved] = useState<Draft | null>(() =>
+    isNew
+      ? getEmptyDraft(
+          user?.name,
+          initialScope ?? (campaignId ? "CAMPAIGN" : "PERSONAL"),
+          initialCategory ?? ""
+        )
+      : null
+  );
   const [touched, setTouched] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [writerOpen, setWriterOpen] = useState(false);
+  const [writerTab, setWriterTab] = useState<"personal" | "ai" | "starter">("personal");
   const [pendingDraft, setPendingDraft] = useState<TemplateDraftDto | null>(null);
+  const [attachments, setAttachments] = useState<TemplateAttachmentDto[]>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<File[]>([]);
+  const [createdDuringFlow, setCreatedDuringFlow] = useState(false);
   const focused = useRef<{ el: HTMLInputElement | HTMLTextAreaElement; key: "subject" | "body" | "textAlt" } | null>(null);
-  const currentIdRef = useRef(id);
+  const currentIdRef = useRef(effectiveId);
 
   useEffect(() => {
-    if (currentIdRef.current !== id) {
-      currentIdRef.current = id;
+    if (currentIdRef.current !== effectiveId) {
+      currentIdRef.current = effectiveId;
       if (isNew) {
-        const next = getEmptyDraft(user?.name);
+        const next = getEmptyDraft(
+          user?.name,
+          initialScope ?? (campaignId ? "CAMPAIGN" : "PERSONAL"),
+          initialCategory ?? ""
+        );
         setDraft(next);
         setSaved(next);
         setTouched(false);
@@ -114,18 +166,22 @@ export function TemplateEditorPage() {
         setTouched(false);
       }
     }
-  }, [id, isNew, user?.name]);
+  }, [effectiveId, isNew, user?.name, initialScope, campaignId, initialCategory]);
 
   useEffect(() => {
     if (isNew && draft && !touched && user?.name && !draft.body.includes(user.name)) {
       const cleanName = user.name && !/demo|founder|admin|test/i.test(user.name) ? user.name.trim() : "";
       if (cleanName) {
-        const next = getEmptyDraft(cleanName);
+        const next = getEmptyDraft(
+          cleanName,
+          initialScope ?? (campaignId ? "CAMPAIGN" : "PERSONAL"),
+          initialCategory ?? ""
+        );
         setDraft(next);
         setSaved(next);
       }
     }
-  }, [isNew, user?.name, touched, draft]);
+  }, [isNew, user?.name, touched, draft, initialScope, campaignId, initialCategory]);
 
   useEffect(() => {
     if (template.data && !draft) {
@@ -134,8 +190,11 @@ export function TemplateEditorPage() {
       setSaved(d);
     }
   }, [template.data, draft]);
+  useEffect(() => {
+    if (template.data) setAttachments(template.data.data.attachments ?? []);
+  }, [template.data]);
 
-  useTitle(isNew ? "New template" : (template.data?.data.name ?? "Template"));
+  useTitle(embedded ? "New campaign" : isNew ? "New template" : (template.data?.data.name ?? "Template"));
   const dirty = Boolean(draft && saved && JSON.stringify(draft) !== JSON.stringify(saved));
   const blocker = useUnsavedChanges(dirty);
 
@@ -154,20 +213,52 @@ export function TemplateEditorPage() {
   const used = parts ? extractMergeFields(parts) : [];
 
   const save = useMutation({
-    mutationFn: () => {
-      const body = { name: draft!.name, description: draft!.description || null, ...toParts(draft!) };
-      return isNew ? api.post<TemplateDto>("/api/templates", body) : api.patch<TemplateDto>(`/api/templates/${id}`, body);
+    mutationFn: async () => {
+      const creating = !templateId;
+      const body = {
+        name: draft!.name,
+        description: draft!.description || null,
+        category: draft!.category.trim() || null,
+        scope: draft!.scope,
+        campaignId: campaignId || null,
+        ...toParts(draft!),
+      };
+      let savedTemplate = creating
+        ? (await api.post<TemplateDto>("/api/templates", body)).data
+        : dirty
+          ? (await api.patch<TemplateDto>(`/api/templates/${templateId}`, body)).data
+          : template.data!.data;
+
+      if (creating) {
+        setPersistedId(savedTemplate.id);
+        setCreatedDuringFlow(true);
+      }
+
+      for (const file of pendingAttachments) {
+        const form = new FormData();
+        form.append("file", file);
+        const uploaded = await api.upload<TemplateAttachmentDto>(`/api/templates/${savedTemplate.id}/attachments`, form);
+        const attachment = uploaded.data;
+        savedTemplate = { ...savedTemplate, attachments: [...savedTemplate.attachments, attachment] };
+        setAttachments((current) => [...current, attachment]);
+        setPendingAttachments((current) => current.filter((queued) => queued !== file));
+      }
+
+      return { template: savedTemplate, created: creating || createdDuringFlow };
     },
-    onSuccess: async (res) => {
-      const updatedDraft = { ...draft!, name: res.data.name };
+    onSuccess: async ({ template: savedTemplate, created }) => {
+      const updatedDraft = { ...draft!, name: savedTemplate.name };
       flushSync(() => {
         setDraft(updatedDraft);
         setSaved(updatedDraft);
       });
-      currentIdRef.current = res.data.id;
-      await invalidate("templates");
-      toast.success(isNew ? "Template created" : "Template saved");
-      if (isNew) navigate(`/templates/${res.data.id}`, { replace: true });
+      await invalidate("templates", "campaigns");
+      toast.success(created ? "Template created" : "Template saved");
+      if (embedded && onSaved) {
+        onSaved(savedTemplate);
+      } else if (created) {
+        navigate(`/templates/${savedTemplate.id}`, { replace: true });
+      }
     },
     onError: (err) => toast.error("Could not save template", errorMessage(err)),
   });
@@ -214,29 +305,59 @@ export function TemplateEditorPage() {
   });
 
   const applyDraft = (g: TemplateDraftDto) => {
-    setDraft((d) => ({ ...d!, name: d!.name.trim() ? d!.name : g.name, mode: "text", subject: g.subject, body: g.body, textAlt: "" }));
+    setDraft((d) => ({
+      ...d!,
+      name: d?.name?.trim() ? d.name : (g.name || "AI Outreach Template"),
+      mode: "text",
+      subject: g.subject,
+      body: g.body,
+      textAlt: "",
+    }));
+    setTouched(true);
     setPendingDraft(null);
     setWriterOpen(false);
-    toast.success("Draft added to the editor", "Read it through and adjust anything before saving.");
+    toast.success("Draft applied to editor", "Your template has been updated. Review and save when ready.");
   };
-  const hasContent = draft.subject.trim() !== "" || (draft.body.trim() !== "" && draft.body !== getEmptyDraft(user?.name).body);
-  const offerDraft = (g: TemplateDraftDto) => (hasContent ? setPendingDraft(g) : applyDraft(g));
+
+  const offerDraft = (g: TemplateDraftDto) => {
+    applyDraft(g);
+  };
 
   const nameError = touched && !draft.name.trim() ? "Give the template a name." : null;
-  const canSave = !readOnly && dirty && errors.length === 0 && draft.name.trim() !== "";
+  const canSave = !readOnly && (dirty || pendingAttachments.length > 0) && errors.length === 0 && draft.name.trim() !== "";
   const customFields = (fields.data?.data ?? []).filter((f) => !STANDARD_FIELDS.some((s) => s.name === f.name));
+  const hasContent = Boolean(draft.body.trim());
 
   return (
     <>
       <PageHeader
-        back={{ to: "/templates", label: "Templates" }}
+        back={embedded ? undefined : { to: "/templates", label: "Templates" }}
         title={isNew ? "New template" : draft.name || "Untitled template"}
         description={isNew ? "Write it once; personalize it for every recipient." : template.data && `Version ${template.data.data.version} · used in ${plural(template.data.data.campaignCount, "campaign")}`}
+        hideGlobalControls={embedded}
         actions={
-          !readOnly && (
+          (!readOnly || embedded) && (
             <>
-              <Button icon={<Sparkles className="h-4 w-4" />} onClick={() => setWriterOpen(true)}>
-                Write it for me
+              {embedded && <Button variant="secondary" onClick={onCancel}>{cancelLabel}</Button>}
+              {!readOnly && <>
+              <Button
+                variant="secondary"
+                icon={<ClipboardPaste className="h-4 w-4" />}
+                onClick={() => {
+                  setWriterTab("personal");
+                  setWriterOpen(true);
+                }}
+              >
+                Paste AI Draft
+              </Button>
+              <Button
+                icon={<Sparkles className="h-4 w-4" />}
+                onClick={() => {
+                  setWriterTab("ai");
+                  setWriterOpen(true);
+                }}
+              >
+                Write with AI
               </Button>
               {!isNew && (
                 <>
@@ -259,6 +380,7 @@ export function TemplateEditorPage() {
               >
                 {isNew ? "Create template" : dirty ? "Save changes" : "Saved"}
               </Button>
+              </>}
             </>
           )
         }
@@ -270,15 +392,185 @@ export function TemplateEditorPage() {
         <Callout tone="info" className="mb-6">Campaigns that are already approved keep the version they approved. Drafts will use your changes.</Callout>
       )}
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <div className="space-y-6">
-          <Panel title="Details">
-            <div className="space-y-4">
-              <TextField label="Template name" value={draft.name} onChange={(e) => set("name", e.target.value)} onBlur={() => setTouched(true)} error={nameError} placeholder="e.g. Hotel partnership intro" disabled={readOnly} />
-              <TextField label="Internal note" optional value={draft.description} onChange={(e) => set("description", e.target.value)} placeholder="When to use this template" disabled={readOnly} />
+      {/* Top Details & Attachments Bar */}
+      <div className="mb-6 space-y-4">
+        <Panel
+          title="Template Details"
+          description="Basic settings, categorization, visibility, and optional attachments."
+        >
+          <div className="space-y-4">
+            <div className="grid gap-4 md:grid-cols-3">
+              <TextField
+                label="Template name"
+                value={draft.name}
+                onChange={(e) => set("name", e.target.value)}
+                onBlur={() => setTouched(true)}
+                error={nameError}
+                placeholder="e.g. Hotel partnership intro"
+                disabled={readOnly}
+              />
+              <div className="space-y-1.5">
+                <TextField
+                  label="Category / Folder"
+                  optional
+                  value={draft.category}
+                  onChange={(e) => set("category", e.target.value)}
+                  placeholder="e.g. Outreach, Partnerships, Advisory"
+                  disabled={readOnly}
+                />
+                <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                  <span className="text-[11px] text-ink-subtle">Quick tag:</span>
+                  {["Outreach", "Partnerships", "Advisory", "Follow-up", "Executive"].map((cat) => (
+                    <button
+                      key={cat}
+                      type="button"
+                      disabled={readOnly}
+                      onClick={() => set("category", cat)}
+                      className={`rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors ${
+                        draft.category === cat
+                          ? "bg-brand text-white"
+                          : "bg-surface-muted text-ink-subtle hover:bg-surface-sunken hover:text-ink"
+                      }`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <SelectField
+                label="Scope & Visibility"
+                value={draft.scope}
+                onChange={(e) => set("scope", e.target.value as TemplateScope)}
+                options={[
+                  { value: "PERSONAL", label: "Personal (Only you)" },
+                  { value: "SHARED", label: "Shared (Collaborators & team)" },
+                  ...(can("templates.manage_org")
+                    ? [{ value: "ORGANIZATION", label: "FocusRealm Official (Organization-wide standard)" }]
+                    : []),
+                  ...(embedded || draft.scope === "CAMPAIGN"
+                    ? [{ value: "CAMPAIGN", label: "Campaign Collection (Specific to this campaign)" }]
+                    : []),
+                ]}
+                hint={
+                  draft.scope === "ORGANIZATION"
+                    ? "Official FocusRealm template available organization-wide across all campaigns."
+                    : draft.scope === "SHARED"
+                    ? "Teammates can view and use this template in their campaigns."
+                    : draft.scope === "CAMPAIGN"
+                    ? "Belongs specifically to this campaign's template collection."
+                    : "Private to your account."
+                }
+                disabled={readOnly}
+              />
             </div>
-          </Panel>
 
+            <div className="grid gap-4 md:grid-cols-2 pt-2 border-t border-line/60">
+              <TextField
+                label="Internal note"
+                optional
+                value={draft.description}
+                onChange={(e) => set("description", e.target.value)}
+                placeholder="When to use this template, target audience or context"
+                disabled={readOnly}
+              />
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-[13px] font-medium text-ink">Attachments</label>
+                    <span className="ml-1 text-xs text-ink-subtle">(Max 5 files, 20 MB total)</span>
+                  </div>
+                  {!readOnly && (
+                    <label
+                      htmlFor="template-attachments"
+                      className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 py-1 text-xs font-medium text-ink hover:border-brand hover:text-brand"
+                    >
+                      <FileUp className="h-3.5 w-3.5" /> Attach files
+                    </label>
+                  )}
+                </div>
+                {pendingAttachments.length > 0 && (
+                  <p className="text-[11px] text-amber-700 font-medium">
+                    {pendingAttachments.length} file{pendingAttachments.length > 1 ? "s" : ""} selected &mdash; will be uploaded when you click &ldquo;{isNew ? "Create template" : "Save changes"}&rdquo;.
+                  </p>
+                )}
+                <input
+                  type="file"
+                  accept=".pdf,.ppt,.pptx,.png,.jpg,.jpeg,.gif,.webp,application/pdf,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,image/png,image/jpeg,image/gif,image/webp"
+                  multiple
+                  className="sr-only"
+                  id="template-attachments"
+                  disabled={readOnly}
+                  onChange={(event) => {
+                    const picked = Array.from(event.target.files ?? []);
+                    event.target.value = "";
+                    const currentSize = attachments.reduce((sum, item) => sum + item.size, 0) +
+                      pendingAttachments.reduce((sum, item) => sum + item.size, 0);
+                    if (attachments.length + pendingAttachments.length + picked.length > 5) {
+                      toast.error("A template can have up to 5 attachments.");
+                      return;
+                    }
+                    if (currentSize + picked.reduce((sum, item) => sum + item.size, 0) > 20 * 1024 * 1024 ||
+                      picked.some((item) => item.size > 10 * 1024 * 1024)) {
+                      toast.error("Each attachment must be 10 MB or less, with a 20 MB total per template.");
+                      return;
+                    }
+                    if (picked.some((item) => !/\.(pdf|ppt|pptx|png|jpe?g|gif|webp)$/i.test(item.name))) {
+                      toast.error("Only PDF, PPT, PPTX, and image attachments are supported.");
+                      return;
+                    }
+                    setPendingAttachments((current) => [...current, ...picked]);
+                  }}
+                />
+                {attachments.length + pendingAttachments.length > 0 ? (
+                  <ul className="flex flex-wrap gap-2">
+                    {attachments.map((attachment) => (
+                      <li key={attachment.id} className="inline-flex items-center gap-1.5 rounded-md border border-line bg-surface px-2 py-1 text-xs text-ink">
+                        <Paperclip className="h-3.5 w-3.5 shrink-0 text-ink-subtle" />
+                        <span className="max-w-[160px] truncate">{attachment.name}</span>
+                        {!readOnly && (
+                          <button
+                            type="button"
+                            className="ml-1 rounded p-0.5 text-ink-subtle hover:text-danger"
+                            aria-label={`Remove ${attachment.name}`}
+                            onClick={async () => {
+                              try {
+                                await api.delete(`/api/templates/${templateId}/attachments/${attachment.id}`);
+                                setAttachments((current) => current.filter((item) => item.id !== attachment.id));
+                                await invalidate("templates");
+                              } catch (error) {
+                                toast.error("Couldn't remove attachment", errorMessage(error));
+                              }
+                            }}
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                    {pendingAttachments.map((file, index) => (
+                      <li key={`${file.name}-${file.lastModified}-${index}`} className="inline-flex items-center gap-1.5 rounded-md border border-line bg-surface-muted px-2 py-1 text-xs text-ink">
+                        <Paperclip className="h-3.5 w-3.5 shrink-0 text-brand" />
+                        <span className="max-w-[160px] truncate">{file.name}</span>
+                        <span className="rounded bg-brand-soft px-1.5 py-0.2 text-[10px] font-medium text-brand">Will save on submit</span>
+                        <button type="button" className="ml-1 rounded p-0.5 text-ink-subtle hover:text-danger" aria-label={`Remove ${file.name}`} onClick={() => setPendingAttachments((current) => current.filter((_, i) => i !== index))}>
+                          <X className="h-3 w-3" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-ink-subtle">No attachments added to this template.</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </Panel>
+      </div>
+
+      {/* Adjacent Side-by-Side Email Editor & Live Preview */}
+      <div className="grid gap-6 items-start lg:grid-cols-2">
+        {/* Left Column: Email Composition */}
+        <div className="space-y-6">
           <Panel
             title="Email"
             actions={
@@ -380,7 +672,8 @@ export function TemplateEditorPage() {
           </Panel>
         </div>
 
-        <div className="space-y-4 xl:sticky xl:top-6 xl:self-start">
+        {/* Right Column: Live Comparison Preview (Sticky for easy reference while editing) */}
+        <div className="space-y-4 lg:sticky lg:top-6">
           <Panel
             title="Preview"
             description="Exactly what a recipient sees, before the unsubscribe footer."
@@ -422,6 +715,7 @@ export function TemplateEditorPage() {
       {!readOnly && (
         <TemplateWriter
           open={writerOpen}
+          initialTab={writerTab}
           onClose={() => setWriterOpen(false)}
           currentDraft={{ subject: draft.subject, body: draft.mode === "text" ? draft.body : draft.textAlt || htmlToText(draft.body) }}
           onUse={offerDraft}

@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { STARTER_GOALS, WRITER_TONES, buildStarterTemplate, reviewTemplateDraft, type StarterGoal, type WriterField, type WriterTone } from "./template-writer.js";
+import {
+  STARTER_GOALS,
+  WRITER_TONES,
+  buildStarterTemplate,
+  convertPersonalDraftToTemplate,
+  reviewTemplateDraft,
+  type StarterGoal,
+  type WriterField,
+  type WriterTone,
+} from "./template-writer.js";
 import { validateTemplate } from "./merge.js";
 
 const fields: WriterField[] = [
@@ -62,5 +71,67 @@ describe("reviewTemplateDraft", () => {
 
   it("is quiet for a clean draft", () => {
     expect(reviewTemplateDraft({ subject: "An idea for {{company|your team}}", body: "Hi {{firstName|there}},\n\nThanks!" }, fields, 50)).toEqual([]);
+  });
+});
+
+describe("convertPersonalDraftToTemplate", () => {
+  it("converts raw ChatGPT drafts with bracketed placeholders into a single mail-merge template", () => {
+    const rawChatGPT = `
+Sure! Here is a cold email draft for your outreach:
+
+Subject: Exploring collaboration with [Company Name]
+
+Hi [First Name],
+
+I hope you're having a great week. I've been following [Company Name]'s hospitality work and wanted to connect.
+
+At FocusRealm, we are building Mise Hotel to help teams streamline operations. We would love to explore a joint [Initiative] with your team.
+
+Would you be open for a quick 15-minute call next week?
+
+Best regards,
+[Your Name]
+Founder & CEO
+
+Hope this helps! Let me know if you need any adjustments.
+
+Option 2:
+Subject: Quick question
+Different email here...
+`;
+
+    const res = convertPersonalDraftToTemplate(rawChatGPT, fields, 100, { signOff: "Frank Lopes\nFocusRealm" });
+
+    // Strictly ONE email format
+    expect(res.subject).toBe("Exploring collaboration with {{company|your team}}");
+    expect(res.body).not.toContain("Sure! Here is a cold email draft");
+    expect(res.body).not.toContain("Hope this helps");
+    expect(res.body).not.toContain("Option 2");
+    expect(res.body).not.toContain("Different email here");
+
+    // Placeholders mapped
+    expect(res.body).toContain("Hi {{firstName|there}},");
+    expect(res.body).toContain("{{company|your team}}'s hospitality work");
+    expect(res.body).toContain('{{initiativeHeadline|"More Bookings, Better Operations"}}');
+    expect(res.body).toContain("Frank Lopes");
+
+    // Rules checklist
+    expect(res.rules.find((r) => r.id === "single_format")?.passed).toBe(true);
+    expect(res.rules.find((r) => r.id === "has_merge_tags")?.passed).toBe(true);
+    expect(res.rules.find((r) => r.id === "fallback_safety")?.passed).toBe(true);
+    expect(res.rules.find((r) => r.id === "no_raw_placeholders")?.passed).toBe(true);
+  });
+
+  it("handles snake_case {{first_name}} and {{company_name}} tags safely converting them to camelCase", () => {
+    const draft = `Subject: Re: {{first_name|there}}, quick question for {{company_name|your hotel}}
+
+Hi {{first_name|there}},
+
+Hope all is well at {{company_name}}. We'd love to chat.
+`;
+    const res = convertPersonalDraftToTemplate(draft, fields, 100);
+    expect(res.subject).toBe("Re: {{firstName|there}}, quick question for {{company|your hotel}}");
+    expect(res.body).toContain("Hi {{firstName|there}},");
+    expect(res.body).toContain("Hope all is well at {{company|your team}}.");
   });
 });

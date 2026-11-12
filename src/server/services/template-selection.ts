@@ -8,6 +8,7 @@
 // - Pure, deterministic, auditable decisions with human-readable explanations.
 // - Do not treat unverified/guessed attributes as verified facts.
 import type { EnrichmentStatus } from "../../shared/types.js";
+import type { StoredTemplateAttachment } from "./template-storage.js";
 import {
   inferPersonaFromTitle,
   inferSegmentFromCompany,
@@ -54,6 +55,7 @@ export interface EligibleTemplate {
   bodyHtml: string;
   bodyText?: string | null;
   version: number;
+  attachments?: StoredTemplateAttachment[];
   isFallback?: boolean;
 }
 

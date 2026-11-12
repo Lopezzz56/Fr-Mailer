@@ -1,5 +1,6 @@
 // Multi-template eligibility, priority targeting rules, and recipient overrides
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   Edit2,
@@ -540,6 +541,12 @@ export function TemplateRulesPanel({ campaign, readOnly = false }: TemplateRules
             options={availableWorkspaceTemplates.map((t) => ({ value: t.id, label: t.name }))}
             placeholder="Select a template"
           />
+          <p className="text-xs text-ink-subtle">
+            Need a new template for this campaign?{" "}
+            <Link to="/templates/new" target="_blank" rel="noopener noreferrer" className="text-brand font-semibold hover:underline inline-flex items-center gap-1">
+              + Create template in new tab
+            </Link>
+          </p>
           <Checkbox
             label="Set as fallback template"
             description="If checked, this template will be assigned when no other rules match."

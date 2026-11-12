@@ -6,9 +6,9 @@
 //   • from /api/internal/tick (Vercel Cron, an external scheduler, or the previous burst)
 // Self-hosted servers don't use this: they run SendWorker.start() and InboxMonitor continuously.
 import { waitUntil } from "@vercel/functions";
-import { env, imapConfigured, isServerless } from "../config.js";
+import { env, isServerless } from "../config.js";
 import { acquireLease, hasQueuedWork, recoverInterruptedSends, releaseLease, SendWorker } from "./send-worker.js";
-import { checkInbox, getImapState } from "./inbox-monitor.js";
+import { anyInboxDue, checkAllInboxes } from "./inbox-monitor.js";
 
 // Must stay below the function's maxDuration (vercel.json: 300s) with room for one SMTP handoff
 const BURST_MS = 240_000;
@@ -26,10 +26,7 @@ export interface BurstResult {
 }
 
 async function inboxDue(): Promise<boolean> {
-  if (!imapConfigured || !env.IMAP_POLL_ENABLED) return false;
-  const state = await getImapState();
-  const last = state.lastCheckedAt ? new Date(state.lastCheckedAt).getTime() : 0;
-  return Date.now() - last >= env.IMAP_POLL_INTERVAL_SECONDS * 1000;
+  return anyInboxDue();
 }
 
 export async function runBurst(budgetMs = BURST_MS): Promise<BurstResult> {
@@ -40,7 +37,7 @@ export async function runBurst(budgetMs = BURST_MS): Promise<BurstResult> {
   try {
     let inboxChecked = false;
     if (await inboxDue()) {
-      await checkInbox().catch((err) => console.error("[inbox] check failed:", (err as Error).message));
+      await checkAllInboxes(true);
       inboxChecked = true;
     }
     const { handled, stoppedBecause } = await new SendWorker().runFor(budgetMs);

@@ -1,6 +1,10 @@
 // API contracts shared by server and client: request schemas (validated on the server)
 // and response shapes (what the server returns). Dates are ISO strings over the wire.
 import { z } from "zod";
+import type { UserRole, TemplateScope, CampaignCollaboratorDto } from "./auth.js";
+import { TemplateScopeSchema } from "./auth.js";
+export type { UserRole, TemplateScope, CampaignCollaboratorDto };
+export { TemplateScopeSchema };
 
 // ============================================================================
 // PRIMITIVES
@@ -137,9 +141,16 @@ export const ContactInputSchema = z.object({
 });
 export type ContactInput = z.input<typeof ContactInputSchema>;
 
+export const ContactBatchInputSchema = ContactInputSchema.omit({ email: true }).extend({
+  emails: z.array(EmailSchema).min(1).max(20).refine((emails) => new Set(emails).size === emails.length, "Remove duplicate email addresses"),
+  listIds: z.array(IdSchema).max(50).default([]),
+});
+export type ContactBatchInput = z.input<typeof ContactBatchInputSchema>;
+
 export const ContactListInputSchema = z.object({
   name: z.string().trim().min(1, "Name is required").max(100),
   description: optionalText(500),
+  isShared: z.boolean().default(false),
 });
 export type ContactListInput = z.input<typeof ContactListInputSchema>;
 
@@ -173,6 +184,8 @@ export interface ContactListDto {
   id: string;
   name: string;
   description: string | null;
+  createdById: string | null;
+  isShared: boolean;
   memberCount: number;
   createdAt: string;
   updatedAt: string;
@@ -348,8 +361,19 @@ export const TemplateInputSchema = z.object({
   bodyHtml: z.string().min(1, "Body is required").max(200_000),
   bodyText: optionalText(100_000),
   description: optionalText(500),
+  category: optionalText(100),
+  scope: TemplateScopeSchema.optional(),
+  campaignId: IdSchema.optional().nullable(),
 });
 export type TemplateInput = z.input<typeof TemplateInputSchema>;
+
+export interface TemplateCampaignRef {
+  id: string;
+  name: string;
+  status: string;
+  isFallback?: boolean;
+  priority?: number;
+}
 
 export interface TemplateDto {
   id: string;
@@ -358,10 +382,23 @@ export interface TemplateDto {
   bodyHtml: string;
   bodyText: string | null;
   description: string | null;
+  category: string | null;
   version: number;
+  scope: TemplateScope;
+  createdById: string | null;
+  createdBy?: UserRef | null;
   campaignCount: number;
+  campaigns?: TemplateCampaignRef[];
+  attachments: TemplateAttachmentDto[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TemplateAttachmentDto {
+  id: string;
+  name: string;
+  contentType: string;
+  size: number;
 }
 
 // ============================================================================
@@ -500,6 +537,7 @@ export const CampaignInputSchema = z.object({
     .optional()
     .nullable()
     .or(z.literal("").transform(() => null)),
+  mailboxId: IdSchema.optional().nullable(),
   replyTo: z
     .string()
     .trim()
@@ -569,8 +607,12 @@ export interface CampaignSummaryDto {
   template: { id: string; name: string };
   list: { id: string; name: string; memberCount: number };
   counts: CampaignCounts;
+  mailboxId?: string | null;
+  createdById?: string | null;
   createdBy: UserRef | null;
   approvedBy: UserRef | null;
+  approvalRole?: UserRole | null;
+  collaborators?: CampaignCollaboratorDto[];
   createdAt: string;
   updatedAt: string;
   approvedAt: string | null;
@@ -662,6 +704,7 @@ export interface ReviewRecipientSample {
   templateName: string;
   assignmentSource: "OVERRIDE" | "RULE" | "FALLBACK";
   assignmentReason: string;
+  attachments?: string[];
   isCustom?: boolean;
 }
 
@@ -758,6 +801,7 @@ export interface CampaignAnalyticsSummaryDto {
     positiveReplyRate: number;
     meetingRate: number;
     unsubscribeRate: number;
+    positiveOutcomeRate?: number;
   };
   byTemplate: {
     templateId: string;
@@ -768,6 +812,7 @@ export interface CampaignAnalyticsSummaryDto {
     repliedCount: number;
     positiveRepliesCount: number;
     meetingsBookedCount: number;
+    replyRate?: number;
   }[];
   byHotelSegment: {
     segment: string;
@@ -796,6 +841,22 @@ export interface CampaignAnalyticsSummaryDto {
     bouncedCount: number;
     replyRate: number;
   }[];
+  timeline?: {
+    date: string;
+    sent: number;
+    replied: number;
+    bounced: number;
+  }[];
+  outcomeBreakdown?: {
+    noResponse: number;
+    replied: number;
+    interested: number;
+    notInterested: number;
+    meetingBooked: number;
+    bounced: number;
+    unsubscribed: number;
+    pending: number;
+  };
 }
 
 export interface TemplatePerformanceItemDto {
@@ -963,6 +1024,56 @@ export interface EnrichmentDto {
 // OVERVIEW, MAILBOX, ACTIVITY
 // ============================================================================
 
+export interface MailboxAssignedUserDto {
+  userId: string;
+  userName: string;
+  userEmail: string;
+  userRole: UserRole;
+  employeeId?: string | null;
+  senderName: string | null;
+  isDefault: boolean;
+  assignedAt: string;
+}
+
+export interface MailboxAccountDto {
+  id: string;
+  email: string;
+  fromName: string;
+  lastVerifiedAt: string;
+  createdAt: string;
+  assignedUsers: MailboxAssignedUserDto[];
+}
+
+export interface UserAccessibleMailboxDto {
+  id: string;
+  email: string;
+  fromName: string;
+  senderName: string;
+  isDefault: boolean;
+  lastVerifiedAt: string;
+}
+
+export const ConnectMailboxInputSchema = z.object({
+  email: EmailSchema,
+  password: z.string().min(1).max(1024).optional(),
+  fromName: z.string().trim().min(1, "Sender display name is required").max(100),
+  assignUserIds: z.array(IdSchema).optional(),
+});
+export type ConnectMailboxInput = z.infer<typeof ConnectMailboxInputSchema>;
+
+export const AssignMailboxUserInputSchema = z.object({
+  userId: IdSchema,
+  senderName: optionalText(100),
+  isDefault: z.boolean().default(false),
+});
+export type AssignMailboxUserInput = z.infer<typeof AssignMailboxUserInputSchema>;
+
+export const UpdateMailboxUserInputSchema = z.object({
+  senderName: optionalText(100),
+  isDefault: z.boolean().default(false),
+});
+export type UpdateMailboxUserInput = z.infer<typeof UpdateMailboxUserInputSchema>;
+
 export interface MailboxStatusDto {
   smtp: { configured: boolean; host: string | null; port: number; secure: boolean; user: string | null; fromEmail: string | null; fromName: string };
   imap: {
@@ -974,6 +1085,14 @@ export interface MailboxStatusDto {
     lastError: string | null;
     unmatchedReplies?: { from: string; subject: string; snippet: string; date: string; detectedSentiment: string }[];
   };
+  teamMailboxHealth?: {
+    activeUsers: number;
+    connectedMailboxes: number;
+    inboxErrors: number;
+    inboxesNotChecked: number;
+  };
+  accessibleMailboxes?: UserAccessibleMailboxDto[];
+  allMailboxes?: MailboxAccountDto[];
   liveSendingEnabled: boolean;
   liveSendingBlocker: string | null;
   dailyLimit: number;
@@ -988,7 +1107,54 @@ export interface OverviewDto {
   inProgress: CampaignSummaryDto[];
   needsAttention: { campaign: { id: string; name: string }; failed: number; unknown: number }[];
   recent: CampaignSummaryDto[];
-  last30Days: { sent: number; bounced: number; replied: number; unsubscribed: number };
+  last30Days: {
+    started: number;
+    sent: number;
+    bounced: number;
+    replied: number;
+    positiveReplies: number;
+    meetingsBooked: number;
+    unsubscribed: number;
+  };
+  previous30Days: OverviewDto["last30Days"];
+}
+
+export interface WorkspaceQueueSendDto {
+  id: string;
+  campaignId: string;
+  campaignName: string;
+  contactId: string | null;
+  contactName: string | null;
+  email: string;
+  status: DeliveryStatus;
+  stepIndex: number;
+  lastError: string | null;
+  sentAt: string | null;
+  repliedAt: string | null;
+  scheduledFor: string | null;
+  subject?: string | null;
+  classification?: string | null;
+  snippet?: string | null;
+}
+
+export interface WorkspaceQueueDto {
+  campaigns: CampaignSummaryDto[];
+  pendingApproval: CampaignSummaryDto[];
+  readyToSend?: CampaignSummaryDto[];
+  drafts?: CampaignSummaryDto[];
+  campaignsNeedingAttention: CampaignSummaryDto[];
+  replies: WorkspaceQueueSendDto[];
+  dueFollowUps: WorkspaceQueueSendDto[];
+  failedSends: WorkspaceQueueSendDto[];
+  unknownSends: WorkspaceQueueSendDto[];
+  counts: {
+    replies: number;
+    dueFollowUps: number;
+    failedSends: number;
+    unknownSends: number;
+    pendingApproval?: number;
+    readyToSend?: number;
+  };
 }
 
 export interface ActivityDto {

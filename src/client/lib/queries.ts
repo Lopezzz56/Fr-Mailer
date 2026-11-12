@@ -16,13 +16,16 @@ import type {
   SuppressionDto,
   TemplateDto,
   WorkspaceTemplateAnalyticsDto,
+  WorkspaceQueueDto,
   TemplateAnalyticsQuery,
+  CampaignAnalyticsSummaryDto,
 } from "@shared/types";
-import type { TeamMemberDto } from "@shared/auth";
+import type { TeamMemberDto, CampaignCollaboratorDto } from "@shared/auth";
 import type { WriterContextDto } from "@shared/template-writer";
 
 export const keys = {
   overview: ["overview"] as const,
+  workQueue: ["workspace", "work-queue"] as const,
   contacts: (p: Record<string, unknown>) => ["contacts", p] as const,
   contact: (id: string) => ["contacts", "detail", id] as const,
   contactFields: ["contacts", "fields"] as const,
@@ -62,6 +65,13 @@ export interface ImportBatchDto {
 
 export const useOverview = () => useQuery({ queryKey: keys.overview, queryFn: () => api.get<OverviewDto>("/api/overview"), refetchInterval: 30_000 });
 
+export const useWorkspaceQueue = () =>
+  useQuery({
+    queryKey: keys.workQueue,
+    queryFn: () => api.get<WorkspaceQueueDto>("/api/overview/work-queue"),
+    refetchInterval: 30_000,
+  });
+
 export const useContacts = (p: { page: number; search: string; listId?: string; filter?: string }) =>
   useQuery({
     queryKey: keys.contacts(p),
@@ -83,12 +93,21 @@ export const useImports = () => useQuery({ queryKey: keys.imports, queryFn: () =
 
 export const useLists = () => useQuery({ queryKey: keys.lists, queryFn: () => api.get<ContactListDto[]>("/api/lists") });
 
-export const useTemplates = (search = "") =>
-  useQuery({
-    queryKey: keys.templates(search),
-    queryFn: () => api.get<TemplateDto[]>(`/api/templates${qs({ search })}`),
+export const useTemplates = (opts?: string | { search?: string; scope?: string; category?: string; campaignId?: string }) => {
+  const p = typeof opts === "string" ? { search: opts } : (opts ?? {});
+  return useQuery({
+    queryKey: ["templates", p],
+    queryFn: () => api.get<TemplateDto[]>(`/api/templates${qs(p)}`),
     placeholderData: keepPreviousData,
     staleTime: 30_000,
+  });
+};
+
+export const useCollaborators = (campaignId: string) =>
+  useQuery({
+    queryKey: ["campaigns", campaignId, "collaborators"],
+    queryFn: () => api.get<CampaignCollaboratorDto[]>(`/api/campaigns/${campaignId}/collaborators`),
+    enabled: Boolean(campaignId),
   });
 
 export const useTemplate = (id: string | undefined) =>
@@ -114,6 +133,13 @@ export const useCampaign = (id: string) =>
     queryKey: keys.campaign(id),
     queryFn: () => api.get<CampaignDetail>(`/api/campaigns/${id}`),
     refetchInterval: (q) => (q.state.data?.data.status === "SENDING" ? 4000 : false),
+  });
+
+export const useCampaignAnalytics = (id: string) =>
+  useQuery({
+    queryKey: ["campaigns", id, "analytics"],
+    queryFn: () => api.get<CampaignAnalyticsSummaryDto>(`/api/analytics/campaigns/${id}`),
+    enabled: Boolean(id),
   });
 
 export const useReview = (id: string, enabled: boolean) =>

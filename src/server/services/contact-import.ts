@@ -6,6 +6,7 @@ import readXlsxFile, { readSheetNames } from "read-excel-file/node";
 import type { Prisma } from "@prisma/client";
 import prisma from "../db.js";
 import { AppError } from "../middleware/error-handler.js";
+import { assertListAccessible } from "../lib/resource-visibility.js";
 import { extractEmails, likelyTypo, suggestEmailFix } from "./email-cells.js";
 import { inferPersonaFromTitle, inferSegmentFromCompany, normalizeContactPersona, normalizeHotelSegment } from "./classification.js";
 import {
@@ -238,6 +239,14 @@ const ALIASES: Record<"email" | StandardContactField | "fullName", string[]> = {
     "establishment",
     "chain",
     "hotelchain",
+    "partner",
+    "partnername",
+    "copartner",
+    "copartnership",
+    "corparneship",
+    "partnerorganization",
+    "partnercompany",
+    "agency",
   ],
   title: ["title", "jobtitle", "position", "role", "designation", "executiveposition"],
   phone: [
@@ -269,7 +278,7 @@ const ALIASES: Record<"email" | StandardContactField | "fullName", string[]> = {
     "propertytype",
     "hoteltype",
     "starrating",
-    "category",
+    "hotelcategory",
     "positioning",
     "starpositioning",
     "starcategorypositioning",
@@ -289,7 +298,10 @@ const ALIASES: Record<"email" | StandardContactField | "fullName", string[]> = {
 
 export const customFieldName = toFieldName;
 
-export function suggestMapping(headers: string[]): Record<string, ImportTarget> {
+export function suggestMapping(
+  headers: string[],
+  listType?: import("../../shared/types.js").ProspectListType
+): Record<string, ImportTarget> {
   const used = new Set<string>();
   const mapping: Record<string, ImportTarget> = {};
 
@@ -302,6 +314,19 @@ export function suggestMapping(headers: string[]): Record<string, ImportTarget> 
     if (match) {
       used.add(match[0]);
       mapping[header] = match[0];
+    }
+  }
+
+  // If detected as HOTEL_PROSPECTS and has a generic "category" or "hotel category" header
+  if (listType === "HOTEL_PROSPECTS" && !used.has("hotelSegment")) {
+    for (const header of headers) {
+      if (mapping[header]) continue;
+      const key = normalize(header);
+      if (key === "category" || key === "hotelcategory" || key === "segment") {
+        used.add("hotelSegment");
+        mapping[header] = "hotelSegment";
+        break;
+      }
     }
   }
 
@@ -332,10 +357,14 @@ export function suggestMapping(headers: string[]): Record<string, ImportTarget> 
       continue;
     }
 
-    // Company / Hotel heuristic: if header contains "hotel", "resort", "property", "company"
+    // Company / Hotel / Partner heuristic
     if (
       !used.has("company") &&
-      (key.includes("hotel") || key.includes("property") || /\b(hotel|resort|property|company)\b/i.test(lower))
+      (key.includes("hotel") ||
+        key.includes("property") ||
+        key.includes("partner") ||
+        key.includes("copartner") ||
+        /\b(hotel|resort|property|company|partner|copartner|agency)\b/i.test(lower))
     ) {
       used.add("company");
       mapping[header] = "company";
@@ -602,12 +631,20 @@ export async function runImport(args: {
   const result = await prisma.$transaction(
     async (tx) => {
       if (args.listId) {
-        list = await tx.contactList.findUnique({ where: { id: args.listId }, select: { id: true, name: true } });
-        if (!list) throw AppError.notFound("LIST_NOT_FOUND", "That list no longer exists.");
+        const found = await tx.contactList.findUnique({
+          where: { id: args.listId },
+          select: { id: true, name: true, createdById: true, isShared: true },
+        });
+        if (args.userId) assertListAccessible(found, { id: args.userId });
+        if (!found) throw AppError.notFound("LIST_NOT_FOUND", "That list no longer exists.");
+        list = { id: found.id, name: found.name };
       } else if (args.newListName) {
         const clash = await tx.contactList.findUnique({ where: { name: args.newListName } });
         if (clash) throw AppError.conflict("DUPLICATE", `A list called "${args.newListName}" already exists. Pick it instead, or use another name.`);
-        list = await tx.contactList.create({ data: { name: args.newListName }, select: { id: true, name: true } });
+        list = await tx.contactList.create({
+          data: { name: args.newListName, ...(args.userId ? { createdById: args.userId } : {}) },
+          select: { id: true, name: true },
+        });
       }
 
       const toCreate: Prisma.ContactCreateManyInput[] = [];
