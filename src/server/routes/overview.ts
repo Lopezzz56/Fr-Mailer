@@ -32,19 +32,21 @@ import {
   ConnectMailboxInputSchema,
   AssignMailboxUserInputSchema,
   UpdateMailboxUserInputSchema,
+  OverviewFilterQuerySchema,
   IdSchema,
   type ActivityDto,
   type MailboxStatusDto,
   type OverviewDto,
   type WorkspaceQueueDto,
 } from "../../shared/types.js";
+import { getOverviewData } from "../services/overview-service.js";
 import { audit } from "../lib/audit.js";
 
-let cachedOverview: { data: OverviewDto; expiresAt: number } | null = null;
+const overviewCache = new Map<string, { data: OverviewDto; expiresAt: number }>();
 const OVERVIEW_CACHE_TTL_MS = 15_000;
 
 export function invalidateOverviewCache(): void {
-  cachedOverview = null;
+  overviewCache.clear();
 }
 
 export const overviewRouter = Router();
@@ -52,100 +54,17 @@ export const overviewRouter = Router();
 overviewRouter.get(
   "/",
   requirePermission("audit.view"),
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
+    const filters = OverviewFilterQuerySchema.parse(req.query);
+    const cacheKey = `${filters.dateRange}:${filters.outreachType ?? "ALL"}:${filters.ownerId ?? "ALL"}`;
     const now = Date.now();
-    if (cachedOverview && cachedOverview.expiresAt > now) {
-      return ok(res, cachedOverview.data);
+    const cached = overviewCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return ok(res, cached.data);
     }
 
-    const since30 = new Date(now - 30 * 24 * 60 * 60 * 1000);
-    const since60 = new Date(now - 60 * 24 * 60 * 60 * 1000);
-    const periodMetrics = async (start: Date, end: Date) => {
-      const [sends, outcomes] = await Promise.all([
-        prisma.$queryRaw<{ started: bigint; sent: bigint; bounced: bigint; replied: bigint; unsubscribed: bigint }[]>`
-          SELECT
-            COUNT(*) FILTER (WHERE "stepIndex" = 0 AND "sentAt" >= ${start} AND "sentAt" < ${end}) AS started,
-            COUNT(*) FILTER (WHERE status = 'SENT' AND "sentAt" >= ${start} AND "sentAt" < ${end}) AS sent,
-            COUNT(*) FILTER (WHERE "bouncedAt" >= ${start} AND "bouncedAt" < ${end}) AS bounced,
-            COUNT(*) FILTER (WHERE "repliedAt" >= ${start} AND "repliedAt" < ${end}) AS replied,
-            COUNT(*) FILTER (WHERE "unsubscribedAt" >= ${start} AND "unsubscribedAt" < ${end}) AS unsubscribed
-          FROM sends
-          WHERE ("sentAt" >= ${start} AND "sentAt" < ${end})
-             OR ("bouncedAt" >= ${start} AND "bouncedAt" < ${end})
-             OR ("repliedAt" >= ${start} AND "repliedAt" < ${end})
-             OR ("unsubscribedAt" >= ${start} AND "unsubscribedAt" < ${end})`,
-        prisma.$queryRaw<{ positiveReplies: bigint; meetingsBooked: bigint }[]>`
-          SELECT
-            COUNT(DISTINCT "sendId") FILTER (
-              WHERE "type" = 'REPLY'
-                AND ("detail"->>'classification' = 'POSITIVE' OR lower("detail"->>'sentiment') = 'positive')
-            ) AS "positiveReplies",
-            COUNT(DISTINCT "sendId") FILTER (
-              WHERE "type" = 'REPLY'
-                AND ("detail"->>'meetingBooked' = 'true' OR "detail"->>'meetingOutcome' IN ('BOOKED', 'QUALIFIED'))
-            ) AS "meetingsBooked"
-          FROM send_events
-          WHERE "occurredAt" >= ${start} AND "occurredAt" < ${end}`,
-      ]);
-      const send = sends[0];
-      const outcome = outcomes[0];
-      return {
-        started: Number(send?.started ?? 0),
-        sent: Number(send?.sent ?? 0),
-        bounced: Number(send?.bounced ?? 0),
-        replied: Number(send?.replied ?? 0),
-        positiveReplies: Number(outcome?.positiveReplies ?? 0),
-        meetingsBooked: Number(outcome?.meetingsBooked ?? 0),
-        unsubscribed: Number(send?.unsubscribed ?? 0),
-      };
-    };
-
-    const [countsRaw, sent24h, connectedMailboxes, active, recent, attention, last30Days, previous30Days] = await Promise.all([
-      prisma.$queryRaw<{ contacts: bigint; lists: bigint; templates: bigint; suppressed: bigint }[]>`
-        SELECT
-          (SELECT COUNT(*) FROM contacts) AS contacts,
-          (SELECT COUNT(*) FROM contact_lists) AS lists,
-          (SELECT COUNT(*) FROM templates) AS templates,
-          (SELECT COUNT(*) FROM suppression_entries) AS suppressed`,
-      sentInLast24h(),
-      prisma.userMailbox.count({ where: { user: { status: "ACTIVE" } } }),
-      prisma.campaign.findMany({ where: { status: { in: ["PENDING_APPROVAL", "APPROVED", "SENDING", "PAUSED"] } }, include: campaignSummaryInclude, orderBy: { updatedAt: "desc" } }),
-      prisma.campaign.findMany({ where: { status: { in: ["DRAFT", "COMPLETED", "CANCELLED"] } }, include: campaignSummaryInclude, orderBy: { updatedAt: "desc" }, take: 5 }),
-      prisma.send.groupBy({ by: ["campaignId", "status"], where: { status: { in: ["FAILED", "UNKNOWN"] } }, _count: { _all: true } }),
-      periodMetrics(since30, new Date(now)),
-      periodMetrics(since60, since30),
-    ]);
-
-    const countsRow = countsRaw[0] ?? { contacts: 0n, lists: 0n, templates: 0n, suppressed: 0n };
-    const counts = {
-      contacts: Number(countsRow.contacts),
-      lists: Number(countsRow.lists),
-      templates: Number(countsRow.templates),
-      suppressed: Number(countsRow.suppressed),
-    };
-
-    const activeSummaries = await toCampaignSummaries(active);
-    const issueByCampaign = new Map<string, { failed: number; unknown: number }>();
-    for (const row of attention) {
-      const entry = issueByCampaign.get(row.campaignId) ?? { failed: 0, unknown: 0 };
-      if (row.status === "FAILED") entry.failed += row._count._all;
-      else entry.unknown += row._count._all;
-      issueByCampaign.set(row.campaignId, entry);
-    }
-    const names = await prisma.campaign.findMany({ where: { id: { in: [...issueByCampaign.keys()] } }, select: { id: true, name: true } });
-
-    const data: OverviewDto = {
-      counts,
-      mailbox: { smtpConfigured: connectedMailboxes > 0, liveSendingEnabled: !liveSendingBlocker(), liveSendingBlocker: liveSendingBlocker(), dailyLimit: env.DAILY_SEND_LIMIT, sentLast24h: sent24h },
-      awaitingApproval: activeSummaries.filter((c) => c.status === "PENDING_APPROVAL"),
-      inProgress: activeSummaries.filter((c) => c.status !== "PENDING_APPROVAL"),
-      needsAttention: names.map((c) => ({ campaign: c, ...issueByCampaign.get(c.id)! })),
-      recent: await toCampaignSummaries(recent),
-      last30Days,
-      previous30Days,
-    };
-
-    cachedOverview = { data, expiresAt: now + OVERVIEW_CACHE_TTL_MS };
+    const data = await getOverviewData(filters);
+    overviewCache.set(cacheKey, { data, expiresAt: now + OVERVIEW_CACHE_TTL_MS });
     ok(res, data);
   })
 );

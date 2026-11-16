@@ -195,7 +195,7 @@ export function TemplateEditorPage({
   }, [template.data]);
 
   useTitle(embedded ? "New campaign" : isNew ? "New template" : (template.data?.data.name ?? "Template"));
-  const dirty = Boolean(draft && saved && JSON.stringify(draft) !== JSON.stringify(saved));
+  const dirty = Boolean((draft && saved && JSON.stringify(draft) !== JSON.stringify(saved)) || pendingAttachments.length > 0);
   const blocker = useUnsavedChanges(dirty);
 
   // Preview recipient

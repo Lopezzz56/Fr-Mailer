@@ -420,6 +420,26 @@ export const CAMPAIGN_AUTOMATION_MODES = ["MANUAL", "APPROVAL_REQUIRED", "AUTOMA
 export type CampaignAutomationMode = (typeof CAMPAIGN_AUTOMATION_MODES)[number];
 export const CampaignAutomationModeSchema = z.enum(CAMPAIGN_AUTOMATION_MODES);
 
+export const CAMPAIGN_OUTREACH_TYPES = [
+  "CUSTOMER_OUTREACH",
+  "PARTNERSHIPS",
+  "ADVISORS",
+  "HIRING_TALENT",
+  "PRESS_MEDIA",
+  "OTHER",
+] as const;
+export type CampaignOutreachType = (typeof CAMPAIGN_OUTREACH_TYPES)[number];
+export const CampaignOutreachTypeSchema = z.enum(CAMPAIGN_OUTREACH_TYPES);
+
+export const CAMPAIGN_OUTREACH_TYPE_LABELS: Record<CampaignOutreachType, string> = {
+  CUSTOMER_OUTREACH: "Customer Outreach",
+  PARTNERSHIPS: "Partnerships",
+  ADVISORS: "Advisors",
+  HIRING_TALENT: "Hiring & Talent",
+  PRESS_MEDIA: "Press & Media",
+  OTHER: "Other",
+};
+
 export const CAMPAIGN_AUTOMATION_MODE_LABELS: Record<CampaignAutomationMode, { label: string; description: string }> = {
   MANUAL: {
     label: "Manual",
@@ -526,6 +546,7 @@ export type DeliveryStatus = z.infer<typeof DeliveryStatusSchema>;
 export const CampaignInputSchema = z.object({
   name: z.string().trim().min(1, "Name is required").max(100),
   description: optionalText(500),
+  outreachType: CampaignOutreachTypeSchema.default("CUSTOMER_OUTREACH"),
   templateId: IdSchema,
   contactListId: IdSchema,
   fromName: z.string().trim().min(1, "Sender name is required").max(100),
@@ -604,6 +625,7 @@ export interface CampaignSummaryDto {
   id: string;
   name: string;
   status: CampaignStatus;
+  outreachType: CampaignOutreachType;
   template: { id: string; name: string };
   list: { id: string; name: string; memberCount: number };
   counts: CampaignCounts;
@@ -1100,6 +1122,93 @@ export interface MailboxStatusDto {
   publicUrl: string;
 }
 
+export const OverviewFilterQuerySchema = z.object({
+  dateRange: z.enum(["7d", "30d", "90d", "all"]).default("30d"),
+  outreachType: CampaignOutreachTypeSchema.optional(),
+  ownerId: z.string().optional(),
+});
+export type OverviewFilterQuery = z.infer<typeof OverviewFilterQuerySchema>;
+
+export interface OutreachTypeMetricDto {
+  outreachType: CampaignOutreachType;
+  label: string;
+  reached: number;
+  replies: number;
+  replyRate: number;
+  positiveOutcomes: number;
+  positiveRate: number;
+  activeCampaigns: number;
+  totalCampaigns: number;
+}
+
+export interface TeamOutreachMetricDto {
+  userId: string;
+  userName: string;
+  userEmail: string;
+  userRole: UserRole;
+  assigned: number;
+  reached: number;
+  replies: number;
+  replyRate: number;
+  positiveOutcomes: number;
+  positiveRate: number;
+  pendingWork: {
+    pendingApprovals: number;
+    dueFollowUps: number;
+    deliveryExceptions: number;
+    total: number;
+  };
+}
+
+export interface DailyActivityTrendDto {
+  date: string;
+  label: string;
+  reached: number;
+  replies: number;
+  positiveOutcomes: number;
+}
+
+export interface OutreachFunnelDto {
+  reached: number;
+  replies: number;
+  positiveOutcomes: number;
+  meetings: number;
+  replyRate: number;
+  positiveRate: number;
+  meetingRate: number;
+  overallConversionRate: number;
+}
+
+export interface AttentionItemDto {
+  id: string;
+  type: "OVERDUE_FOLLOW_UP" | "UNANSWERED_REPLY" | "PENDING_APPROVAL" | "MAILBOX_ISSUE" | "DELIVERY_EXCEPTION";
+  title: string;
+  subtitle: string;
+  link: string;
+  linkLabel: string;
+  severity: "high" | "medium" | "low";
+  createdAt?: string;
+}
+
+export interface ActiveCampaignOutreachDto extends CampaignSummaryDto {
+  outreachType: CampaignOutreachType;
+  positiveOutcomes: number;
+  meetingsBooked: number;
+}
+
+export interface OverviewExecutiveKpisDto {
+  totalReached: number;
+  previousReached: number;
+  replies: number;
+  previousReplies: number;
+  replyRate: number;
+  positiveOutcomes: number;
+  previousPositiveOutcomes: number;
+  positiveRate: number;
+  activeOutreachCampaigns: number;
+  totalCampaigns: number;
+}
+
 export interface OverviewDto {
   counts: { contacts: number; lists: number; templates: number; suppressed: number };
   mailbox: Pick<MailboxStatusDto, "liveSendingEnabled" | "liveSendingBlocker" | "dailyLimit" | "sentLast24h"> & { smtpConfigured: boolean };
@@ -1117,6 +1226,17 @@ export interface OverviewDto {
     unsubscribed: number;
   };
   previous30Days: OverviewDto["last30Days"];
+  kpis?: OverviewExecutiveKpisDto;
+  funnel?: OutreachFunnelDto;
+  outreachByType?: OutreachTypeMetricDto[];
+  teamOutreach?: TeamOutreachMetricDto[];
+  activityTrend?: DailyActivityTrendDto[];
+  actionableAttention?: AttentionItemDto[];
+  activeCampaigns?: ActiveCampaignOutreachDto[];
+  availableFilters?: {
+    owners: { id: string; name: string }[];
+    outreachTypes: { value: CampaignOutreachType; label: string }[];
+  };
 }
 
 export interface WorkspaceQueueSendDto {
@@ -1166,3 +1286,27 @@ export interface ActivityDto {
   user: UserRef | null;
   createdAt: string;
 }
+
+export type NotificationType =
+  | "INBOUND_REPLY"
+  | "FOLLOW_UP_DUE"
+  | "APPROVAL_REQUIRED"
+  | "CAMPAIGN_COMPLETED"
+  | "CAMPAIGN_FAILED"
+  | "MAILBOX_ISSUE"
+  | "OUTREACH_ASSIGNMENT"
+  | "IMPORTANT_OUTCOME";
+
+export interface NotificationItemDto {
+  id: string;
+  type: NotificationType;
+  title: string;
+  description: string;
+  time: string;
+  tone: "alert" | "warning" | "action" | "info" | "success";
+  link: string;
+  linkLabel?: string;
+  category: "reply" | "follow_up" | "approval" | "campaign" | "mailbox" | "assignment" | "outcome";
+  entityId?: string;
+}
+

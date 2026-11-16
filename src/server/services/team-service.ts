@@ -157,3 +157,71 @@ export async function createResetLink(req: Request, id: string, sendEmail: boole
   await audit(req, { action: "team.reset_link", entityType: "User", entityId: id, metadata: { email: user.email, emailed } });
   return { resetUrl: url, emailed };
 }
+
+export async function removeUser(req: Request, id: string) {
+  const user = await prisma.user.findUnique({ where: { id } });
+  if (!user) throw AppError.notFound("USER_NOT_FOUND", "That person isn't on the team.");
+
+  if (id === req.user!.id) {
+    throw AppError.badRequest("CANNOT_REMOVE_SELF", "You cannot remove your own account from the organization.");
+  }
+
+  if (user.role === "FOUNDER" && (await activeFounderCount(user.id)) < MIN_ACTIVE_FOUNDERS) {
+    throw AppError.conflict("LAST_FOUNDER", "The team needs at least one active founder. Make someone else a founder first.");
+  }
+
+  const founderId = req.user!.id;
+
+  await prisma.$transaction(async (tx) => {
+    // 1. Terminate user sessions and tokens
+    await tx.session.deleteMany({ where: { userId: id } });
+    await tx.authToken.deleteMany({ where: { userId: id } });
+
+    // 2. Remove mailbox assignments
+    await tx.mailboxAccess.deleteMany({ where: { userId: id } });
+    await tx.userMailbox.deleteMany({ where: { userId: id } });
+
+    // 3. Remove campaign collaborator memberships
+    await tx.campaignCollaborator.deleteMany({ where: { userId: id } });
+    await tx.campaignCollaborator.updateMany({ where: { addedById: id }, data: { addedById: null } });
+
+    // 4. Preserve templates by reassigning to founder and ensuring scope is ORGANIZATION
+    await tx.template.updateMany({
+      where: { createdById: id },
+      data: { createdById: founderId, scope: "ORGANIZATION" },
+    });
+
+    // 5. Preserve contacts and lists
+    await tx.contact.updateMany({ where: { createdById: id }, data: { createdById: founderId } });
+    await tx.contactList.updateMany({ where: { createdById: id }, data: { createdById: founderId } });
+
+    // 6. Preserve campaigns and approvals
+    await tx.campaign.updateMany({ where: { createdById: id }, data: { createdById: founderId } });
+    await tx.campaign.updateMany({ where: { approvalRequestedById: id }, data: { approvalRequestedById: null } });
+    await tx.campaign.updateMany({ where: { approvedById: id }, data: { approvedById: null } });
+
+    // 7. Preserve import batches
+    await tx.importBatch.updateMany({ where: { createdById: id }, data: { createdById: founderId } });
+
+    // 8. Preserve send records (nullify sentByUserId)
+    await tx.send.updateMany({ where: { sentByUserId: id }, data: { sentByUserId: null } });
+
+    // 9. Unlink user who invited other users
+    await tx.user.updateMany({ where: { invitedById: id }, data: { invitedById: null } });
+
+    // 10. Nullify audit log user references so audit trail is strictly kept
+    await tx.auditLog.updateMany({ where: { userId: id }, data: { userId: null } });
+
+    // 11. Delete the user
+    await tx.user.delete({ where: { id } });
+  });
+
+  await audit(req, {
+    action: "team.remove",
+    entityType: "User",
+    entityId: id,
+    metadata: { email: user.email, name: user.name, role: user.role },
+  });
+
+  return user;
+}

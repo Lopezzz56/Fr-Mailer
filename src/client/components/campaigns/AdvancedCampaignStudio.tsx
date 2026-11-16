@@ -32,6 +32,9 @@ import {
   HOTEL_SEGMENT_LABELS,
   CONTACT_PERSONAS,
   CONTACT_PERSONA_LABELS,
+  CAMPAIGN_OUTREACH_TYPES,
+  CAMPAIGN_OUTREACH_TYPE_LABELS,
+  type CampaignOutreachType,
   type CampaignAutomationMode,
   type CampaignDetailDto,
   type HotelSegment,
@@ -143,6 +146,7 @@ export function AdvancedCampaignStudio({
   // Form Basic Info
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [outreachType, setOutreachType] = useState<CampaignOutreachType>("CUSTOMER_OUTREACH");
   const [contactListId, setContactListId] = useState("");
   const [wizardStep, setWizardStep] = useState(0);
   const [audienceMode, setAudienceMode] = useState<"select" | "import">("select");
@@ -258,6 +262,7 @@ export function AdvancedCampaignStudio({
       const c = existingQuery.data.data;
       setName(c.name);
       setDescription(c.description ?? "");
+      setOutreachType(c.outreachType ?? "CUSTOMER_OUTREACH");
       setContactListId(c.list.id);
       setFromName(c.fromName);
       setFromEmail(c.fromEmail ?? "");
@@ -854,6 +859,7 @@ export function AdvancedCampaignStudio({
       const payload = {
         name: name.trim(),
         description: description.trim() || null,
+        outreachType,
         contactListId,
         templateId: fallback.templateId,
         fromName: fromName.trim() || user?.senderName || user?.name || mailboxQuery.data?.data.smtp.fromName || "FocusRealm",
@@ -980,13 +986,22 @@ export function AdvancedCampaignStudio({
         }
       >
         <div className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-3">
             <TextField
               label="Campaign Name"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g. Goa Luxury Resorts — General Managers Q4"
               required
+            />
+            <SelectField
+              label="Outreach Type"
+              value={outreachType}
+              onChange={(e) => setOutreachType(e.target.value as CampaignOutreachType)}
+              options={CAMPAIGN_OUTREACH_TYPES.map((t) => ({
+                value: t,
+                label: CAMPAIGN_OUTREACH_TYPE_LABELS[t],
+              }))}
             />
             <SelectField
               label="Send to Contact List"

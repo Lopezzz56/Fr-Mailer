@@ -13,7 +13,7 @@ import { DataTable, type Column } from "../../components/ui/DataTable";
 import { CampaignStatusBadge } from "../../components/ui/Badge";
 import { EmptyState, ErrorState } from "../../components/ui/Feedback";
 import { CampaignProgress } from "../../components/campaigns/CampaignProgress";
-import type { CampaignSummaryDto } from "@shared/types";
+import { type CampaignSummaryDto, CAMPAIGN_OUTREACH_TYPE_LABELS } from "@shared/types";
 
 type TabKey = "all" | "mine" | "shared" | "active" | "completed" | "draft";
 
@@ -69,9 +69,13 @@ export function CampaignsPage() {
       cell: (c) => (
         <div className="min-w-0">
           <p className="truncate font-semibold text-ink">{c.name}</p>
-          <p className="truncate text-xs text-ink-subtle">
-            {c.template.name} · {c.list.name}
-          </p>
+          <div className="flex items-center gap-1.5 truncate text-xs text-ink-subtle mt-0.5">
+            <span className="rounded bg-surface-sunken border border-line px-1.5 py-0.2 text-[10px] font-medium text-ink-subtle">
+              {c.outreachType ? CAMPAIGN_OUTREACH_TYPE_LABELS[c.outreachType] : "Outreach"}
+            </span>
+            <span>·</span>
+            <span className="truncate">{c.template.name} · {c.list.name}</span>
+          </div>
           <p className="truncate text-2xs text-ink-muted sm:hidden mt-0.5">
             {c.counts.total ? `${c.counts.sent} of ${c.counts.total - c.counts.skipped} sent` : plural(c.list.memberCount, "contact")} · {timeAgo(c.updatedAt)}
           </p>

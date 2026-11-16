@@ -28,6 +28,15 @@ enum CampaignStatus {
   CANCELLED
 }
 
+enum CampaignOutreachType {
+  CUSTOMER_OUTREACH
+  PARTNERSHIPS
+  ADVISORS
+  HIRING_TALENT
+  PRESS_MEDIA
+  OTHER
+}
+
 enum CampaignAutomationMode {
   MANUAL
   APPROVAL_REQUIRED
@@ -257,6 +266,7 @@ model Campaign {
   mailbox           MailboxAccount? @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
   sendRatePerMinute Int            @default(20)
   automationMode    CampaignAutomationMode @default(APPROVAL_REQUIRED)
+  outreachType      CampaignOutreachType @default(CUSTOMER_OUTREACH)
 
   // Frozen at approval — what recipients actually receive, regardless of later template edits
   subject     String?
@@ -293,6 +303,7 @@ model Campaign {
   @@index([contactListId])
   @@index([createdById])
   @@index([mailboxId])
+  @@index([outreachType])
   @@map("campaigns")
 }
 

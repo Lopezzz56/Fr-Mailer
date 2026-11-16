@@ -18,13 +18,16 @@ import type {
   WorkspaceTemplateAnalyticsDto,
   WorkspaceQueueDto,
   TemplateAnalyticsQuery,
+  OverviewFilterQuery,
   CampaignAnalyticsSummaryDto,
+  NotificationItemDto,
 } from "@shared/types";
 import type { TeamMemberDto, CampaignCollaboratorDto } from "@shared/auth";
 import type { WriterContextDto } from "@shared/template-writer";
 
 export const keys = {
   overview: ["overview"] as const,
+  overviewFiltered: (p: Record<string, unknown> = {}) => ["overview", p] as const,
   workQueue: ["workspace", "work-queue"] as const,
   contacts: (p: Record<string, unknown>) => ["contacts", p] as const,
   contact: (id: string) => ["contacts", "detail", id] as const,
@@ -41,6 +44,7 @@ export const keys = {
   suppressions: (p: Record<string, unknown>) => ["suppressions", p] as const,
   enrichment: (contactId: string) => ["enrichment", contactId] as const,
   mailbox: ["mailbox"] as const,
+  notifications: ["notifications"] as const,
   team: ["team"] as const,
   activity: (page: number) => ["activity", page] as const,
   templateAnalytics: (p: Record<string, unknown> = {}) => ["analytics", "templates", p] as const,
@@ -63,7 +67,12 @@ export interface ImportBatchDto {
   createdAt: string;
 }
 
-export const useOverview = () => useQuery({ queryKey: keys.overview, queryFn: () => api.get<OverviewDto>("/api/overview"), refetchInterval: 30_000 });
+export const useOverview = (p: OverviewFilterQuery = { dateRange: "30d" }) =>
+  useQuery({
+    queryKey: keys.overviewFiltered(p as Record<string, unknown>),
+    queryFn: () => api.get<OverviewDto>(`/api/overview${qs(p)}`),
+    refetchInterval: 30_000,
+  });
 
 export const useWorkspaceQueue = () =>
   useQuery({
@@ -169,6 +178,13 @@ export const useTeam = (enabled = true) => useQuery({ queryKey: keys.team, query
 
 export const useActivity = (page: number, enabled = true) =>
   useQuery({ queryKey: keys.activity(page), queryFn: () => api.get<ActivityDto[]>(`/api/activity${qs({ page, pageSize: 30 })}`), enabled, placeholderData: keepPreviousData });
+
+export const useNotifications = () =>
+  useQuery({
+    queryKey: keys.notifications,
+    queryFn: () => api.get<NotificationItemDto[]>("/api/notifications"),
+    refetchInterval: 15_000,
+  });
 
 /** Invalidate everything a campaign change can affect */
 export function useInvalidate() {

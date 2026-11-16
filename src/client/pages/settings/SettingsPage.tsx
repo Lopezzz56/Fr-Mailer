@@ -998,7 +998,7 @@ function TeamTab() {
   const [link, setLink] = useState<{ title: string; url: string; emailed: boolean } | null>(null);
   const [confirm, setConfirm] = useState<{
     member: TeamMemberDto;
-    action: "disable" | "enable" | "founder" | "founder_office" | "employee" | "grant_send" | "revoke_send";
+    action: "disable" | "enable" | "founder" | "founder_office" | "employee" | "grant_send" | "revoke_send" | "remove";
   } | null>(null);
 
   const update = useMutation({
@@ -1009,6 +1009,16 @@ function TeamTab() {
       setConfirm(null);
     },
     onError: (err) => toast.error("Couldn't update", errorMessage(err)),
+  });
+  const removeMember = useMutation({
+    mutationFn: (id: string) => api.delete<{ removed: boolean }>(`/api/users/${id}`),
+    onSuccess: async () => {
+      await invalidate("team");
+      await invalidate("overview");
+      toast.success("Member removed from organization");
+      setConfirm(null);
+    },
+    onError: (err) => toast.error("Couldn't remove member", errorMessage(err)),
   });
   const reset = useMutation({
     mutationFn: (m: TeamMemberDto) => api.post<{ resetUrl: string; emailed: boolean }>(`/api/users/${m.id}/reset-link`, { sendEmail: true }),
@@ -1033,6 +1043,7 @@ function TeamTab() {
     employee: { title: `Change ${confirm.member.name} to employee?`, description: "They will focus on preparing campaigns and contacts, and sending will require approval.", label: "Change to employee", body: { role: "EMPLOYEE" } },
     grant_send: { title: `Enable direct sending for ${confirm.member.name}?`, description: "This employee will be permitted to start sending approved campaigns without waiting for approval.", label: "Enable Direct Send", body: { canSendWithoutApproval: true } },
     revoke_send: { title: `Require approval for ${confirm.member.name}?`, description: "This employee's campaigns will require review and approval from Founder's Office before sending.", label: "Require Approval", body: { canSendWithoutApproval: false } },
+    remove: { title: `Remove ${confirm.member.name} from organization?`, description: "They will be permanently removed from FocusRealm. All their campaigns, lists, and templates will be preserved and reassigned to you.", label: "Remove member", body: {} },
   }[confirm.action];
 
   return (
@@ -1084,6 +1095,7 @@ function TeamTab() {
                         { label: "Send password reset link", onSelect: () => reset.mutate(m), hidden: !manage || m.status !== "ACTIVE" },
                         { label: "Re-enable account", onSelect: () => setConfirm({ member: m, action: "enable" }), hidden: !manage || m.status !== "DISABLED" },
                         { label: "Disable account", tone: "danger", onSelect: () => setConfirm({ member: m, action: "disable" }), hidden: !manage || m.status !== "ACTIVE" },
+                        { label: "Remove from organization", tone: "danger", onSelect: () => setConfirm({ member: m, action: "remove" }), hidden: !isFounder },
                       ]}
                     />
                   )}
@@ -1125,9 +1137,15 @@ function TeamTab() {
         <ConfirmDialog
           open
           onClose={() => setConfirm(null)}
-          onConfirm={() => update.mutate({ id: confirm.member.id, body: confirmText.body })}
-          loading={update.isPending}
-          tone={confirm.action === "disable" ? "danger" : "primary"}
+          onConfirm={() => {
+            if (confirm.action === "remove") {
+              removeMember.mutate(confirm.member.id);
+            } else {
+              update.mutate({ id: confirm.member.id, body: confirmText.body });
+            }
+          }}
+          loading={update.isPending || removeMember.isPending}
+          tone={confirm.action === "disable" || confirm.action === "remove" ? "danger" : "primary"}
           title={confirmText.title}
           description={confirmText.description}
           confirmLabel={confirmText.label}

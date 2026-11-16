@@ -439,6 +439,7 @@ router.post(
         data: {
           name: input.name,
           description: input.description,
+          outreachType: input.outreachType ?? "CUSTOMER_OUTREACH",
           templateId: input.templateId,
           contactListId: input.contactListId,
           fromName: input.fromName,
@@ -686,6 +687,7 @@ router.post(
       data: {
         name,
         description: source.description,
+        outreachType: (source as any).outreachType ?? "CUSTOMER_OUTREACH",
         templateId: source.template.id,
         contactListId: source.list.id,
         fromName: source.fromName,

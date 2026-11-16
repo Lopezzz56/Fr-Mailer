@@ -1,16 +1,23 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import {
   AlertTriangle,
   ArrowUpRight,
+  Briefcase,
   CheckCircle2,
   Clock3,
+  Filter,
+  GraduationCap,
+  Handshake,
   Inbox,
   Mail,
+  Megaphone,
   MessageSquare,
   Play,
   Plus,
   Send,
   ShieldCheck,
+  Users,
 } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { useMailbox, useOverview, useWorkspaceQueue } from "../lib/queries";
@@ -22,7 +29,18 @@ import { ButtonLink } from "../components/ui/Button";
 import { CampaignStatusBadge } from "../components/ui/Badge";
 import { ErrorState } from "../components/ui/Feedback";
 import { PageLoader } from "../components/ui/Spinner";
-import type { MailboxStatusDto } from "@shared/types";
+import {
+  CAMPAIGN_OUTREACH_TYPES,
+  CAMPAIGN_OUTREACH_TYPE_LABELS,
+  type CampaignOutreachType,
+  type OverviewFilterQuery,
+  type OutreachTypeMetricDto,
+  type TeamOutreachMetricDto,
+  type DailyActivityTrendDto,
+  type OutreachFunnelDto,
+  type AttentionItemDto,
+  type MailboxStatusDto,
+} from "@shared/types";
 
 // ============================================================================
 // HELPER COMPONENTS
@@ -129,20 +147,22 @@ function ExecutiveMetric({
   previous,
   rate,
   rateLabel,
+  periodLabel = "prior period",
 }: {
   label: string;
   current: number;
   previous: number;
   rate?: string;
   rateLabel?: string;
+  periodLabel?: string;
 }) {
   const delta = current - previous;
   const comparison =
     previous === 0
       ? current === 0
         ? "No activity in either period"
-        : `${num(current)}; none in prior 30d`
-      : `${delta > 0 ? "+" : ""}${num(delta)} vs prior 30d`;
+        : `${num(current)}; none in ${periodLabel}`
+      : `${delta > 0 ? "+" : ""}${num(delta)} vs ${periodLabel}`;
 
   return (
     <div className="rounded-xl border border-line bg-surface p-4 shadow-sm">
@@ -156,14 +176,298 @@ function ExecutiveMetric({
   );
 }
 
+function getOutreachTypeIcon(type: CampaignOutreachType) {
+  switch (type) {
+    case "CUSTOMER_OUTREACH":
+      return <Briefcase className="h-4 w-4 text-brand" />;
+    case "PARTNERSHIPS":
+      return <Handshake className="h-4 w-4 text-emerald-600" />;
+    case "ADVISORS":
+      return <GraduationCap className="h-4 w-4 text-indigo-600" />;
+    case "HIRING_TALENT":
+      return <Users className="h-4 w-4 text-amber-600" />;
+    case "PRESS_MEDIA":
+      return <Megaphone className="h-4 w-4 text-rose-600" />;
+    default:
+      return <Send className="h-4 w-4 text-slate-600" />;
+  }
+}
+
+function OutreachTrendChart({ trend }: { trend: DailyActivityTrendDto[] }) {
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+  const maxReached = Math.max(...trend.map((d) => d.reached), 5);
+
+  return (
+    <div className="rounded-xl border border-line bg-surface p-4 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+        <div>
+          <h3 className="text-sm font-semibold text-ink">30-Day Outreach Activity Trend</h3>
+          <p className="text-xs text-ink-subtle mt-0.5">Daily contacts reached, replies detected, and positive outcomes</p>
+        </div>
+        <div className="flex items-center gap-4 text-xs">
+          <div className="flex items-center gap-1.5">
+            <span className="h-2.5 w-2.5 rounded-sm bg-brand" />
+            <span className="text-ink-subtle">Reached</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="h-2.5 w-2.5 rounded-sm bg-sky-400" />
+            <span className="text-ink-subtle">Replies</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="h-2.5 w-2.5 rounded-sm bg-emerald-500" />
+            <span className="text-ink-subtle">Positive Outcomes</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="relative pt-3">
+        <div className="h-32 flex items-end gap-1 sm:gap-1.5 w-full">
+          {trend.map((d, i) => {
+            const heightPct = Math.max(d.reached > 0 ? 8 : 2, Math.round((d.reached / maxReached) * 100));
+            const hasReplies = d.replies > 0;
+            const hasPositive = d.positiveOutcomes > 0;
+            const isHovered = hoveredIdx === i;
+
+            return (
+              <div
+                key={d.date}
+                className="group relative flex-1 flex flex-col justify-end items-center h-full cursor-pointer"
+                onMouseEnter={() => setHoveredIdx(i)}
+                onMouseLeave={() => setHoveredIdx(null)}
+              >
+                {isHovered && (
+                  <div className="absolute -top-12 z-20 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[11px] text-white shadow-md pointer-events-none">
+                    <span className="font-semibold">{d.label}: </span>
+                    <span>{num(d.reached)} reached</span>
+                    {d.replies > 0 && <span> · {num(d.replies)} rep</span>}
+                    {d.positiveOutcomes > 0 && <span> · {num(d.positiveOutcomes)} pos</span>}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-0.5 mb-1 h-3">
+                  {hasPositive && <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />}
+                  {hasReplies && !hasPositive && <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />}
+                </div>
+
+                <div
+                  className={`w-full rounded-t transition-all ${
+                    d.reached > 0
+                      ? isHovered
+                        ? "bg-brand/80"
+                        : "bg-brand"
+                      : "bg-surface-sunken"
+                  }`}
+                  style={{ height: `${heightPct}%` }}
+                />
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="flex justify-between items-center text-[10px] text-ink-faint mt-2 pt-1 border-t border-line">
+          <span>{trend[0]?.label ?? "30 days ago"}</span>
+          <span>{trend[Math.floor(trend.length / 2)]?.label ?? "15 days ago"}</span>
+          <span>{trend[trend.length - 1]?.label ?? "Today"}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OutreachFunnelCard({ funnel }: { funnel: OutreachFunnelDto }) {
+  return (
+    <section aria-label="Conversion Funnel">
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-ink">Outreach Funnel</h2>
+        <span className="text-xs text-ink-subtle">Reached → Replies → Positive Outcomes → Meetings / Opportunities</span>
+      </div>
+      <div className="grid grid-cols-1 gap-3 rounded-xl border border-line bg-surface p-4 shadow-sm sm:grid-cols-4">
+        <div className="rounded-lg bg-surface-muted/50 p-3.5 border border-line/40">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-ink-subtle">1. Outreach Reached</span>
+            <span className="text-[10px] font-semibold text-brand bg-brand/10 px-1.5 py-0.5 rounded">100%</span>
+          </div>
+          <p className="mt-1.5 text-2xl font-bold tracking-tight text-ink">{num(funnel.reached)}</p>
+          <p className="mt-0.5 text-xs text-ink-faint">Verified recipient dispatches</p>
+        </div>
+
+        <div className="rounded-lg bg-surface-muted/50 p-3.5 border border-line/40">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-ink-subtle">2. Replies Received</span>
+            <span className="text-[10px] font-semibold text-brand bg-brand/10 px-1.5 py-0.5 rounded">
+              {funnel.replyRate}% of reached
+            </span>
+          </div>
+          <p className="mt-1.5 text-2xl font-bold tracking-tight text-ink">{num(funnel.replies)}</p>
+          <p className="mt-0.5 text-xs text-ink-faint">Inbound engagement via IMAP</p>
+        </div>
+
+        <div className="rounded-lg bg-surface-muted/50 p-3.5 border border-line/40">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-ink-subtle">3. Positive Outcomes</span>
+            <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
+              {funnel.positiveRate}% of replies
+            </span>
+          </div>
+          <p className="mt-1.5 text-2xl font-bold tracking-tight text-emerald-700">{num(funnel.positiveOutcomes)}</p>
+          <p className="mt-0.5 text-xs text-ink-faint">Interested / qualified conversations</p>
+        </div>
+
+        <div className="rounded-lg bg-surface-muted/50 p-3.5 border border-line/40">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-ink-subtle">4. Meetings / Opps</span>
+            <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200">
+              {funnel.overallConversionRate}% overall
+            </span>
+          </div>
+          <p className="mt-1.5 text-2xl font-bold tracking-tight text-indigo-700">{num(funnel.meetings)}</p>
+          <p className="mt-0.5 text-xs text-ink-faint">Booked or business opportunities</p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function OutreachByTypeCard({ metrics }: { metrics: OutreachTypeMetricDto[] }) {
+  return (
+    <div className="rounded-xl border border-line bg-surface p-4 shadow-sm">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 className="text-sm font-semibold text-ink">Outreach by Type</h3>
+          <p className="text-xs text-ink-subtle mt-0.5">Performance across customer, partnership, advisor, and team channels</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {metrics.map((m) => (
+          <div key={m.outreachType} className="rounded-lg border border-line/60 bg-surface-muted/30 p-3.5 hover:border-line transition-colors">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {getOutreachTypeIcon(m.outreachType)}
+                <span className="text-xs font-semibold text-ink">{m.label}</span>
+              </div>
+              {m.activeCampaigns > 0 ? (
+                <span className="rounded bg-emerald-50 text-emerald-700 px-1.5 py-0.5 text-[10px] font-medium border border-emerald-200">
+                  {plural(m.activeCampaigns, "active")}
+                </span>
+              ) : (
+                <span className="text-[11px] text-ink-faint">0 active</span>
+              )}
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 mt-3 pt-2.5 border-t border-line/40 text-center">
+              <div>
+                <p className="text-[11px] text-ink-subtle font-medium">Reached</p>
+                <p className="text-sm font-bold text-ink mt-0.5">{num(m.reached)}</p>
+              </div>
+              <div>
+                <p className="text-[11px] text-ink-subtle font-medium">Replies</p>
+                <p className="text-sm font-bold text-ink mt-0.5">{num(m.replies)}</p>
+                <p className="text-[10px] text-brand font-medium">{m.replyRate}%</p>
+              </div>
+              <div>
+                <p className="text-[11px] text-ink-subtle font-medium">Positive</p>
+                <p className="text-sm font-bold text-emerald-600 mt-0.5">{num(m.positiveOutcomes)}</p>
+                <p className="text-[10px] text-emerald-600 font-medium">{m.positiveRate}%</p>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TeamOutreachCard({ team }: { team: TeamOutreachMetricDto[] }) {
+  return (
+    <div className="rounded-xl border border-line bg-surface p-4 shadow-sm">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 className="text-sm font-semibold text-ink">Team Outreach</h3>
+          <p className="text-xs text-ink-subtle mt-0.5">Assigned contacts, reach volume, outcomes, and pending work per owner</p>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-xs">
+          <thead>
+            <tr className="border-b border-line text-ink-subtle font-medium">
+              <th className="pb-2.5 font-medium">Team Member</th>
+              <th className="pb-2.5 font-medium text-right">Assigned</th>
+              <th className="pb-2.5 font-medium text-right">Reached</th>
+              <th className="pb-2.5 font-medium text-right">Replies</th>
+              <th className="pb-2.5 font-medium text-right">Positive</th>
+              <th className="pb-2.5 font-medium text-right">Pending Work</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line/60">
+            {team.length > 0 ? (
+              team.map((t) => (
+                <tr key={t.userId} className="hover:bg-surface-muted/40 transition-colors">
+                  <td className="py-2.5">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-ink">{t.userName}</span>
+                      <span className="rounded bg-surface-sunken px-1.5 py-0.2 text-[10px] font-medium text-ink-subtle border border-line/40">
+                        {t.userRole.replace("_", " ")}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-ink-subtle">{t.userEmail}</p>
+                  </td>
+                  <td className="py-2.5 text-right font-medium text-ink">{num(t.assigned)}</td>
+                  <td className="py-2.5 text-right font-semibold text-ink">{num(t.reached)}</td>
+                  <td className="py-2.5 text-right">
+                    <span className="font-semibold text-ink">{num(t.replies)}</span>
+                    <span className="text-[10px] text-brand ml-1">({t.replyRate}%)</span>
+                  </td>
+                  <td className="py-2.5 text-right">
+                    <span className="font-semibold text-emerald-600">{num(t.positiveOutcomes)}</span>
+                    <span className="text-[10px] text-emerald-600 ml-1">({t.positiveRate}%)</span>
+                  </td>
+                  <td className="py-2.5 text-right">
+                    {t.pendingWork.total > 0 ? (
+                      <span className="inline-flex items-center gap-1 rounded bg-amber-50 text-amber-800 border border-amber-200 px-2 py-0.5 text-[11px] font-medium">
+                        {plural(t.pendingWork.total, "item")} pending
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-ink-faint">Clear</span>
+                    )}
+                  </td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan={6} className="py-4 text-center text-ink-subtle">
+                  No outreach team members found.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function FounderOverview() {
-  useTitle("Executive Overview");
+  useTitle("Founder Overview");
   const { can } = useAuth();
-  const overview = useOverview();
+
+  // Filters State: Date Range | Outreach Type | Owner
+  const [dateRange, setDateRange] = useState<"7d" | "30d" | "90d" | "all">("30d");
+  const [outreachType, setOutreachType] = useState<string>("");
+  const [ownerId, setOwnerId] = useState<string>("");
+
+  const filters: OverviewFilterQuery = {
+    dateRange,
+    ...(outreachType ? { outreachType: outreachType as CampaignOutreachType } : {}),
+    ...(ownerId ? { ownerId } : {}),
+  };
+
+  const overview = useOverview(filters);
   const queue = useWorkspaceQueue();
   const mailbox = useMailbox();
 
-  if (overview.isPending || queue.isPending) return <PageLoader label="Loading executive overview…" />;
+  if (overview.isPending || queue.isPending) return <PageLoader label="Loading founder outreach overview…" />;
   if (overview.isError) return <ErrorState error={overview.error} onRetry={() => overview.refetch()} />;
   if (queue.isError) return <ErrorState error={queue.error} onRetry={() => queue.refetch()} />;
 
@@ -171,22 +475,49 @@ function FounderOverview() {
   const work = queue.data.data;
   const mailboxIssues = mailboxProblems(mailbox.data?.data);
 
-  // Executive Attention Items
-  const pendingApprovals = data.awaitingApproval.length ? data.awaitingApproval : work.pendingApproval;
-  const campaignsNeedingHelp = work.campaignsNeedingAttention;
-  const dueFollowUps = work.dueFollowUps;
-  const totalAttentionCount =
-    pendingApprovals.length + campaignsNeedingHelp.length + dueFollowUps.length + mailboxIssues.length + (mailbox.isError ? 1 : 0);
+  // KPIs
+  const totalReached = data.kpis?.totalReached ?? data.last30Days.sent;
+  const prevReached = data.kpis?.previousReached ?? data.previous30Days.sent;
+  const replies = data.kpis?.replies ?? data.last30Days.replied;
+  const prevReplies = data.kpis?.previousReplies ?? data.previous30Days.replied;
+  const replyRate = data.kpis?.replyRate ? `${data.kpis.replyRate}%` : (totalReached > 0 ? `${((replies / totalReached) * 100).toFixed(1)}%` : "0%");
 
-  // 30-Day Conversion Rates
-  const sent30 = data.last30Days.sent;
-  const replied30 = data.last30Days.replied;
-  const positive30 = data.last30Days.positiveReplies + data.last30Days.meetingsBooked;
-  const replyRate30 = sent30 > 0 ? ((replied30 / sent30) * 100).toFixed(1) + "%" : "0%";
-  const positiveRate30 = replied30 > 0 ? ((positive30 / replied30) * 100).toFixed(1) + "%" : "0%";
+  const positiveOutcomes = data.kpis?.positiveOutcomes ?? (data.last30Days.positiveReplies + data.last30Days.meetingsBooked);
+  const prevPositive = data.kpis?.previousPositiveOutcomes ?? (data.previous30Days.positiveReplies + data.previous30Days.meetingsBooked);
+  const positiveRate = data.kpis?.positiveRate ? `${data.kpis.positiveRate}%` : (replies > 0 ? `${((positiveOutcomes / replies) * 100).toFixed(1)}%` : "0%");
 
-  // Active campaigns
-  const activeCampaigns = work.campaigns.filter((c) => ["SENDING", "APPROVED", "PAUSED"].includes(c.status));
+  const activeOutreachCount = data.kpis?.activeOutreachCampaigns ?? work.campaigns.filter((c) => ["SENDING", "APPROVED", "PAUSED"].includes(c.status)).length;
+  const totalCampaignsCount = data.kpis?.totalCampaigns ?? work.campaigns.length;
+
+  const periodLabel = dateRange === "7d" ? "prior 7d" : dateRange === "90d" ? "prior 90d" : dateRange === "all" ? "prior all" : "prior 30d";
+
+  // Actionable Attention Items
+  const attentionItems: AttentionItemDto[] = data.actionableAttention ?? [];
+  const totalAttentionCount = attentionItems.length + mailboxIssues.length + (mailbox.isError ? 1 : 0);
+
+  // Outreach Funnel
+  const funnel: OutreachFunnelDto = data.funnel ?? {
+    reached: totalReached,
+    replies,
+    positiveOutcomes,
+    meetings: data.last30Days.meetingsBooked,
+    replyRate: totalReached > 0 ? Number(((replies / totalReached) * 100).toFixed(1)) : 0,
+    positiveRate: replies > 0 ? Number(((positiveOutcomes / replies) * 100).toFixed(1)) : 0,
+    meetingRate: positiveOutcomes > 0 ? Number(((data.last30Days.meetingsBooked / positiveOutcomes) * 100).toFixed(1)) : 0,
+    overallConversionRate: totalReached > 0 ? Number(((data.last30Days.meetingsBooked / totalReached) * 100).toFixed(1)) : 0,
+  };
+
+  // Outreach by Type
+  const outreachByType = data.outreachByType ?? [];
+
+  // Team Outreach
+  const teamOutreach = data.teamOutreach ?? [];
+
+  // 30-Day Activity Trend
+  const activityTrend = data.activityTrend ?? [];
+
+  // Active Campaigns
+  const activeCampaigns = data.activeCampaigns ?? work.campaigns.filter((c) => ["SENDING", "APPROVED", "PAUSED"].includes(c.status));
 
   return (
     <>
@@ -208,44 +539,130 @@ function FounderOverview() {
       />
 
       <div className="space-y-6">
-        {/* Executive Metrics Grid (Last 30 Days) */}
-        <section aria-label="Executive Metrics">
+        {/* Dashboard Filter Bar: Date Range | Outreach Type | Owner */}
+        <section aria-label="Dashboard Filters" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-surface p-3 shadow-sm">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-1.5 text-xs text-ink-subtle">
+              <Filter className="h-3.5 w-3.5 text-ink-muted" />
+              <span className="font-medium">Filter by:</span>
+            </div>
+
+            {/* Date Range */}
+            <div className="flex items-center gap-1.5">
+              <select
+                value={dateRange}
+                onChange={(e) => setDateRange(e.target.value as any)}
+                className="rounded-lg border border-line bg-surface-muted/40 px-2.5 py-1.5 text-xs font-medium text-ink hover:bg-surface focus:outline-none focus:ring-1 focus:ring-brand"
+              >
+                <option value="7d">Last 7 days</option>
+                <option value="30d">Last 30 days</option>
+                <option value="90d">Last 90 days</option>
+                <option value="all">All time</option>
+              </select>
+            </div>
+
+            {/* Outreach Type */}
+            <div className="flex items-center gap-1.5">
+              <select
+                value={outreachType}
+                onChange={(e) => setOutreachType(e.target.value)}
+                className="rounded-lg border border-line bg-surface-muted/40 px-2.5 py-1.5 text-xs font-medium text-ink hover:bg-surface focus:outline-none focus:ring-1 focus:ring-brand"
+              >
+                <option value="">All Outreach Types</option>
+                {CAMPAIGN_OUTREACH_TYPES.map((t) => (
+                  <option key={t} value={t}>
+                    {CAMPAIGN_OUTREACH_TYPE_LABELS[t]}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Owner */}
+            <div className="flex items-center gap-1.5">
+              <select
+                value={ownerId}
+                onChange={(e) => setOwnerId(e.target.value)}
+                className="rounded-lg border border-line bg-surface-muted/40 px-2.5 py-1.5 text-xs font-medium text-ink hover:bg-surface focus:outline-none focus:ring-1 focus:ring-brand"
+              >
+                <option value="">All Owners</option>
+                {(data.availableFilters?.owners ?? []).map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {(dateRange !== "30d" || outreachType !== "" || ownerId !== "") && (
+            <button
+              onClick={() => {
+                setDateRange("30d");
+                setOutreachType("");
+                setOwnerId("");
+              }}
+              className="text-xs font-medium text-brand hover:underline"
+            >
+              Reset filters
+            </button>
+          )}
+        </section>
+
+        {/* 1. Core Outreach KPIs Grid */}
+        <section aria-label="Outreach KPIs">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-ink">Last 30 Days Performance</h2>
-            <span className="text-xs text-ink-subtle">Compared against prior 30-day period</span>
+            <h2 className="text-sm font-semibold text-ink">Outreach Operations Performance</h2>
+            <span className="text-xs text-ink-subtle">
+              {dateRange === "7d" ? "Last 7 Days" : dateRange === "90d" ? "Last 90 Days" : dateRange === "all" ? "All Time" : "Last 30 Days"}
+            </span>
           </div>
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
             <ExecutiveMetric
-              label="Emails Sent"
-              current={sent30}
-              previous={data.previous30Days.sent}
+              label="Total Outreach / Contacts Reached"
+              current={totalReached}
+              previous={prevReached}
+              periodLabel={periodLabel}
             />
             <ExecutiveMetric
               label="Inbound Replies"
-              current={replied30}
-              previous={data.previous30Days.replied}
-              rate={replyRate30}
+              current={replies}
+              previous={prevReplies}
+              rate={replyRate}
               rateLabel="reply rate"
+              periodLabel={periodLabel}
             />
             <ExecutiveMetric
               label="Positive Outcomes"
-              current={positive30}
-              previous={data.previous30Days.positiveReplies + data.previous30Days.meetingsBooked}
-              rate={positiveRate30}
+              current={positiveOutcomes}
+              previous={prevPositive}
+              rate={positiveRate}
               rateLabel="of replies"
+              periodLabel={periodLabel}
             />
             <div className="rounded-xl border border-line bg-surface p-4 shadow-sm">
-              <p className="text-xs font-medium text-ink-subtle">Active Campaigns</p>
+              <p className="text-xs font-medium text-ink-subtle">Active Outreach</p>
               <div className="mt-2 flex items-baseline gap-2">
-                <span className="text-2xl font-bold tracking-tight text-ink">{num(activeCampaigns.length)}</span>
-                <span className="text-xs text-ink-subtle font-medium">in outreach</span>
+                <span className="text-2xl font-bold tracking-tight text-ink">{num(activeOutreachCount)}</span>
+                <span className="text-xs text-ink-subtle font-medium">campaigns active</span>
               </div>
-              <p className="mt-1 text-xs text-ink-faint">{num(work.campaigns.length)} total campaigns</p>
+              <p className="mt-1 text-xs text-ink-faint">{num(totalCampaignsCount)} total campaigns</p>
             </div>
           </div>
         </section>
 
-        {/* Prioritized Needs Attention Section */}
+        {/* 2. Conversion Funnel: Reached → Replies → Positive Outcomes → Meetings/Opportunities */}
+        <OutreachFunnelCard funnel={funnel} />
+
+        {/* 3. Simple 30-Day Activity Trend */}
+        {activityTrend.length > 0 && <OutreachTrendChart trend={activityTrend} />}
+
+        {/* 4. Outreach by Type */}
+        {outreachByType.length > 0 && <OutreachByTypeCard metrics={outreachByType} />}
+
+        {/* 5. Team Outreach */}
+        {teamOutreach.length > 0 && <TeamOutreachCard team={teamOutreach} />}
+
+        {/* 6. Prioritized Needs Attention Section */}
         <section aria-label="Needs Attention">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -257,7 +674,7 @@ function FounderOverview() {
               )}
             </div>
             {totalAttentionCount > 0 && (
-              <span className="text-xs text-ink-subtle">Items requiring intervention or review</span>
+              <span className="text-xs text-ink-subtle">Actionable items requiring intervention or review</span>
             )}
           </div>
 
@@ -289,58 +706,25 @@ function FounderOverview() {
               </Link>
             ))}
 
-            {pendingApprovals.map((campaign) => (
+            {attentionItems.map((item) => (
               <Link
-                key={campaign.id}
-                to={`/campaigns/${campaign.id}?tab=review`}
+                key={item.id}
+                to={item.link}
                 className="flex items-center justify-between gap-3 px-5 py-3.5 text-xs transition-colors hover:bg-surface-muted/60"
               >
-                <span className="flex items-center gap-2.5 font-medium text-ink">
-                  <Inbox className="h-4 w-4 shrink-0 text-brand" />
-                  Campaign approval needed: <span className="font-semibold">{campaign.name}</span>
-                  {campaign.createdBy && <span className="text-ink-subtle">by {campaign.createdBy.name}</span>}
-                </span>
-                <span className="flex items-center gap-1 font-medium text-brand">
-                  Review & Approve <ArrowUpRight className="h-3.5 w-3.5" />
-                </span>
-              </Link>
-            ))}
-
-            {campaignsNeedingHelp.map((campaign) => (
-              <Link
-                key={campaign.id}
-                to={`/campaigns/${campaign.id}?tab=recipients&filter=${campaign.counts.unknown ? "unknown" : "failed"}`}
-                className="flex items-center justify-between gap-3 px-5 py-3.5 text-xs transition-colors hover:bg-surface-muted/60"
-              >
-                <span className="flex items-center gap-2.5 font-medium text-ink">
-                  <AlertTriangle className="h-4 w-4 shrink-0 text-warning" />
-                  Delivery issues on: <span className="font-semibold">{campaign.name}</span>
-                  {campaign.counts.failed > 0 && (
-                    <span className="text-danger">({plural(campaign.counts.failed, "failed send")})</span>
-                  )}
-                  {campaign.counts.unknown > 0 && (
-                    <span className="text-warning">({plural(campaign.counts.unknown, "to review")})</span>
-                  )}
-                </span>
-                <span className="flex items-center gap-1 font-medium text-brand">
-                  View recipients <ArrowUpRight className="h-3.5 w-3.5" />
-                </span>
-              </Link>
-            ))}
-
-            {dueFollowUps.slice(0, 3).map((send) => (
-              <Link
-                key={send.id}
-                to={`/campaigns/${send.campaignId}?tab=recipients&filter=scheduled`}
-                className="flex items-center justify-between gap-3 px-5 py-3.5 text-xs transition-colors hover:bg-surface-muted/60"
-              >
-                <span className="flex items-center gap-2.5 font-medium text-ink">
-                  <Clock3 className="h-4 w-4 shrink-0 text-brand" />
-                  Follow-up due for <span className="font-semibold">{send.contactName || send.email}</span>
-                  <span className="text-ink-subtle">({send.campaignName})</span>
-                </span>
-                <span className="flex items-center gap-1 font-medium text-brand">
-                  View scheduled <ArrowUpRight className="h-3.5 w-3.5" />
+                <div className="flex items-center gap-2.5 min-w-0">
+                  {item.type === "OVERDUE_FOLLOW_UP" && <Clock3 className="h-4 w-4 shrink-0 text-brand" />}
+                  {item.type === "UNANSWERED_REPLY" && <MessageSquare className="h-4 w-4 shrink-0 text-emerald-600" />}
+                  {item.type === "PENDING_APPROVAL" && <Inbox className="h-4 w-4 shrink-0 text-amber-600" />}
+                  {item.type === "MAILBOX_ISSUE" && <AlertTriangle className="h-4 w-4 shrink-0 text-warning" />}
+                  {item.type === "DELIVERY_EXCEPTION" && <AlertTriangle className="h-4 w-4 shrink-0 text-danger" />}
+                  <div className="min-w-0">
+                    <p className="font-semibold text-ink truncate">{item.title}</p>
+                    <p className="text-ink-subtle text-[11px] truncate">{item.subtitle}</p>
+                  </div>
+                </div>
+                <span className="flex items-center gap-1 font-medium text-brand shrink-0">
+                  {item.linkLabel} <ArrowUpRight className="h-3.5 w-3.5" />
                 </span>
               </Link>
             ))}
@@ -348,54 +732,13 @@ function FounderOverview() {
             {totalAttentionCount === 0 && (
               <div className="flex items-center gap-2 px-5 py-6 text-xs text-success">
                 <CheckCircle2 className="h-4 w-4 shrink-0" />
-                <span>All outreach channels healthy. No pending approvals or campaign delivery exceptions.</span>
+                <span>All outreach channels healthy. No overdue follow-ups, unanswered conversations, or delivery exceptions.</span>
               </div>
             )}
           </div>
         </section>
 
-        {/* Executive Conversion Funnel */}
-        <section aria-label="Conversion Funnel">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-ink">Outreach Funnel (Last 30 Days)</h2>
-            <span className="text-xs text-ink-subtle">Sent → Delivered → Inbound Replies → Positive Outcome</span>
-          </div>
-          <div className="grid grid-cols-1 gap-3 rounded-xl border border-line bg-surface p-4 shadow-sm sm:grid-cols-4">
-            <div className="rounded-lg bg-surface-muted/50 p-3.5">
-              <span className="text-xs font-medium text-ink-subtle">1. Outreach Sent</span>
-              <p className="mt-1 text-xl font-bold text-ink">{num(sent30)}</p>
-              <p className="mt-0.5 text-xs text-ink-faint">SpaceMail SMTP dispatches</p>
-            </div>
-            <div className="rounded-lg bg-surface-muted/50 p-3.5">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-ink-subtle">2. Delivered</span>
-                <span className="text-xs font-semibold text-brand">
-                  {sent30 > 0 ? `${(((sent30 - data.last30Days.bounced) / sent30) * 100).toFixed(1)}%` : "—"}
-                </span>
-              </div>
-              <p className="mt-1 text-xl font-bold text-ink">{num(Math.max(0, sent30 - data.last30Days.bounced))}</p>
-              <p className="mt-0.5 text-xs text-ink-faint">Accepted by recipient mailboxes</p>
-            </div>
-            <div className="rounded-lg bg-surface-muted/50 p-3.5">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-ink-subtle">3. Replies Received</span>
-                <span className="text-xs font-semibold text-brand">{replyRate30}</span>
-              </div>
-              <p className="mt-1 text-xl font-bold text-ink">{num(replied30)}</p>
-              <p className="mt-0.5 text-xs text-ink-faint">Detected via IMAP sync</p>
-            </div>
-            <div className="rounded-lg bg-surface-muted/50 p-3.5">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-ink-subtle">4. Positive Outcomes</span>
-                <span className="text-xs font-semibold text-success">{positiveRate30}</span>
-              </div>
-              <p className="mt-1 text-xl font-bold text-success">{num(positive30)}</p>
-              <p className="mt-0.5 text-xs text-ink-faint">Interested or meeting booked</p>
-            </div>
-          </div>
-        </section>
-
-        {/* Active Campaigns Performance Matrix */}
+        {/* 7. Active Campaigns Performance Matrix */}
         <section aria-label="Active Campaigns">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="text-sm font-semibold text-ink">Active Outreach Campaigns</h2>
@@ -410,6 +753,10 @@ function FounderOverview() {
                 const total = c.counts.total || 1;
                 const pct = Math.min(100, Math.round((c.counts.sent / total) * 100));
                 const repRate = c.counts.sent > 0 ? ((c.counts.replied / c.counts.sent) * 100).toFixed(1) + "%" : "0%";
+                const posOutcomes = (c as any).positiveOutcomes ?? 0;
+                const meetingsCount = (c as any).meetingsBooked ?? 0;
+                const oType = c.outreachType as CampaignOutreachType | undefined;
+
                 return (
                   <Link
                     key={c.id}
@@ -417,13 +764,18 @@ function FounderOverview() {
                     className="flex flex-col gap-2 p-4 transition-colors hover:bg-surface-muted/50 sm:flex-row sm:items-center sm:justify-between"
                   >
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className="truncate text-xs font-semibold text-ink">{c.name}</span>
                         <CampaignStatusBadge status={c.status} />
+                        {oType && (
+                          <span className="rounded bg-surface-sunken border border-line px-1.5 py-0.2 text-[10px] font-medium text-ink-subtle">
+                            {CAMPAIGN_OUTREACH_TYPE_LABELS[oType] || oType}
+                          </span>
+                        )}
                       </div>
                       <p className="mt-1 truncate text-xs text-ink-subtle">
                         {c.list.name} ({plural(c.list.memberCount, "contact")}) · {c.template.name}
-                        {c.createdBy && ` · By ${c.createdBy.name}`}
+                        {c.createdBy && ` · Owner: ${c.createdBy.name}`}
                       </p>
                     </div>
 
@@ -438,9 +790,14 @@ function FounderOverview() {
                         </div>
                       </div>
 
-                      <div className="text-right">
+                      <div className="text-right min-w-[70px]">
                         <p className="font-semibold text-ink">{num(c.counts.replied)} replies</p>
                         <p className="text-[11px] text-brand font-medium">{repRate} reply rate</p>
+                      </div>
+
+                      <div className="text-right min-w-[80px]">
+                        <p className="font-semibold text-emerald-600">{num(posOutcomes)} positive</p>
+                        <p className="text-[11px] text-ink-subtle">{num(meetingsCount)} meetings</p>
                       </div>
 
                       <ArrowUpRight className="h-4 w-4 text-ink-faint" />
@@ -450,7 +807,7 @@ function FounderOverview() {
               })
             ) : (
               <div className="px-5 py-8 text-center text-xs text-ink-subtle">
-                No campaigns are actively sending right now.
+                No campaigns match the selected filters or are actively sending right now.
               </div>
             )}
           </div>

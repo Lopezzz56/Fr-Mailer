@@ -284,6 +284,7 @@ export function toCampaignSummary(c: CampaignSummaryRow | CampaignRow, counts: C
     id: c.id,
     name: c.name,
     status: c.status,
+    outreachType: ((c as any).outreachType as any) ?? "CUSTOMER_OUTREACH",
     template: c.template,
     list: { id: c.contactList.id, name: c.contactList.name, memberCount: c.contactList._count.members },
     counts,

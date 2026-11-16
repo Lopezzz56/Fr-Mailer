@@ -18,7 +18,7 @@ import {
   toSessionUser,
   verifyPassword,
 } from "../services/auth-service.js";
-import { createResetLink, inviteUser, updateUser } from "../services/team-service.js";
+import { createResetLink, inviteUser, removeUser, updateUser } from "../services/team-service.js";
 import { audit } from "../lib/audit.js";
 import { ok } from "../lib/http.js";
 import { IdSchema } from "../../shared/types.js";
@@ -240,5 +240,18 @@ usersRouter.post(
     const id = IdSchema.parse(req.params.id);
     const { sendEmail } = z.object({ sendEmail: z.boolean().default(false) }).parse(req.body ?? {});
     ok(res, await createResetLink(req, id, sendEmail));
+  })
+);
+
+usersRouter.delete(
+  "/:id",
+  requirePermission("users.manage"),
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    if (!req.user || req.user.role !== "FOUNDER") {
+      throw AppError.forbidden("PERMISSION_DENIED", "Only founders can remove members from the organization.");
+    }
+    const removed = await removeUser(req, id);
+    ok(res, { removed: true, user: toSessionUser(removed) });
   })
 );
