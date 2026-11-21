@@ -29,6 +29,96 @@ describe("classifyIncoming", () => {
     });
   });
 
+  it("extracts recipient from X-Failed-Recipients header when Final-Recipient is absent", () => {
+    const result = classifyIncoming(
+      {
+        ...base,
+        from: "Mail Delivery System <MAILER-DAEMON@mail.spacemail.com>",
+        subject: "Mail delivery failed: returning message to sender",
+        headers: { "x-failed-recipients": "connect@augusthospitality.in" },
+        text: "This message was created automatically by mail delivery software.\nA message that you sent could not be delivered to one or more of its recipients.\n550 5.1.1 Recipient address rejected",
+        attachments: [],
+      },
+      DOMAIN
+    );
+    expect(result).toMatchObject({
+      type: "bounce",
+      hard: true,
+      recipient: "connect@augusthospitality.in",
+    });
+  });
+
+  it("extracts recipient from delivery failure body text (e.g., Postfix / SpaceMail format)", () => {
+    const result = classifyIncoming(
+      {
+        ...base,
+        from: "Mail Delivery System <MAILER-DAEMON@mail.spacemail.com>",
+        subject: "Undelivered Mail Returned to Sender",
+        headers: {},
+        text: `This is the mail system at host mail.spacemail.com.
+
+I'm sorry to have to inform you that your message could not
+be delivered to one or more recipients. It's attached below.
+
+The following address(es) failed:
+
+  abhimanyu.c@chokhidhani.com
+    host mx.chokhidhani.com [1.2.3.4]:
+    550 5.1.1 <abhimanyu.c@chokhidhani.com>: Recipient address rejected: User unknown`,
+        attachments: [],
+      },
+      DOMAIN
+    );
+    expect(result).toMatchObject({
+      type: "bounce",
+      hard: true,
+      recipient: "abhimanyu.c@chokhidhani.com",
+    });
+  });
+
+  it("extracts recipient from Gmail Mail Delivery Subsystem body format", () => {
+    const result = classifyIncoming(
+      {
+        ...base,
+        from: "Mail Delivery Subsystem <mailer-daemon@googlemail.com>",
+        subject: "Delivery Status Notification (Failure)",
+        headers: {},
+        text: `** Address not found **
+
+Your message to fail@example.com couldn't be delivered.
+550-5.1.1 The email account that you tried to reach does not exist.`,
+        attachments: [],
+      },
+      DOMAIN
+    );
+    expect(result).toMatchObject({
+      type: "bounce",
+      hard: true,
+      recipient: "fail@example.com",
+    });
+  });
+
+  it("classifies temporary quota / mailbox full error as soft bounce", () => {
+    const result = classifyIncoming(
+      {
+        ...base,
+        from: "Mail Delivery Subsystem <mailer-daemon@mail.spacemail.com>",
+        subject: "Delivery Status Notification (Delay)",
+        headers: {},
+        text: `Delivery to the following recipient failed:
+  busy@example.com
+452 4.2.2 Mailbox is full / quota exceeded`,
+        attachments: [],
+      },
+      DOMAIN
+    );
+    expect(result).toMatchObject({
+      type: "bounce",
+      hard: false,
+      recipient: "busy@example.com",
+    });
+  });
+
   it("treats 4.x.x status as a soft bounce", () => {
     const r = classifyIncoming(
       { ...base, from: "MAILER-DAEMON@x", subject: "Delivery Status Notification (Delay)", attachments: [{ contentType: "message/delivery-status", content: "Status: 4.4.7\nAction: delayed" }] },

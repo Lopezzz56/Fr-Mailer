@@ -1,27 +1,28 @@
 // Per-recipient delivery log with filters, and a drawer showing the exact message sent
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   CheckCircle,
   Clock,
   Download,
   Mail,
-  MessageSquareReply,
-  OctagonX,
   Pause,
   Play,
   Square,
-  UserMinus,
 } from "lucide-react";
 import {
   RECIPIENT_SEQUENCE_STATE_LABELS,
+  CONVERSATION_STATUS_LABELS,
+  CONVERSATION_STATUS_TONES,
   type CampaignCounts,
   type SendDto,
   type CampaignRecipientStateDto,
   type RecipientSequenceState,
+  type ConversationDto,
+  type ConversationStatus,
 } from "@shared/types";
 import { api, errorMessage } from "../../lib/api";
-import { useInvalidate, useSends, type SendDetail } from "../../lib/queries";
+import { useInvalidate, useSends, useCampaignConversationCounts, type SendDetail } from "../../lib/queries";
 import { useDebounced } from "../../lib/hooks";
 import { useAuth } from "../../lib/auth";
 import { formatDateTime } from "../../lib/format";
@@ -29,7 +30,7 @@ import { cn } from "../../lib/cn";
 import { Card } from "../ui/Card";
 import { Badge, DeliveryStatusBadge } from "../ui/Badge";
 import { Button, buttonClasses } from "../ui/Button";
-import { Checkbox, SearchInput, SelectField, TextField } from "../ui/Field";
+import { SearchInput, TextField } from "../ui/Field";
 import { DataTable, Pagination, type Column } from "../ui/DataTable";
 import { FilterChips } from "../ui/Navigation";
 import { Callout, EmptyState, ErrorState } from "../ui/Feedback";
@@ -53,119 +54,304 @@ type FilterKey =
   | "replied"
   | "unsubscribed";
 
+type ConversationFilterKey = "all" | ConversationStatus;
+
 const EVENT_LABELS: Record<string, string> = { HARD_BOUNCE: "Bounced", SOFT_BOUNCE: "Delivery delayed", REPLY: "Replied", UNSUBSCRIBE: "Unsubscribed" };
 
-function Engagement({ s }: { s: SendDto }) {
-  return (
-    <div className="flex gap-1.5">
-      {s.repliedAt && <Badge tone="success"><MessageSquareReply className="h-3 w-3" /> Replied</Badge>}
-      {s.bouncedAt && <Badge tone="danger"><OctagonX className="h-3 w-3" /> Bounced</Badge>}
-      {s.unsubscribedAt && <Badge tone="neutral"><UserMinus className="h-3 w-3" /> Unsubscribed</Badge>}
-    </div>
-  );
-}
-
-function OutcomeReviewForm({
+function ConversationReplyWorkspace({
   campaignId,
-  sendId,
-  send,
+  recipientEmail,
+  send: _send,
+  fromLine: _fromLine,
 }: {
   campaignId: string;
-  sendId: string;
+  recipientEmail: string;
   send: SendDetail;
+  fromLine: string;
 }) {
   const toast = useToast();
   const invalidate = useInvalidate();
+  const { can } = useAuth();
 
-  // Find latest reply event detail if any
-  const replyEvent = [...send.events].reverse().find((e) => e.type === "REPLY");
-  const detail = (replyEvent?.detail as Record<string, unknown> | undefined) ?? {};
-
-  const [classification, setClassification] = useState<string>(
-    String(detail.classification || "")
-  );
-  const [meetingBooked, setMeetingBooked] = useState<boolean>(
-    Boolean(detail.meetingBooked)
-  );
-  const [note, setNote] = useState<string>(String(detail.note || ""));
-
-  const save = useMutation({
-    mutationFn: () =>
-      api.post(`/api/campaigns/${campaignId}/sends/${sendId}/outcome`, {
-        replyClassification: classification ? classification : undefined,
-        meetingBooked,
-        note: note ? note : undefined,
-      }),
-    onSuccess: async () => {
-      await invalidate("campaigns", "overview");
-      toast.success("Outcome saved", "Attribution metrics updated.");
-    },
-    onError: (err) => toast.error("Could not save outcome", errorMessage(err)),
+  const convQuery = useQuery({
+    queryKey: ["campaigns", campaignId, "recipient-conversation", recipientEmail],
+    queryFn: () =>
+      api
+        .get<ConversationDto>(
+          `/api/campaigns/${campaignId}/recipients/${encodeURIComponent(recipientEmail)}/conversation`
+        )
+        .then((r) => r.data),
+    staleTime: 5000,
   });
 
+  const conv = convQuery.data;
+
+  const [status, setStatus] = useState<ConversationStatus | "">("");
+  const [outcomeNote, setOutcomeNote] = useState("");
+  const [meetingBooked, setMeetingBooked] = useState(false);
+  const [expandedHtmlMsgId, setExpandedHtmlMsgId] = useState<string | null>(null);
+  const [expandedQuotedMsgId, setExpandedQuotedMsgId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (conv) {
+      setStatus(conv.status);
+      setOutcomeNote(conv.outcome || "");
+      setMeetingBooked(conv.status === "MEETING_SCHEDULED" || Boolean(conv.meetingAt));
+    }
+  }, [conv?.id, conv?.status, conv?.outcome, conv?.meetingAt]);
+
+  const updateConv = useMutation({
+    mutationFn: (data: Partial<{
+      status: ConversationStatus;
+      outcome: string | null;
+      meetingAt: string | null;
+    }>) =>
+      api.patch<ConversationDto>(`/api/conversations/${conv!.id}`, {
+        ...data,
+      }),
+    onSuccess: async () => {
+      await convQuery.refetch();
+      toast.success("Outcome updated", "Conversation status updated.");
+      // Invalidate caches in background without blocking button state
+      invalidate("campaigns");
+      invalidate("overview");
+    },
+    onError: (err) => toast.error("Could not update conversation", errorMessage(err)),
+  });
+
+  if (convQuery.isPending) {
+    return (
+      <div className="rounded-xl border border-line bg-surface p-4 text-center">
+        <p className="text-xs text-ink-muted">Loading conversation...</p>
+      </div>
+    );
+  }
+
+  if (!conv) {
+    return null;
+  }
+
+  const messages = conv.messages || [];
+  const statusTone = CONVERSATION_STATUS_TONES[conv.status] || "neutral";
+
   return (
-    <div className="rounded-lg border border-line bg-surface-sunken/40 p-3 space-y-3">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold text-ink uppercase tracking-wider">
-          Reply Outcome & Meeting Review
-        </span>
-        {classification && (
-          <Badge
-            tone={
-              classification === "POSITIVE"
-                ? "success"
-                : classification === "NEGATIVE" || classification === "UNSUBSCRIBE"
-                ? "danger"
-                : classification === "OBJECTION" || classification === "OUT_OF_OFFICE"
-                ? "warning"
-                : "neutral"
-            }
-          >
-            {classification}
-          </Badge>
+    <div className="space-y-4">
+      {/* 1. Header Information: Contact, Campaign, Current Status */}
+      <div className="rounded-xl border border-line bg-surface p-4 shadow-sm space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
+          <div>
+            <span className="text-2xs font-semibold uppercase tracking-wider text-ink-subtle">Contact</span>
+            <div className="text-sm font-semibold text-ink">
+              {conv.contactName ? `${conv.contactName} (${conv.recipientEmail})` : conv.recipientEmail}
+            </div>
+            {conv.campaignName && (
+              <div className="text-xs text-ink-subtle mt-0.5">
+                Campaign: <span className="text-ink font-medium">{conv.campaignName}</span>
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-2xs font-semibold uppercase tracking-wider text-ink-subtle">Current Status:</span>
+            <Badge tone={statusTone}>
+              {CONVERSATION_STATUS_LABELS[conv.status] || conv.status}
+            </Badge>
+          </div>
+        </div>
+
+        {/* 2. Action Section: Status / Outcome, Meeting Booked, Note */}
+        {can("campaigns.manage") && (
+          <div className="space-y-3 pt-1">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-ink uppercase tracking-wider">
+                Update Outcome
+              </span>
+              <span className="text-2xs text-ink-subtle">
+                Updates dashboard metrics immediately
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+              <div>
+                <label htmlFor="conv-status-select" className="block text-xs font-medium text-ink-subtle mb-1">
+                  Status / Outcome
+                </label>
+                <select
+                  id="conv-status-select"
+                  value={status}
+                  onChange={(e) => {
+                    const newStatus = e.target.value as ConversationStatus;
+                    setStatus(newStatus);
+                    if (newStatus === "MEETING_SCHEDULED") {
+                      setMeetingBooked(true);
+                    } else if (newStatus === "NOT_INTERESTED" || newStatus === "CLOSED") {
+                      setMeetingBooked(false);
+                    }
+                  }}
+                  disabled={updateConv.isPending}
+                  className="w-full rounded-lg border border-line bg-surface px-3 py-2 text-xs font-medium text-ink hover:border-line-strong focus:outline-none focus:ring-1 focus:ring-brand"
+                >
+                  <option value="NEEDS_REPLY">Needs Reply</option>
+                  <option value="WAITING_FOR_CONTACT">Waiting for Contact</option>
+                  <option value="MEETING_COORDINATION">Meeting Coordination</option>
+                  <option value="MEETING_SCHEDULED">Meeting Scheduled</option>
+                  <option value="INTERESTED">Interested</option>
+                  <option value="NOT_INTERESTED">Not Interested</option>
+                  <option value="CLOSED">Closed</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-2 h-9 px-3 rounded-lg border border-line bg-surface-muted/30">
+                <input
+                  type="checkbox"
+                  id="meeting-booked-check"
+                  checked={meetingBooked}
+                  onChange={(e) => {
+                    const isBooked = e.target.checked;
+                    setMeetingBooked(isBooked);
+                    if (isBooked && (status === "NEEDS_REPLY" || status === "WAITING_FOR_CONTACT" || status === "MEETING_COORDINATION" || !status)) {
+                      setStatus("MEETING_SCHEDULED");
+                    }
+                  }}
+                  disabled={updateConv.isPending}
+                  className="h-4 w-4 rounded border-line text-brand focus:ring-brand"
+                />
+                <label htmlFor="meeting-booked-check" className="text-xs font-medium text-ink cursor-pointer select-none">
+                  Meeting Booked
+                </label>
+              </div>
+            </div>
+
+            <div>
+              <TextField
+                label="Note (Optional)"
+                placeholder="e.g. Intro call planned next week or requested pricing deck..."
+                value={outcomeNote}
+                onChange={(e) => setOutcomeNote(e.target.value)}
+              />
+            </div>
+
+            <div className="flex justify-end pt-1">
+              <Button
+                size="sm"
+                variant="primary"
+                loading={updateConv.isPending}
+                onClick={() =>
+                  updateConv.mutate({
+                    status: (status as ConversationStatus) || undefined,
+                    meetingAt: meetingBooked ? (conv.meetingAt || new Date().toISOString()) : null,
+                    outcome: outcomeNote.trim() || null,
+                  })
+                }
+              >
+                Save Outcome
+              </Button>
+            </div>
+          </div>
         )}
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-        <SelectField
-          label="Sentiment Classification"
-          value={classification}
-          onChange={(e) => setClassification(e.target.value)}
-          options={[
-            { value: "", label: "Unclassified" },
-            { value: "POSITIVE", label: "Positive interest" },
-            { value: "NEUTRAL", label: "Neutral / Needs follow-up" },
-            { value: "OBJECTION", label: "Objection / Needs clarification" },
-            { value: "NEGATIVE", label: "Negative / Not interested" },
-            { value: "UNSUBSCRIBE", label: "Unsubscribe request" },
-            { value: "OUT_OF_OFFICE", label: "Out of office / Away" },
-          ]}
-        />
-        <div className="pt-5">
-          <Checkbox
-            label="Meeting booked from this outreach"
-            checked={meetingBooked}
-            onChange={(e) => setMeetingBooked(e.target.checked)}
-          />
+      {/* 3. What they replied / Conversation Messages */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-ink-subtle">
+            Conversation ({messages.length} message{messages.length === 1 ? "" : "s"})
+          </h3>
+          <span className="text-[11px] text-ink-faint">
+            Latest reply: {formatDateTime(conv.lastMessageAt)}
+          </span>
         </div>
-      </div>
 
-      <TextField
-        label="Notes / Next steps"
-        value={note}
-        onChange={(e) => setNote(e.target.value)}
-        placeholder="e.g. Call booked for Thursday 2pm with GM"
-      />
+        {messages.length === 0 ? (
+          <div className="rounded-xl border border-line bg-surface p-4 text-center">
+            <p className="text-xs text-ink-subtle">No messages recorded in this conversation yet.</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {messages.map((m) => {
+              const isInbound = m.direction === "INBOUND";
+              return (
+                <div
+                  key={m.id}
+                  className={cn(
+                    "rounded-xl border p-4 text-xs transition-colors shadow-sm",
+                    isInbound
+                      ? "border-brand/40 bg-white"
+                      : "border-line bg-surface-muted/30"
+                  )}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line/50 pb-2">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={cn(
+                          "rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider",
+                          isInbound
+                            ? "bg-brand/10 text-brand"
+                            : "bg-surface-muted text-ink-muted border border-line/60"
+                        )}
+                      >
+                        {isInbound ? "Inbound Reply" : "Outbound Sent"}
+                      </span>
+                      <span className="font-semibold text-ink">
+                        {m.senderName ? `${m.senderName} (${m.senderEmail})` : m.senderEmail}
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-ink-subtle">
+                      {formatDateTime(m.sentAt)}
+                    </span>
+                  </div>
 
-      <div className="flex justify-end">
-        <Button
-          size="sm"
-          variant="primary"
-          loading={save.isPending}
-          onClick={() => save.mutate()}
-        >
-          Save Outcome
-        </Button>
+                  <div className="mt-2 text-ink-subtle font-medium">
+                    Subject: <span className="text-ink font-normal">{m.subject}</span>
+                  </div>
+
+                  <div className="mt-2 text-ink leading-relaxed whitespace-pre-wrap font-sans">
+                    {m.cleanBody || m.bodyText || m.snippet || "(No content)"}
+                  </div>
+
+                  {m.quotedText && (
+                    <div className="mt-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedQuotedMsgId(expandedQuotedMsgId === m.id ? null : m.id)
+                        }
+                        className="inline-flex items-center gap-1.5 text-[11px] font-medium text-ink-subtle hover:text-ink transition-colors"
+                      >
+                        <span className="rounded bg-surface-muted px-1.5 py-0.5 border border-line text-2xs font-mono">···</span>
+                        <span>{expandedQuotedMsgId === m.id ? "Hide quoted history" : "Show quoted history"}</span>
+                      </button>
+                      {expandedQuotedMsgId === m.id && (
+                        <div className="mt-2 rounded-lg border border-line/60 bg-surface-muted/50 p-3 text-xs text-ink-muted leading-relaxed whitespace-pre-wrap font-sans">
+                          {m.quotedText}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {m.bodyHtml && (
+                    <div className="mt-2.5 pt-2 border-t border-line/40">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedHtmlMsgId(expandedHtmlMsgId === m.id ? null : m.id)
+                        }
+                        className="text-[11px] font-medium text-brand hover:underline"
+                      >
+                        {expandedHtmlMsgId === m.id ? "Hide HTML preview" : "View formatted HTML"}
+                      </button>
+                      {expandedHtmlMsgId === m.id && (
+                        <div
+                          className="mt-2 rounded border border-line bg-white p-3 max-h-60 overflow-y-auto"
+                          dangerouslySetInnerHTML={{ __html: m.bodyHtml }}
+                        />
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -428,9 +614,14 @@ function SendDrawer({ campaignId, sendId, fromLine, onClose }: { campaignId: str
               <div><dt className="text-xs text-ink-subtle">Attempts</dt><dd className="mt-0.5 tabular">{s.attempts}</dd></div>
             </dl>
 
-            {/* Outcome and Reply Management */}
-            {can("campaigns.manage") && (Boolean(s.repliedAt) || s.events.some((e) => e.type === "REPLY")) && (
-              <OutcomeReviewForm campaignId={campaignId} sendId={sendId} send={s} />
+            {/* Reply Workspace & Conversation Operations */}
+            {(Boolean(s.repliedAt) || s.events.some((e) => e.type === "REPLY") || Boolean(s.conversation)) && (
+              <ConversationReplyWorkspace
+                campaignId={campaignId}
+                recipientEmail={s.email}
+                send={s}
+                fromLine={fromLine}
+              />
             )}
 
             {s.events.length > 0 && (
@@ -492,15 +683,68 @@ function SendDrawer({ campaignId, sendId, fromLine, onClose }: { campaignId: str
   );
 }
 
-export function RecipientsPanel({ campaignId, counts, live, fromLine, initialFilter }: { campaignId: string; counts: CampaignCounts; live: boolean; fromLine: string; initialFilter?: string }) {
+export function RecipientsPanel({
+  campaignId,
+  counts,
+  live,
+  fromLine,
+  initialFilter,
+  initialConversationStatus,
+  targetRecipient,
+}: {
+  campaignId: string;
+  counts: CampaignCounts;
+  live: boolean;
+  fromLine: string;
+  initialFilter?: string;
+  initialConversationStatus?: string;
+  targetRecipient?: string;
+}) {
   const { can } = useAuth();
   const toast = useToast();
   const invalidate = useInvalidate();
   const [filter, setFilter] = useState<FilterKey>((initialFilter as FilterKey) || "all");
+  const [conversationFilter, setConversationFilter] = useState<ConversationFilterKey>(
+    (initialConversationStatus as ConversationFilterKey) || "all"
+  );
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [openId, setOpenId] = useState<string | null>(null);
-  const sends = useSends(campaignId, { page, filter, search: useDebounced(search) }, live);
+
+  const debouncedSearch = useDebounced(search);
+  const sends = useSends(
+    campaignId,
+    {
+      page,
+      filter,
+      conversationStatus: conversationFilter === "all" ? undefined : conversationFilter,
+      search: debouncedSearch,
+    },
+    live
+  );
+
+  const convCountsQuery = useCampaignConversationCounts(campaignId);
+
+  // Auto-open target recipient if supplied via URL
+  useEffect(() => {
+    if (targetRecipient) {
+      const match = sends.data?.data.find(
+        (s) => s.email.toLowerCase() === targetRecipient.toLowerCase()
+      );
+      if (match) {
+        setOpenId(match.id);
+      } else {
+        api
+          .get<SendDto[]>(
+            `/api/campaigns/${campaignId}/sends?search=${encodeURIComponent(targetRecipient)}&pageSize=1`
+          )
+          .then((res) => {
+            if (res.data?.[0]) setOpenId(res.data[0].id);
+          })
+          .catch(() => {});
+      }
+    }
+  }, [targetRecipient, campaignId, sends.data]);
 
   // Bulk actions
   const approveAll = useMutation({
@@ -531,37 +775,65 @@ export function RecipientsPanel({ campaignId, counts, live, fromLine, initialFil
   });
   const awaitingCount = awaitingQuery.data?.pagination?.total ?? 0;
 
-  const options: { key: FilterKey; label: string; count?: number }[] = [
+  const deliveryOptions: { key: FilterKey; label: string; count?: number }[] = [
     { key: "all", label: "All", count: counts.total },
-    { key: "awaiting_approval", label: "Awaiting Approval", count: awaitingCount },
     { key: "scheduled", label: "Scheduled" },
     { key: "pending", label: "Queued", count: counts.pending },
     { key: "sent", label: "Sent", count: counts.sent },
     { key: "failed", label: "Failed", count: counts.failed },
     { key: "unknown", label: "Needs review", count: counts.unknown },
-    { key: "skipped", label: "Skipped", count: counts.skipped },
     { key: "cancelled", label: "Cancelled", count: counts.cancelled },
     { key: "replied", label: "Replied", count: counts.replied },
     { key: "bounced", label: "Bounced", count: counts.bounced },
+    { key: "awaiting_approval", label: "Awaiting Approval", count: awaitingCount },
+    { key: "skipped", label: "Skipped", count: counts.skipped },
     { key: "unsubscribed", label: "Unsubscribed", count: counts.unsubscribed },
+  ];
+
+  const convCounts = convCountsQuery.data?.counts;
+  const conversationOptions: { key: ConversationFilterKey; label: string; count?: number }[] = [
+    { key: "all", label: "All Conversations", count: convCountsQuery.data?.total },
+    { key: "NEEDS_REPLY", label: "Needs Reply", count: convCounts?.NEEDS_REPLY ?? 0 },
+    { key: "MEETING_SCHEDULED", label: "Meeting Scheduled", count: convCounts?.MEETING_SCHEDULED ?? 0 },
+    { key: "INTERESTED", label: "Interested", count: convCounts?.INTERESTED ?? 0 },
+    { key: "WAITING_FOR_CONTACT", label: "Waiting for Contact", count: convCounts?.WAITING_FOR_CONTACT ?? 0 },
+    { key: "MEETING_COORDINATION", label: "Meeting Coordination", count: convCounts?.MEETING_COORDINATION ?? 0 },
+    { key: "NOT_INTERESTED", label: "Not Interested", count: convCounts?.NOT_INTERESTED ?? 0 },
+    { key: "CLOSED", label: "Closed", count: convCounts?.CLOSED ?? 0 },
   ];
 
   const columns: Column<SendDto>[] = [
     {
       key: "email",
       header: "Recipient",
-      cell: (s) => (
-        <div className="flex flex-col gap-1 min-w-0">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="font-medium truncate max-w-[200px] sm:max-w-none">{s.email}</span>
-            {s.isCustom && <Badge tone="neutral">Customized</Badge>}
+      cell: (s) => {
+        const name = [s.contact?.firstName, s.contact?.lastName].filter(Boolean).join(" ");
+        return (
+          <div className="flex flex-col gap-0.5 min-w-0">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {name ? (
+                <span className="font-semibold text-ink text-xs truncate max-w-[200px] sm:max-w-none">
+                  {name}
+                </span>
+              ) : (
+                <span className="font-medium text-ink text-xs truncate max-w-[200px] sm:max-w-none">
+                  {s.email}
+                </span>
+              )}
+              {s.isCustom && <Badge tone="neutral">Customized</Badge>}
+            </div>
+            <div className="flex items-center gap-1.5 text-2xs text-ink-subtle truncate">
+              {name && <span className="truncate">{s.email}</span>}
+              {name && s.contact?.company && <span>·</span>}
+              {s.contact?.company && <span className="truncate font-medium text-ink-muted">{s.contact.company}</span>}
+            </div>
+            <div className="flex items-center gap-2 sm:hidden text-2xs text-ink-subtle mt-0.5">
+              <span>{s.stepIndex === 0 ? "Initial" : `Step ${s.stepIndex ?? 1}`}</span>
+              {s.sentAt && <span>· {formatDateTime(s.sentAt)}</span>}
+            </div>
           </div>
-          <div className="flex items-center gap-2 sm:hidden text-2xs text-ink-subtle">
-            <span>{s.stepIndex === 0 ? "Initial" : `Step ${s.stepIndex ?? 1}`}</span>
-            {s.sentAt && <span>· {formatDateTime(s.sentAt)}</span>}
-          </div>
-        </div>
-      ),
+        );
+      },
     },
     {
       key: "step",
@@ -574,7 +846,10 @@ export function RecipientsPanel({ campaignId, counts, live, fromLine, initialFil
             {s.stepIndex === 0 ? "Initial" : `Step ${s.stepIndex ?? 1}`}
           </Badge>
           {s.inReplyToId && (
-            <span className="text-[10px] text-ink-subtle font-medium bg-surface-muted px-1 py-0.5 rounded" title="Threaded in original conversation">
+            <span
+              className="text-[10px] text-ink-subtle font-medium bg-surface-muted px-1 py-0.5 rounded"
+              title="Threaded in original conversation"
+            >
               Re:
             </span>
           )}
@@ -595,24 +870,42 @@ export function RecipientsPanel({ campaignId, counts, live, fromLine, initialFil
       },
     },
     {
+      key: "conversation",
+      header: "Conversation",
+      headerClassName: "hidden sm:table-cell",
+      className: "hidden sm:table-cell",
+      cell: (s) => {
+        const conv = s.conversation;
+        if (!conv) {
+          return <span className="text-xs text-ink-subtle select-none">—</span>;
+        }
+        const tone = CONVERSATION_STATUS_TONES[conv.status] ?? "neutral";
+        const label = CONVERSATION_STATUS_LABELS[conv.status] ?? conv.status;
+        return (
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <Badge tone={tone}>{label}</Badge>
+          </div>
+        );
+      },
+    },
+    {
       key: "detail",
       header: "Details",
       headerClassName: "hidden md:table-cell",
       className: "hidden md:table-cell",
-      cell: (s) => (
-        <span className="line-clamp-1 max-w-xs text-xs text-ink-subtle">
-          {s.status === "PENDING" && s.scheduledFor
+      cell: (s) => {
+        const conv = s.conversation;
+        const text =
+          conv?.outcome ??
+          (s.status === "PENDING" && s.scheduledFor
             ? `Due: ${formatDateTime(s.scheduledFor)}`
-            : s.skipReason ?? s.lastError ?? ""}
-        </span>
-      ),
-    },
-    {
-      key: "engagement",
-      header: "Response",
-      headerClassName: "hidden sm:table-cell",
-      className: "hidden sm:table-cell",
-      cell: (s) => <Engagement s={s} />
+            : s.skipReason ?? s.lastError ?? "");
+        return (
+          <span className="line-clamp-1 max-w-xs text-xs text-ink-subtle" title={text}>
+            {text || "—"}
+          </span>
+        );
+      },
     },
     {
       key: "sentAt",
@@ -655,39 +948,84 @@ export function RecipientsPanel({ campaignId, counts, live, fromLine, initialFil
         </div>
       )}
 
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line p-4">
-        <FilterChips
-          label="Filter recipients"
-          value={filter}
-          onChange={(k) => {
-            setFilter(k);
-            setPage(1);
-          }}
-          options={options.filter((o) => o.key === "all" || (o.count !== undefined ? o.count > 0 : true))}
-        />
-        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-          {can("campaigns.control") && (
-            <Button
-              size="sm"
-              variant="ghost"
-              loading={stopAll.isPending}
-              onClick={() => {
-                if (window.confirm("Stop all scheduled follow-up emails for this campaign?")) {
-                  stopAll.mutate();
-                }
+      <div className="border-b border-line p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="text-xs font-semibold text-ink uppercase tracking-wider">
+            Recipients & Activity
+          </div>
+          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+            {can("campaigns.control") && (
+              <Button
+                size="sm"
+                variant="ghost"
+                loading={stopAll.isPending}
+                onClick={() => {
+                  if (window.confirm("Stop all scheduled follow-up emails for this campaign?")) {
+                    stopAll.mutate();
+                  }
+                }}
+                icon={<Square className="h-3.5 w-3.5 text-danger" />}
+                className="w-full sm:w-auto"
+              >
+                Stop All Follow-ups
+              </Button>
+            )}
+            <SearchInput
+              value={search}
+              onChange={(v) => {
+                setSearch(v);
+                setPage(1);
               }}
-              icon={<Square className="h-3.5 w-3.5 text-danger" />}
-              className="w-full sm:w-auto"
+              placeholder="Search email, name, company..."
+              className="w-full sm:w-64"
+            />
+            <a
+              href={`/api/campaigns/${campaignId}/export`}
+              className={cn(buttonClasses("secondary", "md"), "w-full sm:w-auto justify-center")}
+              download
             >
-              Stop All Follow-ups
-            </Button>
-          )}
-          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Find an email" className="w-full sm:w-56" />
-          <a href={`/api/campaigns/${campaignId}/export`} className={cn(buttonClasses("secondary", "md"), "w-full sm:w-auto justify-center")} download>
-            <Download className="h-4 w-4" /> Export
-          </a>
+              <Download className="h-4 w-4" /> Export
+            </a>
+          </div>
+        </div>
+
+        {/* Delivery Status Filters */}
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <span className="text-2xs font-semibold uppercase tracking-wider text-ink-subtle w-24 shrink-0">
+            Delivery:
+          </span>
+          <div className="flex-1 min-w-0">
+            <FilterChips
+              label="Filter delivery status"
+              value={filter}
+              onChange={(k) => {
+                setFilter(k);
+                setPage(1);
+              }}
+              options={deliveryOptions.filter((o) => o.key === "all" || (o.count !== undefined ? o.count > 0 : true))}
+            />
+          </div>
+        </div>
+
+        {/* Conversation Status Filters */}
+        <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-line/60">
+          <span className="text-2xs font-semibold uppercase tracking-wider text-ink-subtle w-24 shrink-0">
+            Conversation:
+          </span>
+          <div className="flex-1 min-w-0">
+            <FilterChips
+              label="Filter conversation status"
+              value={conversationFilter}
+              onChange={(k) => {
+                setConversationFilter(k);
+                setPage(1);
+              }}
+              options={conversationOptions}
+            />
+          </div>
         </div>
       </div>
+
       {sends.isError ? (
         <ErrorState error={sends.error} onRetry={() => sends.refetch()} />
       ) : (

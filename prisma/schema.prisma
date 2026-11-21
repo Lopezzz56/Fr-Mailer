@@ -57,6 +57,21 @@ enum RecipientSequenceState {
   CANCELLED
 }
 
+enum ConversationStatus {
+  NEEDS_REPLY
+  WAITING_FOR_CONTACT
+  MEETING_COORDINATION
+  MEETING_SCHEDULED
+  INTERESTED
+  NOT_INTERESTED
+  CLOSED
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
 // Delivery state of one message. Engagement (bounce/reply/unsubscribe) is tracked separately.
 enum DeliveryStatus {
   PENDING // frozen at approval, waiting for the worker
@@ -156,6 +171,7 @@ model Contact {
   sends             Send[]
   campaignOverrides CampaignRecipientOverride[]
   recipientStates   CampaignRecipientState[]
+  conversations     Conversation[]
 
   @@index([company])
   @@index([hotelSegment])
@@ -298,6 +314,7 @@ model Campaign {
   recipientStates    CampaignRecipientState[]
   sends              Send[]
   collaborators      CampaignCollaborator[]
+  conversations      Conversation[]
 
   @@index([status])
   @@index([contactListId])
@@ -364,6 +381,8 @@ model Send {
   updatedAt        DateTime       @updatedAt @db.Timestamptz
 
   events SendEvent[]
+  conversation Conversation?
+  conversationMessages ConversationMessage[]
 
   @@unique([campaignId, email, stepIndex])
   @@index([campaignId, status])
@@ -577,6 +596,7 @@ model User {
   mailboxAccount         UserMailbox?
   mailboxAccess          MailboxAccess[]        @relation("UserMailboxAccess")
   sendsInitiated         Send[]                 @relation("SendSentBy")
+  conversationsOwned     Conversation[]         @relation("ConversationOwner")
 
   @@index([role, status])
   @@map("users")
@@ -692,3 +712,71 @@ model Setting {
 
   @@map("settings")
 }
+
+// ============================================================================
+// OUTREACH CONVERSATIONS & THREADING
+// ============================================================================
+
+model Conversation {
+  id              String             @id @default(cuid())
+  campaignId      String
+  campaign        Campaign           @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contactId       String?
+  contact         Contact?           @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  recipientEmail  String             @db.Citext
+  ownerId         String?
+  owner           User?              @relation("ConversationOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  initialSendId   String?            @unique
+  initialSend     Send?              @relation(fields: [initialSendId], references: [id], onDelete: SetNull)
+  status          ConversationStatus @default(NEEDS_REPLY)
+  subject         String
+  sentiment       String?
+  snippet         String?
+  nextAction      String?
+  nextActionDueAt DateTime?          @db.Timestamptz
+  meetingAt       DateTime?          @db.Timestamptz
+  meetingNotes    String?
+  outcome         String?
+  lastMessageAt   DateTime           @default(now()) @db.Timestamptz
+  createdAt       DateTime           @default(now()) @db.Timestamptz
+  updatedAt       DateTime           @updatedAt @db.Timestamptz
+
+  messages        ConversationMessage[]
+
+  @@unique([campaignId, recipientEmail])
+  @@index([campaignId, status])
+  @@index([ownerId, status])
+  @@index([recipientEmail])
+  @@index([status, lastMessageAt])
+  @@index([nextActionDueAt])
+  @@map("conversations")
+}
+
+model ConversationMessage {
+  id             String           @id @default(cuid())
+  conversationId String
+  conversation   Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  direction      MessageDirection
+  senderEmail    String
+  senderName     String?
+  recipientEmail String
+  recipientName  String?
+  subject        String
+  bodyText       String           @default("")
+  bodyHtml       String?
+  snippet        String?
+  messageId      String?          @unique
+  inReplyTo      String?
+  references     String?
+  sentAt         DateTime         @default(now()) @db.Timestamptz
+  sendId         String?
+  send           Send?            @relation(fields: [sendId], references: [id], onDelete: SetNull)
+  attachments    Json             @default("[]")
+  createdAt      DateTime         @default(now()) @db.Timestamptz
+
+  @@index([conversationId, sentAt])
+  @@index([inReplyTo])
+  @@index([sendId])
+  @@map("conversation_messages")
+}
+

@@ -59,7 +59,8 @@ const EnvSchema = z.object({
   IMAP_USER: optionalString,
   IMAP_PASS: optionalString,
   IMAP_POLL_ENABLED: envBoolean.default("false"),
-  IMAP_POLL_INTERVAL_SECONDS: z.coerce.number().int().min(30).default(120),
+  IMAP_POLL_INTERVAL_MS: z.coerce.number().int().positive().optional(),
+  IMAP_POLL_INTERVAL_SECONDS: z.coerce.number().int().min(10).default(60),
 
   // Serverless (Vercel): authorizes /api/internal/tick, the endpoint that runs sending bursts.
   // Vercel Cron sends it as "Authorization: Bearer <CRON_SECRET>". Generate with: openssl rand -hex 32

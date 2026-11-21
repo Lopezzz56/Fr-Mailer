@@ -14,6 +14,7 @@ import suppressionsRouter from "./routes/suppressions.js";
 import enrichmentRouter from "./routes/enrichment.js";
 import analyticsRouter from "./routes/analytics.js";
 import { notificationsRouter } from "./routes/notifications.js";
+import { conversationsRouter } from "./routes/conversations.js";
 import { activityRouter, mailboxRouter, overviewRouter } from "./routes/overview.js";
 import { publicRouter } from "./routes/public.js";
 import { internalRouter } from "./routes/internal.js";
@@ -56,6 +57,7 @@ export function createApp() {
   api.use("/mailbox", mailboxRouter);
   api.use("/activity", activityRouter);
   api.use("/notifications", notificationsRouter);
+  api.use("/conversations", conversationsRouter);
   api.use("/users", usersRouter);
   app.use("/api", api);
 

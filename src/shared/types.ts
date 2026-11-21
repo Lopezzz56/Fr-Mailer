@@ -804,6 +804,18 @@ export interface SendDto {
   approvedAt: string | null;
   inReplyToId: string | null;
   isCustom: boolean;
+  contact?: {
+    firstName: string | null;
+    lastName: string | null;
+    company: string | null;
+  } | null;
+  conversation?: {
+    id: string;
+    status: ConversationStatus;
+    snippet?: string | null;
+    outcome?: string | null;
+    meetingAt?: string | null;
+  } | null;
 }
 
 export interface CampaignAnalyticsSummaryDto {
@@ -1181,13 +1193,24 @@ export interface OutreachFunnelDto {
 
 export interface AttentionItemDto {
   id: string;
-  type: "OVERDUE_FOLLOW_UP" | "UNANSWERED_REPLY" | "PENDING_APPROVAL" | "MAILBOX_ISSUE" | "DELIVERY_EXCEPTION";
+  type: "OVERDUE_FOLLOW_UP" | "UNANSWERED_REPLY" | "PENDING_APPROVAL" | "MAILBOX_ISSUE" | "DELIVERY_EXCEPTION" | "MEETING_COORDINATION" | "OVERDUE_ACTION";
   title: string;
   subtitle: string;
   link: string;
   linkLabel: string;
   severity: "high" | "medium" | "low";
   createdAt?: string;
+}
+
+export interface ConversationStatusBreakdownDto {
+  needsReply: number;
+  waitingForContact: number;
+  meetingCoordination: number;
+  meetingScheduled: number;
+  interested: number;
+  notInterested: number;
+  closed: number;
+  totalConversations: number;
 }
 
 export interface ActiveCampaignOutreachDto extends CampaignSummaryDto {
@@ -1231,6 +1254,7 @@ export interface OverviewDto {
   outreachByType?: OutreachTypeMetricDto[];
   teamOutreach?: TeamOutreachMetricDto[];
   activityTrend?: DailyActivityTrendDto[];
+  conversationBreakdown?: ConversationStatusBreakdownDto;
   actionableAttention?: AttentionItemDto[];
   activeCampaigns?: ActiveCampaignOutreachDto[];
   availableFilters?: {
@@ -1309,4 +1333,84 @@ export interface NotificationItemDto {
   category: "reply" | "follow_up" | "approval" | "campaign" | "mailbox" | "assignment" | "outcome";
   entityId?: string;
 }
+
+export type ConversationStatus =
+  | "NEEDS_REPLY"
+  | "WAITING_FOR_CONTACT"
+  | "MEETING_COORDINATION"
+  | "MEETING_SCHEDULED"
+  | "INTERESTED"
+  | "NOT_INTERESTED"
+  | "CLOSED";
+
+export type MessageDirection = "INBOUND" | "OUTBOUND";
+
+export const CONVERSATION_STATUS_LABELS: Record<ConversationStatus, string> = {
+  NEEDS_REPLY: "Needs Reply",
+  WAITING_FOR_CONTACT: "Waiting for Contact",
+  MEETING_COORDINATION: "Meeting Coordination",
+  MEETING_SCHEDULED: "Meeting Scheduled",
+  INTERESTED: "Interested",
+  NOT_INTERESTED: "Not Interested",
+  CLOSED: "Closed",
+};
+
+export const CONVERSATION_STATUS_TONES: Record<ConversationStatus, "warning" | "info" | "brand" | "success" | "neutral" | "danger"> = {
+  NEEDS_REPLY: "warning",
+  WAITING_FOR_CONTACT: "info",
+  MEETING_COORDINATION: "brand",
+  MEETING_SCHEDULED: "success",
+  INTERESTED: "success",
+  NOT_INTERESTED: "danger",
+  CLOSED: "neutral",
+};
+
+export interface ConversationMessageDto {
+  id: string;
+  conversationId: string;
+  direction: MessageDirection;
+  senderEmail: string;
+  senderName: string | null;
+  recipientEmail: string;
+  recipientName: string | null;
+  subject: string;
+  bodyText: string;
+  cleanBody?: string;
+  quotedText?: string | null;
+  bodyHtml: string | null;
+  snippet: string | null;
+  messageId: string | null;
+  inReplyTo: string | null;
+  references: string | null;
+  sentAt: string;
+  sendId: string | null;
+  attachments: unknown[];
+  createdAt: string;
+}
+
+export interface ConversationDto {
+  id: string;
+  campaignId: string;
+  campaignName?: string;
+  contactId: string | null;
+  contactName?: string | null;
+  recipientEmail: string;
+  ownerId: string | null;
+  ownerName?: string | null;
+  initialSendId: string | null;
+  status: ConversationStatus;
+  subject: string;
+  sentiment: string | null;
+  snippet: string | null;
+  nextAction: string | null;
+  nextActionDueAt: string | null;
+  meetingAt: string | null;
+  meetingNotes: string | null;
+  outcome: string | null;
+  lastMessageAt: string;
+  createdAt: string;
+  updatedAt: string;
+  messages?: ConversationMessageDto[];
+}
+
 

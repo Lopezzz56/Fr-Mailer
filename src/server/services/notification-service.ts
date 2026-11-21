@@ -83,7 +83,7 @@ export async function getActionableNotifications(user: SessionUser): Promise<Not
           : `Lead expressed positive interest on ${reply.campaign.name}.`,
         time: (reply.repliedAt ?? now).toISOString(),
         tone: "success",
-        link: `/campaigns/${reply.campaign.id}?tab=recipients&filter=replied`,
+        link: `/campaigns/${reply.campaign.id}?tab=recipients&recipient=${encodeURIComponent(reply.email)}`,
         linkLabel: "Open conversation",
         entityId: reply.id,
       });
@@ -98,11 +98,49 @@ export async function getActionableNotifications(user: SessionUser): Promise<Not
           : `New reply received on ${reply.campaign.name}.`,
         time: (reply.repliedAt ?? now).toISOString(),
         tone: "action",
-        link: `/campaigns/${reply.campaign.id}?tab=recipients&filter=replied`,
+        link: `/campaigns/${reply.campaign.id}?tab=recipients&recipient=${encodeURIComponent(reply.email)}`,
         linkLabel: "View reply",
         entityId: reply.id,
       });
     }
+  }
+
+  // 1b. Conversations in Meeting Coordination
+  const coordConvs = await prisma.conversation.findMany({
+    where: {
+      ...(isEmployee
+        ? {
+            OR: [
+              { ownerId: user.id },
+              { campaign: { createdById: user.id } },
+              { campaign: { collaborators: { some: { userId: user.id } } } },
+            ],
+          }
+        : {}),
+      status: "MEETING_COORDINATION",
+    },
+    include: {
+      campaign: { select: { id: true, name: true } },
+      contact: { select: { firstName: true, lastName: true } },
+    },
+    orderBy: { lastMessageAt: "desc" },
+    take: 5,
+  });
+
+  for (const conv of coordConvs) {
+    const contactName = [conv.contact?.firstName, conv.contact?.lastName].filter(Boolean).join(" ") || conv.recipientEmail;
+    items.push({
+      id: `coord-${conv.id}`,
+      type: "IMPORTANT_OUTCOME",
+      category: "outcome",
+      title: `Meeting coordination: ${contactName}`,
+      description: conv.meetingNotes || `Schedule meeting with prospect on ${conv.campaign.name}`,
+      time: conv.lastMessageAt.toISOString(),
+      tone: "action",
+      link: `/campaigns/${conv.campaignId}?tab=recipients&recipient=${encodeURIComponent(conv.recipientEmail)}`,
+      linkLabel: "Coordinate meeting",
+      entityId: conv.id,
+    });
   }
 
   // -------------------------------------------------------------------------

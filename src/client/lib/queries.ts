@@ -9,6 +9,7 @@ import type {
   CampaignSummaryDto,
   ContactDto,
   ContactListDto,
+  ConversationStatus,
   EnrichmentDto,
   MailboxStatusDto,
   OverviewDto,
@@ -154,12 +155,38 @@ export const useCampaignAnalytics = (id: string) =>
 export const useReview = (id: string, enabled: boolean) =>
   useQuery({ queryKey: keys.review(id), queryFn: () => api.get<CampaignReviewDto>(`/api/campaigns/${id}/review`), enabled });
 
-export const useSends = (id: string, p: { page: number; filter: string; search: string }, live: boolean) =>
+export const useSends = (
+  id: string,
+  p: { page: number; filter: string; conversationStatus?: string; search: string },
+  live: boolean
+) =>
   useQuery({
     queryKey: keys.sends(id, p),
-    queryFn: () => api.get<SendDto[]>(`/api/campaigns/${id}/sends${qs({ page: p.page, pageSize: 25, filter: p.filter === "all" ? undefined : p.filter, search: p.search })}`),
+    queryFn: () =>
+      api.get<SendDto[]>(
+        `/api/campaigns/${id}/sends${qs({
+          page: p.page,
+          pageSize: 25,
+          filter: p.filter === "all" ? undefined : p.filter,
+          conversationStatus: p.conversationStatus === "all" ? undefined : p.conversationStatus,
+          search: p.search,
+        })}`
+      ),
     placeholderData: keepPreviousData,
     refetchInterval: live ? 4000 : false,
+  });
+
+export const useCampaignConversationCounts = (id: string) =>
+  useQuery({
+    queryKey: ["campaigns", id, "conversation-counts"],
+    queryFn: () =>
+      api
+        .get<{
+          total: number;
+          counts: Record<ConversationStatus, number>;
+        }>(`/api/campaigns/${id}/conversation-counts`)
+        .then((r) => r.data),
+    staleTime: 5000,
   });
 
 export const useSuppressions = (p: { page: number; search: string; reason?: string }) =>

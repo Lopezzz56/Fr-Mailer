@@ -23,6 +23,7 @@ import { useAuth } from "../lib/auth";
 import { useMailbox, useOverview, useWorkspaceQueue } from "../lib/queries";
 import { useTitle } from "../lib/hooks";
 import { num, plural, timeAgo } from "../lib/format";
+import { cn } from "../lib/cn";
 import { PageHeader } from "../components/ui/Navigation";
 import { Panel } from "../components/ui/Card";
 import { ButtonLink } from "../components/ui/Button";
@@ -40,6 +41,7 @@ import {
   type OutreachFunnelDto,
   type AttentionItemDto,
   type MailboxStatusDto,
+  type ConversationStatusBreakdownDto,
 } from "@shared/types";
 
 // ============================================================================
@@ -328,6 +330,59 @@ function OutreachFunnelCard({ funnel }: { funnel: OutreachFunnelDto }) {
   );
 }
 
+function ConversationBreakdownCard({ breakdown }: { breakdown: ConversationStatusBreakdownDto }) {
+  const items = [
+    { label: "Needs Reply", count: breakdown.needsReply, tone: "amber", desc: "Awaiting our reply" },
+    { label: "Waiting for Contact", count: breakdown.waitingForContact, tone: "sky", desc: "Outbound sent" },
+    { label: "Meeting Coordination", count: breakdown.meetingCoordination, tone: "indigo", desc: "Scheduling call" },
+    { label: "Meeting Scheduled", count: breakdown.meetingScheduled, tone: "emerald", desc: "Time confirmed" },
+    { label: "Interested", count: breakdown.interested, tone: "teal", desc: "Qualified lead" },
+    { label: "Not Interested", count: breakdown.notInterested, tone: "rose", desc: "Declined" },
+    { label: "Closed", count: breakdown.closed, tone: "slate", desc: "Finished" },
+  ];
+
+  return (
+    <section aria-label="Conversation Lifecycle Breakdown">
+      <div className="mb-3 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-ink">Post-Reply Conversation Operations</h2>
+          <span className="rounded-full bg-brand/10 px-2 py-0.5 text-xs font-semibold text-brand">
+            {breakdown.totalConversations} total
+          </span>
+        </div>
+        <span className="text-xs text-ink-subtle">
+          Operational visibility into what happens after prospects reply
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
+        {items.map((item) => (
+          <div
+            key={item.label}
+            className={cn(
+              "rounded-xl border p-3.5 shadow-sm transition-all",
+              item.count > 0
+                ? "border-brand/40 bg-white ring-1 ring-brand/10 shadow-sm"
+                : "border-line/60 bg-surface opacity-80"
+            )}
+          >
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-xs font-medium text-ink-subtle block truncate">{item.label}</span>
+              {item.count > 0 && (
+                <span className="h-2 w-2 rounded-full bg-brand shrink-0" />
+              )}
+            </div>
+            <p className={cn("mt-1.5 text-2xl font-bold tracking-tight", item.count > 0 ? "text-brand" : "text-ink")}>
+              {num(item.count)}
+            </p>
+            <p className="mt-0.5 text-[11px] text-ink-faint truncate">{item.desc}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function OutreachByTypeCard({ metrics }: { metrics: OutreachTypeMetricDto[] }) {
   return (
     <div className="rounded-xl border border-line bg-surface p-4 shadow-sm">
@@ -507,6 +562,18 @@ function FounderOverview() {
     overallConversionRate: totalReached > 0 ? Number(((data.last30Days.meetingsBooked / totalReached) * 100).toFixed(1)) : 0,
   };
 
+  // Conversion Breakdown
+  const conversationBreakdown: ConversationStatusBreakdownDto = data.conversationBreakdown ?? {
+    needsReply: 0,
+    waitingForContact: 0,
+    meetingCoordination: 0,
+    meetingScheduled: 0,
+    interested: 0,
+    notInterested: 0,
+    closed: 0,
+    totalConversations: 0,
+  };
+
   // Outreach by Type
   const outreachByType = data.outreachByType ?? [];
 
@@ -652,6 +719,9 @@ function FounderOverview() {
 
         {/* 2. Conversion Funnel: Reached → Replies → Positive Outcomes → Meetings/Opportunities */}
         <OutreachFunnelCard funnel={funnel} />
+
+        {/* 2b. Post-Reply Conversation Operations Breakdown */}
+        {/* <ConversationBreakdownCard breakdown={conversationBreakdown} /> */}
 
         {/* 3. Simple 30-Day Activity Trend */}
         {activityTrend.length > 0 && <OutreachTrendChart trend={activityTrend} />}

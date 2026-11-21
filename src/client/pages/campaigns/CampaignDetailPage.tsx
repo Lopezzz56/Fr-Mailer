@@ -471,7 +471,17 @@ export function CampaignDetailPage() {
           <CampaignAnalyticsPanel campaignId={id} />
         )}
 
-        {tab === "recipients" && !preApproval && <RecipientsPanel campaignId={id} counts={c.counts} live={c.status === "SENDING"} fromLine={fromLine} initialFilter={params.get("filter") ?? undefined} />}
+        {tab === "recipients" && !preApproval && (
+          <RecipientsPanel
+            campaignId={id}
+            counts={c.counts}
+            live={c.status === "SENDING"}
+            fromLine={fromLine}
+            initialFilter={params.get("filter") ?? undefined}
+            initialConversationStatus={params.get("conversationStatus") ?? undefined}
+            targetRecipient={params.get("recipient") ?? undefined}
+          />
+        )}
 
         {tab === "content" && c.snapshot && (
           <Panel title="Approved content" description="The template as it was approved, with merge fields shown as placeholders. Open a recipient to see their personalized copy.">

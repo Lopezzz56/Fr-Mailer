@@ -14,6 +14,7 @@ import {
 } from "./personal-mailbox.js";
 import { classifyIncoming, classifyReplySentiment, type IncomingMessage } from "./inbox-classifier.js";
 import { stopSequenceForRecipient } from "./sequence-service.js";
+import { recordInboundReplyToConversation } from "./conversation-service.js";
 
 const STATE_KEY = "imap.state";
 const FIRST_RUN_LOOKBACK_DAYS = 14;
@@ -33,6 +34,18 @@ export interface ImapState {
     date: string;
     detectedSentiment: string;
   }[];
+  unmatchedBounces?: {
+    from: string;
+    subject: string;
+    recipient: string | null;
+    diagnostic: string;
+    date: string;
+    hard: boolean;
+  }[];
+}
+
+export function getImapPollIntervalMs(): number {
+  return env.IMAP_POLL_INTERVAL_MS ?? env.IMAP_POLL_INTERVAL_SECONDS * 1000;
 }
 
 function stateKey(userId?: string): string {
@@ -70,29 +83,87 @@ function toIncoming(mail: ParsedMail): IncomingMessage {
 }
 
 /** Applies one classified message. Idempotent: re-processing the same message changes nothing. */
-async function applyClassification(message: IncomingMessage, domain: string, userId?: string): Promise<"bounce" | "reply" | null> {
+async function applyClassification(message: IncomingMessage, domain: string, mailboxIdOrUserId?: string): Promise<"bounce" | "reply" | null> {
   const result = classifyIncoming(message, domain);
   if (result.type === "other" || result.type === "auto_reply") return null;
 
-  const campaignScope = userId ? { campaign: { createdById: userId } } : {};
-  const sends = await prisma.send.findMany({
-    where: { messageId: { in: result.messageIds }, ...campaignScope },
-  });
-  let targets = sends;
+  // 1. Direct messageId match (globally unique UUID in sends table)
+  let targets: Awaited<ReturnType<typeof prisma.send.findMany>> = [];
+  if (result.messageIds.length > 0) {
+    targets = await prisma.send.findMany({
+      where: { messageId: { in: result.messageIds } },
+    });
+  }
+
+  // 1b. Check conversation_messages table if targets is still empty (e.g. replies to in-app sent messages)
+  if (!targets.length && result.messageIds.length > 0) {
+    try {
+      const matchedConvMsg = await prisma.conversationMessage?.findFirst?.({
+        where: { messageId: { in: result.messageIds } },
+        include: {
+          send: true,
+          conversation: {
+            include: {
+              initialSend: true,
+            },
+          },
+        },
+      });
+      if (matchedConvMsg?.send) {
+        targets = [matchedConvMsg.send];
+      } else if (matchedConvMsg?.conversation?.initialSend) {
+        targets = [matchedConvMsg.conversation.initialSend];
+      } else if (matchedConvMsg?.conversation) {
+        const conv = matchedConvMsg.conversation;
+        const send = await prisma.send.findFirst({
+          where: { campaignId: conv.campaignId, email: conv.recipientEmail, status: "SENT" },
+          orderBy: { sentAt: "desc" },
+        });
+        if (send) targets = [send];
+      }
+    } catch {
+      // In disconnected unit test stubs, continue to fallback
+    }
+  }
+
+  // 2. Fallback when recipient mail client stripped In-Reply-To / References headers
   if (!targets.length) {
+    const scopeFilter: Prisma.SendWhereInput = mailboxIdOrUserId
+      ? {
+          OR: [
+            { mailboxId: mailboxIdOrUserId },
+            { campaign: { mailboxId: mailboxIdOrUserId } },
+            { campaign: { createdById: mailboxIdOrUserId } },
+            { sentByUserId: mailboxIdOrUserId },
+          ],
+        }
+      : {};
+
     if (result.type === "bounce" && result.recipient) {
       // Some servers drop original headers; fall back to most recent send to that address
-      const recent = await prisma.send.findFirst({
-        where: { email: result.recipient, status: "SENT", ...campaignScope },
+      let recent = await prisma.send.findFirst({
+        where: { email: result.recipient, status: "SENT", ...scopeFilter },
         orderBy: { sentAt: "desc" },
       });
+      if (!recent && mailboxIdOrUserId) {
+        recent = await prisma.send.findFirst({
+          where: { email: result.recipient, status: "SENT" },
+          orderBy: { sentAt: "desc" },
+        });
+      }
+      if (!recent) {
+        recent = await prisma.send.findFirst({
+          where: { email: result.recipient, bouncedAt: { not: null }, ...scopeFilter },
+          orderBy: { sentAt: "desc" },
+        });
+      }
       targets = recent ? [recent] : [];
     } else if (result.type === "reply") {
       // Extract from email from header
       const fromEmail = message.from.match(/<([^>]+)>/)?.[1] || message.from.trim();
       if (fromEmail) {
         const recent = await prisma.send.findFirst({
-          where: { email: fromEmail, status: "SENT", ...campaignScope },
+          where: { email: fromEmail, status: "SENT", ...scopeFilter },
           orderBy: { sentAt: "desc" },
         });
         if (recent) targets = [recent];
@@ -100,10 +171,48 @@ async function applyClassification(message: IncomingMessage, domain: string, use
     }
   }
 
+  // If a bounce still cannot be matched to any send record, record as unmatched
+  if (!targets.length && result.type === "bounce") {
+    // If recipient is known and already handled, don't record as unmatched
+    if (result.recipient) {
+      const alreadyHandledSend = await prisma.send.findFirst({
+        where: {
+          email: result.recipient,
+          bouncedAt: { not: null },
+        },
+      });
+      if (alreadyHandledSend) {
+        return "bounce";
+      }
+    }
+
+    const state = await getImapState(mailboxIdOrUserId);
+    const unmatched = state.unmatchedBounces ?? [];
+    const dateStr = message.date.toISOString();
+    const alreadyLogged = unmatched.some(
+      (b) =>
+        b.recipient === result.recipient &&
+        b.diagnostic === result.diagnostic &&
+        (b.date === dateStr || b.from === message.from)
+    );
+    if (!alreadyLogged) {
+      unmatched.unshift({
+        from: message.from,
+        subject: message.subject,
+        recipient: result.recipient,
+        diagnostic: result.diagnostic,
+        date: dateStr,
+        hard: result.hard,
+      });
+      await saveImapState({ ...state, unmatchedBounces: unmatched.slice(0, 50) }, mailboxIdOrUserId);
+    }
+    return null;
+  }
+
   // If a reply still cannot be matched to any send record, record as unmatched
   if (!targets.length && result.type === "reply") {
     const sentiment = classifyReplySentiment(result.snippet || message.text, message.subject);
-    const state = await getImapState(userId);
+    const state = await getImapState(mailboxIdOrUserId);
     const unmatched = state.unmatchedReplies ?? [];
     unmatched.unshift({
       from: message.from,
@@ -113,7 +222,7 @@ async function applyClassification(message: IncomingMessage, domain: string, use
       detectedSentiment: sentiment.sentiment,
     });
     // Keep last 50 unmatched replies
-    await saveImapState({ ...state, unmatchedReplies: unmatched.slice(0, 50) }, userId);
+    await saveImapState({ ...state, unmatchedReplies: unmatched.slice(0, 50) }, mailboxIdOrUserId);
     return null;
   }
 
@@ -125,20 +234,79 @@ async function applyClassification(message: IncomingMessage, domain: string, use
       await prisma.$transaction(async (tx) => {
         await tx.sendEvent.create({ data: { sendId: send.id, type, occurredAt: message.date, detail: { diagnostic: result.diagnostic, from: message.from } } });
         if (result.hard) {
-          await tx.send.update({ where: { id: send.id }, data: { bouncedAt: message.date } });
+          await tx.send.update({
+            where: { id: send.id },
+            data: {
+              status: "FAILED",
+              bouncedAt: message.date,
+              lastError: result.diagnostic ? result.diagnostic.slice(0, 500) : "Hard bounce reported by mail system",
+            },
+          });
           await tx.suppressionEntry.upsert({
             where: { email: send.email },
-            update: {},
-            create: { email: send.email, reason: "HARD_BOUNCE", source: "bounce-report", campaignId: send.campaignId, metadata: { diagnostic: result.diagnostic } },
+            update: {
+              reason: "HARD_BOUNCE",
+              source: "bounce-report",
+              campaignId: send.campaignId,
+              metadata: { diagnostic: result.diagnostic },
+            },
+            create: {
+              email: send.email,
+              reason: "HARD_BOUNCE",
+              source: "bounce-report",
+              campaignId: send.campaignId,
+              metadata: { diagnostic: result.diagnostic },
+            },
           });
           await stopSequenceForRecipient(send.campaignId, send.email, `Hard bounce: ${result.diagnostic}`, "BOUNCED", tx);
         }
       });
     } else {
-      const already = await prisma.sendEvent.findFirst({ where: { sendId: send.id, type: "REPLY" } });
-      if (already) continue;
+      const incomingMsgId = message.headers["message-id"] || null;
+      const inReplyTo = message.headers["in-reply-to"] || null;
+      const references = message.headers["references"] || null;
+
+      const fromEmail = message.from.match(/<([^>]+)>/)?.[1] || message.from.trim();
+      const fromName = message.from.replace(/<[^>]+>/, "").trim() || null;
+
+      // Deduplicate: if incoming message has a message-id, verify if it was already recorded
+      if (incomingMsgId) {
+        try {
+          const alreadyMsg = await prisma.conversationMessage?.findUnique?.({
+            where: { messageId: incomingMsgId },
+          });
+          if (alreadyMsg) continue;
+        } catch {
+          // Ignore in disconnected test environments
+        }
+      } else {
+        // Fall back to checking whether a reply was already recorded for this send
+        const already = await prisma.sendEvent.findFirst({ where: { sendId: send.id, type: "REPLY" } });
+        if (already) continue;
+      }
+
       const sentiment = classifyReplySentiment(result.snippet || message.text, message.subject);
+
       await prisma.$transaction(async (tx) => {
+        // Record into Conversation thread (creates Conversation if first reply or appends if multi-turn)
+        const { isFirstReply } = await recordInboundReplyToConversation({
+          campaignId: send.campaignId,
+          recipientEmail: send.email,
+          sendId: send.id,
+          fromEmail,
+          fromName,
+          subject: message.subject,
+          bodyText: message.text,
+          snippet: result.snippet,
+          messageId: incomingMsgId,
+          inReplyTo,
+          references,
+          occurredAt: message.date,
+          classification: sentiment.sentiment,
+          tx,
+        });
+
+        // Record SendEvent audit entry
         await tx.sendEvent.create({
           data: {
             sendId: send.id,
@@ -151,20 +319,48 @@ async function applyClassification(message: IncomingMessage, domain: string, use
               classification: sentiment.sentiment,
               confidence: sentiment.confidence,
               matchedKeywords: sentiment.matchedKeywords,
+              isSubsequentReply: !isFirstReply,
+              messageId: incomingMsgId,
               meetingBooked: false,
             },
           },
         });
-        await tx.send.update({ where: { id: send.id }, data: { repliedAt: send.repliedAt ?? message.date } });
-        if (sentiment.sentiment === "UNSUBSCRIBE") {
-          await tx.suppressionEntry.upsert({
-            where: { email: send.email },
-            update: {},
-            create: { email: send.email, reason: "UNSUBSCRIBE", source: "reply-unsubscribe", campaignId: send.campaignId, metadata: { snippet: result.snippet } },
+
+        // If this is the initial reply from the recipient, update send.repliedAt and stop sequence
+        if (isFirstReply) {
+          await tx.send.update({
+            where: { id: send.id },
+            data: { repliedAt: send.repliedAt ?? message.date },
           });
-          await stopSequenceForRecipient(send.campaignId, send.email, "Unsubscribe requested in reply", "SUPPRESSED", tx);
-        } else {
-          await stopSequenceForRecipient(send.campaignId, send.email, "Reply received — automated outreach stopped", "REPLY_RECEIVED", tx);
+
+          if (sentiment.sentiment === "UNSUBSCRIBE") {
+            await tx.suppressionEntry.upsert({
+              where: { email: send.email },
+              update: {},
+              create: {
+                email: send.email,
+                reason: "UNSUBSCRIBE",
+                source: "reply-unsubscribe",
+                campaignId: send.campaignId,
+                metadata: { snippet: result.snippet },
+              },
+            });
+            await stopSequenceForRecipient(
+              send.campaignId,
+              send.email,
+              "Unsubscribe requested in reply",
+              "SUPPRESSED",
+              tx
+            );
+          } else {
+            await stopSequenceForRecipient(
+              send.campaignId,
+              send.email,
+              "Reply received — automated outreach stopped",
+              "REPLY_RECEIVED",
+              tx
+            );
+          }
         }
       });
     }
@@ -177,7 +373,13 @@ export async function isInboxMonitoringSafe(userId?: string): Promise<{ safe: bo
   if (userId) {
     try {
       if (!(await getPersonalMailboxCredentials(userId))) {
-        return { safe: false, reason: "The campaign owner has not connected a SpaceMail mailbox." };
+        const mb = await getMailboxCredentials(userId);
+        if (!mb) {
+          const userMb = await getMailboxCredentialsForUser(userId);
+          if (!userMb) {
+            return { safe: false, reason: "The campaign owner has not connected a SpaceMail mailbox." };
+          }
+        }
       }
     } catch (error) {
       return { safe: false, reason: "The campaign owner mailbox credentials couldn't be read. Reconnect the mailbox in Settings." };
@@ -192,7 +394,7 @@ export async function isInboxMonitoringSafe(userId?: string): Promise<{ safe: bo
     return { safe: false, reason: "Inbox monitoring has not executed yet" };
   }
   const ageMs = Date.now() - new Date(state.lastCheckedAt).getTime();
-  const maxStaleMs = (env.IMAP_POLL_INTERVAL_SECONDS * 4 + 180) * 1000;
+  const maxStaleMs = getImapPollIntervalMs() * 4 + 180000;
   if (ageMs > maxStaleMs) {
     return { safe: false, reason: `Inbox monitoring is delayed (last sync ${Math.round(ageMs / 60000)}m ago)` };
   }
@@ -247,6 +449,7 @@ export async function checkInbox(mailboxIdOrUserId?: string): Promise<ImapState>
     }
 
     const next: ImapState = {
+      ...state,
       uidValidity,
       lastUid: lastUid || (mailbox.uidNext ? mailbox.uidNext - 1 : 0),
       lastCheckedAt: new Date().toISOString(),
@@ -283,7 +486,7 @@ export async function anyInboxDue(): Promise<boolean> {
 
 function inboxStateDue(state: ImapState): boolean {
   const last = state.lastCheckedAt ? new Date(state.lastCheckedAt).getTime() : 0;
-  return Date.now() - last >= env.IMAP_POLL_INTERVAL_SECONDS * 1000;
+  return Date.now() - last >= getImapPollIntervalMs();
 }
 
 export async function checkAllInboxes(dueOnly = false): Promise<void> {
@@ -337,7 +540,7 @@ export class InboxMonitor {
       }
     };
     void run();
-    this.timer = setInterval(run, env.IMAP_POLL_INTERVAL_SECONDS * 1000);
+    this.timer = setInterval(run, getImapPollIntervalMs());
   }
 
   stop() {

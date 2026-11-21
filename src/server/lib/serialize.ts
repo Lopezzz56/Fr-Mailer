@@ -424,6 +424,18 @@ export function toSendDto(s: {
   approvedAt?: Date | null;
   inReplyToId?: string | null;
   isCustom?: boolean;
+  contact?: {
+    firstName?: string | null;
+    lastName?: string | null;
+    company?: string | null;
+  } | null;
+  conversation?: {
+    id: string;
+    status: any;
+    snippet?: string | null;
+    outcome?: string | null;
+    meetingAt?: Date | null;
+  } | null;
 }): SendDto {
   return {
     id: s.id,
@@ -447,6 +459,22 @@ export function toSendDto(s: {
     approvedAt: iso(s.approvedAt),
     inReplyToId: s.inReplyToId ?? null,
     isCustom: Boolean(s.isCustom),
+    contact: s.contact
+      ? {
+          firstName: s.contact.firstName ?? null,
+          lastName: s.contact.lastName ?? null,
+          company: s.contact.company ?? null,
+        }
+      : null,
+    conversation: s.conversation
+      ? {
+          id: s.conversation.id,
+          status: s.conversation.status,
+          snippet: s.conversation.snippet ?? null,
+          outcome: s.conversation.outcome ?? null,
+          meetingAt: iso(s.conversation.meetingAt),
+        }
+      : null,
   };
 }
 

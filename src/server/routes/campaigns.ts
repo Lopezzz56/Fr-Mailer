@@ -40,6 +40,7 @@ import {
   CampaignRuleInputSchema,
   CampaignStatusSchema,
   CampaignTemplateInputSchema,
+  ConversationStatus,
   IdSchema,
   PaginationQuerySchema,
   SequenceStepInputSchema,
@@ -61,6 +62,7 @@ import {
   getRecipientSequenceDetails,
   aiDraftFollowUp,
 } from "../services/sequence-service.js";
+import { findOrCreateConversation, toConversationDto } from "../services/conversation-service.js";
 
 const router = Router();
 
@@ -1366,25 +1368,126 @@ const SEND_FILTERS: Record<string, Prisma.SendWhereInput> = {
 };
 
 router.get(
+  "/:id/conversation-counts",
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "VIEW");
+
+    const grouped = await prisma.conversation.groupBy({
+      by: ["status"],
+      where: { campaignId: id },
+      _count: { _all: true },
+    });
+
+    const counts: Record<ConversationStatus, number> = {
+      NEEDS_REPLY: 0,
+      WAITING_FOR_CONTACT: 0,
+      MEETING_COORDINATION: 0,
+      MEETING_SCHEDULED: 0,
+      INTERESTED: 0,
+      NOT_INTERESTED: 0,
+      CLOSED: 0,
+    };
+
+    let total = 0;
+    for (const g of grouped) {
+      if (g.status in counts) {
+        counts[g.status as ConversationStatus] = g._count._all;
+        total += g._count._all;
+      }
+    }
+
+    ok(res, { total, counts });
+  })
+);
+
+router.get(
   "/:id/sends",
   asyncHandler(async (req, res) => {
     const id = IdSchema.parse(req.params.id);
     await loadDetail(id, req.user!, "VIEW");
     const { page, pageSize } = PaginationQuerySchema.parse(req.query);
     const filter = searchParam(req.query.filter);
+    const conversationStatus = searchParam(req.query.conversationStatus);
     const search = searchParam(req.query.search);
     const step = req.query.step !== undefined ? Number(req.query.step) : undefined;
+
+    let emailFilter: Prisma.StringFilter | undefined = undefined;
+    if (conversationStatus && conversationStatus !== "all") {
+      const matchingConversations = await prisma.conversation.findMany({
+        where: {
+          campaignId: id,
+          status: conversationStatus as ConversationStatus,
+        },
+        select: { recipientEmail: true },
+      });
+      const matchingEmails = matchingConversations.map((c) => c.recipientEmail);
+      if (matchingEmails.length === 0) {
+        return okPage(res, [], page, pageSize, 0);
+      }
+      emailFilter = { in: matchingEmails };
+    }
+
     const where: Prisma.SendWhereInput = {
       campaignId: id,
       ...(filter && SEND_FILTERS[filter] ? SEND_FILTERS[filter] : {}),
-      ...(search ? { email: { contains: search, mode: "insensitive" } } : {}),
+      ...(emailFilter ? { email: emailFilter } : {}),
       ...(step !== undefined && !isNaN(step) ? { stepIndex: step } : {}),
     };
+
+    if (search) {
+      where.AND = [
+        {
+          OR: [
+            { email: { contains: search, mode: "insensitive" } },
+            { contact: { firstName: { contains: search, mode: "insensitive" } } },
+            { contact: { lastName: { contains: search, mode: "insensitive" } } },
+            { contact: { company: { contains: search, mode: "insensitive" } } },
+          ],
+        },
+      ];
+    }
+
     const [rows, total] = await Promise.all([
-      prisma.send.findMany({ where, orderBy: [{ updatedAt: "desc" }, { id: "asc" }], ...skipTake(page, pageSize) }),
+      prisma.send.findMany({
+        where,
+        include: {
+          contact: {
+            select: { firstName: true, lastName: true, company: true },
+          },
+          conversation: {
+            select: { id: true, status: true, snippet: true, outcome: true, meetingAt: true },
+          },
+        },
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+        ...skipTake(page, pageSize),
+      }),
       prisma.send.count({ where }),
     ]);
-    okPage(res, rows.map(toSendDto), page, pageSize, total);
+
+    const emailsNeedingConv = Array.from(
+      new Set(rows.filter((r) => !r.conversation).map((r) => r.email.toLowerCase()))
+    );
+    const extraConvMap = new Map<string, any>();
+    if (emailsNeedingConv.length > 0) {
+      const convs = await prisma.conversation.findMany({
+        where: {
+          campaignId: id,
+          recipientEmail: { in: emailsNeedingConv },
+        },
+        select: { id: true, recipientEmail: true, status: true, snippet: true, outcome: true, meetingAt: true },
+      });
+      for (const c of convs) {
+        extraConvMap.set(c.recipientEmail.toLowerCase(), c);
+      }
+    }
+
+    const dtoList = rows.map((r) => {
+      const conv = r.conversation || extraConvMap.get(r.email.toLowerCase()) || null;
+      return toSendDto({ ...r, conversation: conv });
+    });
+
+    okPage(res, dtoList, page, pageSize, total);
   })
 );
 
@@ -1395,9 +1498,28 @@ router.get(
     await loadDetail(id, req.user!, "VIEW");
     const send = await prisma.send.findFirst({
       where: { id: IdSchema.parse(req.params.sendId), campaignId: id },
-      include: { events: { orderBy: { occurredAt: "asc" } } },
+      include: {
+        contact: {
+          select: { firstName: true, lastName: true, company: true },
+        },
+        events: { orderBy: { occurredAt: "asc" } },
+        conversation: {
+          select: { id: true, status: true, snippet: true, outcome: true, meetingAt: true },
+        },
+      },
     });
     if (!send) throw AppError.notFound("SEND_NOT_FOUND", "That message no longer exists.");
+
+    if (!send.conversation) {
+      const conv = await prisma.conversation.findFirst({
+        where: { campaignId: id, recipientEmail: send.email },
+        select: { id: true, status: true, snippet: true, outcome: true, meetingAt: true },
+      });
+      if (conv) {
+        (send as any).conversation = conv;
+      }
+    }
+
     ok(res, {
       ...toSendDto(send),
       subject: send.subject,
@@ -1645,6 +1767,59 @@ router.post(
       instructions,
     });
     ok(res, { ...draft, body: draft.bodyText });
+  })
+);
+
+router.get(
+  "/:id/recipients/:email/conversation",
+  asyncHandler(async (req, res) => {
+    const campaignId = IdSchema.parse(req.params.id);
+    await loadDetail(campaignId, req.user!, "VIEW");
+    const email = String(req.params.email).toLowerCase().trim();
+
+    // 1. Look for existing conversation
+    let conv = await prisma.conversation.findUnique({
+      where: {
+        campaignId_recipientEmail: { campaignId, recipientEmail: email },
+      },
+      include: {
+        messages: { orderBy: { sentAt: "asc" } },
+        campaign: { select: { id: true, name: true } },
+        contact: { select: { id: true, firstName: true, lastName: true } },
+        owner: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    // 2. If not found, check if there is a send with a reply event to backfill
+    if (!conv) {
+      const replyEvent = await prisma.sendEvent.findFirst({
+        where: {
+          send: { campaignId, email },
+          type: "REPLY",
+        },
+        include: { send: true },
+      });
+
+      if (replyEvent) {
+        const created = await findOrCreateConversation({
+          campaignId,
+          recipientEmail: email,
+          initialSendId: replyEvent.sendId,
+          contactId: replyEvent.send.contactId,
+        });
+        conv = await prisma.conversation.findUnique({
+          where: { id: created.id },
+          include: {
+            messages: { orderBy: { sentAt: "asc" } },
+            campaign: { select: { id: true, name: true } },
+            contact: { select: { id: true, firstName: true, lastName: true } },
+            owner: { select: { id: true, name: true, email: true } },
+          },
+        });
+      }
+    }
+
+    ok(res, conv ? toConversationDto(conv) : null);
   })
 );
 

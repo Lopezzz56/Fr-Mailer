@@ -107,94 +107,244 @@ export async function getOverviewData(filters: OverviewFilterQuery = { dateRange
 
   const matchingCampaignIds = allMatchingCampaigns.map((c) => c.id);
 
-  // 3. Period metric aggregations
-  const periodMetrics = async (pStart: Date, pEnd: Date) => {
-    if (!matchingCampaignIds.length || pStart >= pEnd) {
-      return {
-        distinctReached: 0,
-        started: 0,
-        sent: 0,
-        bounced: 0,
-        replied: 0,
-        positiveReplies: 0,
-        meetingsBooked: 0,
-        unsubscribed: 0,
-      };
-    }
-
-    const [sends, outcomes] = await Promise.all([
-      prisma.$queryRaw<{
-        distinctReached: bigint;
-        started: bigint;
-        sent: bigint;
-        bounced: bigint;
-        replied: bigint;
-        unsubscribed: bigint;
-      }[]>`
-        SELECT
-          COUNT(DISTINCT email) FILTER (WHERE status = 'SENT' AND "sentAt" >= ${pStart} AND "sentAt" < ${pEnd}) AS "distinctReached",
-          COUNT(*) FILTER (WHERE "stepIndex" = 0 AND "sentAt" >= ${pStart} AND "sentAt" < ${pEnd}) AS started,
-          COUNT(*) FILTER (WHERE status = 'SENT' AND "sentAt" >= ${pStart} AND "sentAt" < ${pEnd}) AS sent,
-          COUNT(*) FILTER (WHERE "bouncedAt" >= ${pStart} AND "bouncedAt" < ${pEnd}) AS bounced,
-          COUNT(*) FILTER (WHERE "repliedAt" >= ${pStart} AND "repliedAt" < ${pEnd}) AS replied,
-          COUNT(*) FILTER (WHERE "unsubscribedAt" >= ${pStart} AND "unsubscribedAt" < ${pEnd}) AS unsubscribed
-        FROM sends
-        WHERE "campaignId" = ANY(${matchingCampaignIds})
-          AND (
-            ("sentAt" >= ${pStart} AND "sentAt" < ${pEnd})
-            OR ("bouncedAt" >= ${pStart} AND "bouncedAt" < ${pEnd})
-            OR ("repliedAt" >= ${pStart} AND "repliedAt" < ${pEnd})
-            OR ("unsubscribedAt" >= ${pStart} AND "unsubscribedAt" < ${pEnd})
-          )`,
-      prisma.$queryRaw<{ positiveReplies: bigint; meetingsBooked: bigint }[]>`
-        SELECT
-          COUNT(DISTINCT "sendId") FILTER (
-            WHERE "type" = 'REPLY'
-              AND ("detail"->>'classification' = 'POSITIVE'
-                   OR lower("detail"->>'sentiment') = 'positive'
-                   OR "detail"->>'meetingBooked' = 'true'
-                   OR "detail"->>'meetingOutcome' IN ('BOOKED', 'QUALIFIED'))
-          ) AS "positiveReplies",
-          COUNT(DISTINCT "sendId") FILTER (
-            WHERE "type" = 'REPLY'
-              AND ("detail"->>'meetingBooked' = 'true' OR "detail"->>'meetingOutcome' IN ('BOOKED', 'QUALIFIED'))
-          ) AS "meetingsBooked"
-        FROM send_events
-        WHERE "occurredAt" >= ${pStart} AND "occurredAt" < ${pEnd}
-          AND "sendId" IN (SELECT id FROM sends WHERE "campaignId" = ANY(${matchingCampaignIds}))`,
-    ]);
-
-    const send = sends[0];
-    const outcome = outcomes[0];
-    return {
-      distinctReached: Number(send?.distinctReached ?? 0),
-      started: Number(send?.started ?? 0),
-      sent: Number(send?.sent ?? 0),
-      bounced: Number(send?.bounced ?? 0),
-      replied: Number(send?.replied ?? 0),
-      positiveReplies: Number(outcome?.positiveReplies ?? 0),
-      meetingsBooked: Number(outcome?.meetingsBooked ?? 0),
-      unsubscribed: Number(send?.unsubscribed ?? 0),
-    };
+  // 3. High-performance batch metric aggregations (all in parallel, grouped by campaignId)
+  type SendsRow = {
+    campaignId: string;
+    distinctReached: bigint;
+    started: bigint;
+    sent: bigint;
+    bounced: bigint;
+    replied: bigint;
+    unsubscribed: bigint;
   };
 
-  const [currentMetrics, prevMetrics] = await Promise.all([
-    periodMetrics(start, end),
-    periodMetrics(prevStart, prevEnd),
-  ]);
+  type ConvRow = {
+    campaignId: string;
+    positiveReplies: bigint;
+    meetingsBooked: bigint;
+  };
 
-  // Total Outreach / Contacts Reached
-  const totalReached = currentMetrics.distinctReached || currentMetrics.sent;
-  const previousReached = prevMetrics.distinctReached || prevMetrics.sent;
+  type PrevSendsRow = {
+    distinctReached: bigint;
+    sent: bigint;
+    replied: bigint;
+  };
 
-  // Inbound Replies
-  const replies = currentMetrics.replied;
-  const previousReplies = prevMetrics.replied;
+  type PrevConvRow = {
+    positiveReplies: bigint;
+    meetingsBooked: bigint;
+  };
+
+  type DueExceptionsRow = {
+    campaignId: string;
+    due: bigint;
+    exceptions: bigint;
+  };
+
+  const emptySendsMap = new Map<string, { distinctReached: number; started: number; sent: number; bounced: number; replied: number; unsubscribed: number }>();
+  const emptyOutcomesMap = new Map<string, { positiveReplies: number; meetingsBooked: number }>();
+  const dueByCampaign = new Map<string, number>();
+  const exceptionsByCampaign = new Map<string, number>();
+
+  let totalReached = 0;
+  let previousReached = 0;
+  let replies = 0;
+  let previousReplies = 0;
+  let positiveOutcomes = 0;
+  let previousPositiveOutcomes = 0;
+  let meetings = 0;
+  let totalStarted = 0;
+  let totalSent = 0;
+  let totalBounced = 0;
+  let totalUnsubscribed = 0;
+
+  if (matchingCampaignIds.length > 0) {
+    const [
+      sendsRows,
+      prevSendsRows,
+      convRows,
+      prevConvRows,
+      legacyRows,
+      prevLegacyRows,
+      dueExceptionRows,
+    ] = await Promise.all([
+      prisma.$queryRaw<SendsRow[]>`
+        SELECT
+          s."campaignId",
+          COUNT(DISTINCT s.email) FILTER (WHERE s.status = 'SENT' AND s."sentAt" >= ${start} AND s."sentAt" < ${end}) AS "distinctReached",
+          COUNT(*) FILTER (WHERE s."stepIndex" = 0 AND s."sentAt" >= ${start} AND s."sentAt" < ${end}) AS started,
+          COUNT(*) FILTER (WHERE s.status = 'SENT' AND s."sentAt" >= ${start} AND s."sentAt" < ${end}) AS sent,
+          COUNT(*) FILTER (WHERE s."bouncedAt" >= ${start} AND s."bouncedAt" < ${end}) AS bounced,
+          COUNT(DISTINCT s.email) FILTER (WHERE s."repliedAt" >= ${start} AND s."repliedAt" < ${end}) AS replied,
+          COUNT(*) FILTER (WHERE s."unsubscribedAt" >= ${start} AND s."unsubscribedAt" < ${end}) AS unsubscribed
+        FROM sends s
+        WHERE s."campaignId" = ANY(${matchingCampaignIds})
+        GROUP BY s."campaignId"`,
+      prisma.$queryRaw<PrevSendsRow[]>`
+        SELECT
+          COUNT(DISTINCT s.email) FILTER (WHERE s.status = 'SENT' AND s."sentAt" >= ${prevStart} AND s."sentAt" < ${prevEnd}) AS "distinctReached",
+          COUNT(*) FILTER (WHERE s.status = 'SENT' AND s."sentAt" >= ${prevStart} AND s."sentAt" < ${prevEnd}) AS sent,
+          COUNT(DISTINCT s.email) FILTER (WHERE s."repliedAt" >= ${prevStart} AND s."repliedAt" < ${prevEnd}) AS replied
+        FROM sends s
+        WHERE s."campaignId" = ANY(${matchingCampaignIds})`,
+      prisma.$queryRaw<ConvRow[]>`
+        SELECT
+          c."campaignId",
+          COUNT(*) FILTER (
+            WHERE (c."status" IN ('INTERESTED', 'MEETING_COORDINATION', 'MEETING_SCHEDULED')
+                   OR c."meetingAt" IS NOT NULL
+                   OR (c."sentiment" = 'POSITIVE' AND c."status" NOT IN ('NOT_INTERESTED', 'CLOSED')))
+              AND c."lastMessageAt" >= ${start} AND c."lastMessageAt" < ${end}
+          ) AS "positiveReplies",
+          COUNT(*) FILTER (
+            WHERE (c."status" = 'MEETING_SCHEDULED' OR c."meetingAt" IS NOT NULL)
+              AND c."lastMessageAt" >= ${start} AND c."lastMessageAt" < ${end}
+          ) AS "meetingsBooked"
+        FROM conversations c
+        WHERE c."campaignId" = ANY(${matchingCampaignIds})
+        GROUP BY c."campaignId"`,
+      prisma.$queryRaw<PrevConvRow[]>`
+        SELECT
+          COUNT(*) FILTER (
+            WHERE (c."status" IN ('INTERESTED', 'MEETING_COORDINATION', 'MEETING_SCHEDULED')
+                   OR c."meetingAt" IS NOT NULL
+                   OR (c."sentiment" = 'POSITIVE' AND c."status" NOT IN ('NOT_INTERESTED', 'CLOSED')))
+              AND c."lastMessageAt" >= ${prevStart} AND c."lastMessageAt" < ${prevEnd}
+          ) AS "positiveReplies",
+          COUNT(*) FILTER (
+            WHERE (c."status" = 'MEETING_SCHEDULED' OR c."meetingAt" IS NOT NULL)
+              AND c."lastMessageAt" >= ${prevStart} AND c."lastMessageAt" < ${prevEnd}
+          ) AS "meetingsBooked"
+        FROM conversations c
+        WHERE c."campaignId" = ANY(${matchingCampaignIds})`,
+      prisma.$queryRaw<ConvRow[]>`
+        SELECT
+          s."campaignId",
+          COUNT(DISTINCT s.email) FILTER (
+            WHERE (se."detail"->>'classification' = 'POSITIVE'
+                   OR lower(se."detail"->>'sentiment') = 'positive'
+                   OR se."detail"->>'meetingBooked' = 'true'
+                   OR se."detail"->>'meetingOutcome' IN ('BOOKED', 'QUALIFIED'))
+              AND se."occurredAt" >= ${start} AND se."occurredAt" < ${end}
+          ) AS "positiveReplies",
+          COUNT(DISTINCT s.email) FILTER (
+            WHERE (se."detail"->>'meetingBooked' = 'true'
+                   OR se."detail"->>'meetingOutcome' IN ('BOOKED', 'QUALIFIED'))
+              AND se."occurredAt" >= ${start} AND se."occurredAt" < ${end}
+          ) AS "meetingsBooked"
+        FROM send_events se
+        JOIN sends s ON s.id = se."sendId"
+        WHERE se."type" = 'REPLY'
+          AND s."campaignId" = ANY(${matchingCampaignIds})
+          AND NOT EXISTS (
+            SELECT 1 FROM conversations c
+            WHERE c."campaignId" = s."campaignId" AND lower(c."recipientEmail") = lower(s.email)
+          )
+        GROUP BY s."campaignId"`,
+      prisma.$queryRaw<PrevConvRow[]>`
+        SELECT
+          COUNT(DISTINCT s.email) FILTER (
+            WHERE (se."detail"->>'classification' = 'POSITIVE'
+                   OR lower(se."detail"->>'sentiment') = 'positive'
+                   OR se."detail"->>'meetingBooked' = 'true'
+                   OR se."detail"->>'meetingOutcome' IN ('BOOKED', 'QUALIFIED'))
+              AND se."occurredAt" >= ${prevStart} AND se."occurredAt" < ${prevEnd}
+          ) AS "positiveReplies",
+          COUNT(DISTINCT s.email) FILTER (
+            WHERE (se."detail"->>'meetingBooked' = 'true'
+                   OR se."detail"->>'meetingOutcome' IN ('BOOKED', 'QUALIFIED'))
+              AND se."occurredAt" >= ${prevStart} AND se."occurredAt" < ${prevEnd}
+          ) AS "meetingsBooked"
+        FROM send_events se
+        JOIN sends s ON s.id = se."sendId"
+        WHERE se."type" = 'REPLY'
+          AND s."campaignId" = ANY(${matchingCampaignIds})
+          AND NOT EXISTS (
+            SELECT 1 FROM conversations c
+            WHERE c."campaignId" = s."campaignId" AND lower(c."recipientEmail") = lower(s.email)
+          )`,
+      prisma.$queryRaw<DueExceptionsRow[]>`
+        SELECT
+          s."campaignId",
+          COUNT(*) FILTER (WHERE s.status = 'PENDING' AND s."stepIndex" > 0 AND s."approvedAt" IS NOT NULL AND s."scheduledFor" <= ${now}) AS due,
+          COUNT(*) FILTER (WHERE s.status IN ('FAILED', 'UNKNOWN')) AS exceptions
+        FROM sends s
+        WHERE s."campaignId" = ANY(${matchingCampaignIds})
+        GROUP BY s."campaignId"`,
+    ]);
+
+    for (const r of sendsRows) {
+      emptySendsMap.set(r.campaignId, {
+        distinctReached: Number(r.distinctReached),
+        started: Number(r.started),
+        sent: Number(r.sent),
+        bounced: Number(r.bounced),
+        replied: Number(r.replied),
+        unsubscribed: Number(r.unsubscribed),
+      });
+      totalReached += Number(r.distinctReached || r.sent);
+      totalStarted += Number(r.started);
+      totalSent += Number(r.sent);
+      totalBounced += Number(r.bounced);
+      replies += Number(r.replied);
+      totalUnsubscribed += Number(r.unsubscribed);
+    }
+
+    const prevS = prevSendsRows[0];
+    previousReached = Number(prevS?.distinctReached ?? prevS?.sent ?? 0);
+    previousReplies = Number(prevS?.replied ?? 0);
+
+    for (const r of convRows) {
+      emptyOutcomesMap.set(r.campaignId, {
+        positiveReplies: Number(r.positiveReplies),
+        meetingsBooked: Number(r.meetingsBooked),
+      });
+      positiveOutcomes += Number(r.positiveReplies);
+      meetings += Number(r.meetingsBooked);
+    }
+
+    for (const r of legacyRows) {
+      const prev = emptyOutcomesMap.get(r.campaignId) ?? { positiveReplies: 0, meetingsBooked: 0 };
+      const pos = prev.positiveReplies + Number(r.positiveReplies);
+      const meet = prev.meetingsBooked + Number(r.meetingsBooked);
+      emptyOutcomesMap.set(r.campaignId, { positiveReplies: pos, meetingsBooked: meet });
+      positiveOutcomes += Number(r.positiveReplies);
+      meetings += Number(r.meetingsBooked);
+    }
+
+    const prevC = prevConvRows[0];
+    const prevL = prevLegacyRows[0];
+    previousPositiveOutcomes = Number(prevC?.positiveReplies ?? 0) + Number(prevL?.positiveReplies ?? 0);
+
+    for (const r of dueExceptionRows) {
+      dueByCampaign.set(r.campaignId, Number(r.due));
+      exceptionsByCampaign.set(r.campaignId, Number(r.exceptions));
+    }
+  }
+
+  const currentMetrics = {
+    distinctReached: totalReached,
+    started: totalStarted,
+    sent: totalSent,
+    bounced: totalBounced,
+    replied: replies,
+    positiveReplies: positiveOutcomes,
+    meetingsBooked: meetings,
+    unsubscribed: totalUnsubscribed,
+  };
+
+  const prevMetrics = {
+    distinctReached: previousReached,
+    started: 0,
+    sent: previousReached,
+    bounced: 0,
+    replied: previousReplies,
+    positiveReplies: previousPositiveOutcomes,
+    meetingsBooked: 0,
+    unsubscribed: 0,
+  };
+
   const replyRate = totalReached > 0 ? Number(((replies / totalReached) * 100).toFixed(1)) : 0;
-
-  // Positive Outcomes (Interested or meeting booked)
-  const positiveOutcomes = currentMetrics.positiveReplies;
-  const previousPositiveOutcomes = prevMetrics.positiveReplies;
   const positiveRate = replies > 0 ? Number(((positiveOutcomes / replies) * 100).toFixed(1)) : 0;
 
   // Active Outreach
@@ -205,7 +355,6 @@ export async function getOverviewData(filters: OverviewFilterQuery = { dateRange
   const totalCampaigns = allMatchingCampaigns.length;
 
   // Funnel: Reached → Replies → Positive Outcomes → Meetings/Opportunities
-  const meetings = currentMetrics.meetingsBooked;
   const funnel: OutreachFunnelDto = {
     reached: totalReached,
     replies,
@@ -217,38 +366,24 @@ export async function getOverviewData(filters: OverviewFilterQuery = { dateRange
     overallConversionRate: totalReached > 0 ? Number(((meetings / totalReached) * 100).toFixed(1)) : 0,
   };
 
-  // 4. Outreach by Type Breakdown
+  // 4. Outreach by Type Breakdown (aggregated in-memory instantly)
   const outreachByType: OutreachTypeMetricDto[] = [];
   for (const oType of CAMPAIGN_OUTREACH_TYPES) {
     const campaignsOfType = allMatchingCampaigns.filter((c) => (c.outreachType as string) === oType);
-    const cIds = campaignsOfType.map((c) => c.id);
     let reachedCount = 0;
     let repliesCount = 0;
     let positiveCount = 0;
 
-    if (cIds.length > 0) {
-      const [typeSends, typeOutcomes] = await Promise.all([
-        prisma.$queryRaw<{ distinctReached: bigint; replied: bigint }[]>`
-          SELECT
-            COUNT(DISTINCT email) FILTER (WHERE status = 'SENT' AND "sentAt" >= ${start} AND "sentAt" < ${end}) AS "distinctReached",
-            COUNT(*) FILTER (WHERE "repliedAt" >= ${start} AND "repliedAt" < ${end}) AS replied
-          FROM sends
-          WHERE "campaignId" = ANY(${cIds})`,
-        prisma.$queryRaw<{ positiveReplies: bigint }[]>`
-          SELECT
-            COUNT(DISTINCT "sendId") AS "positiveReplies"
-          FROM send_events
-          WHERE "occurredAt" >= ${start} AND "occurredAt" < ${end}
-            AND "type" = 'REPLY'
-            AND ("detail"->>'classification' = 'POSITIVE'
-                 OR lower("detail"->>'sentiment') = 'positive'
-                 OR "detail"->>'meetingBooked' = 'true'
-                 OR "detail"->>'meetingOutcome' IN ('BOOKED', 'QUALIFIED'))
-            AND "sendId" IN (SELECT id FROM sends WHERE "campaignId" = ANY(${cIds}))`,
-      ]);
-      reachedCount = Number(typeSends[0]?.distinctReached ?? 0);
-      repliesCount = Number(typeSends[0]?.replied ?? 0);
-      positiveCount = Number(typeOutcomes[0]?.positiveReplies ?? 0);
+    for (const c of campaignsOfType) {
+      const s = emptySendsMap.get(c.id);
+      if (s) {
+        reachedCount += s.distinctReached || s.sent;
+        repliesCount += s.replied;
+      }
+      const o = emptyOutcomesMap.get(c.id);
+      if (o) {
+        positiveCount += o.positiveReplies;
+      }
     }
 
     const activeCount = campaignsOfType.filter((c) =>
@@ -271,7 +406,7 @@ export async function getOverviewData(filters: OverviewFilterQuery = { dateRange
     });
   }
 
-  // 5. Team Outreach Breakdown
+  // 5. Team Outreach Breakdown (aggregated in-memory instantly)
   const teamOutreach: TeamOutreachMetricDto[] = [];
   const relevantUsers = allUsers.filter(
     (u) =>
@@ -281,13 +416,8 @@ export async function getOverviewData(filters: OverviewFilterQuery = { dateRange
 
   for (const user of relevantUsers) {
     const userCampaigns = allMatchingCampaigns.filter((c) => c.createdById === user.id);
-    const uCampaignIds = userCampaigns.map((c) => c.id);
 
     let assigned = 0;
-    for (const c of userCampaigns) {
-      assigned += c.contactList._count.members;
-    }
-
     let reached = 0;
     let userReplies = 0;
     let userPositive = 0;
@@ -295,46 +425,19 @@ export async function getOverviewData(filters: OverviewFilterQuery = { dateRange
     let dueFollowUps = 0;
     let deliveryExceptions = 0;
 
-    if (uCampaignIds.length > 0) {
-      const [uSends, uOutcomes, uDue, uExceptions] = await Promise.all([
-        prisma.$queryRaw<{ distinctReached: bigint; replied: bigint }[]>`
-          SELECT
-            COUNT(DISTINCT email) FILTER (WHERE status = 'SENT' AND "sentAt" >= ${start} AND "sentAt" < ${end}) AS "distinctReached",
-            COUNT(*) FILTER (WHERE "repliedAt" >= ${start} AND "repliedAt" < ${end}) AS replied
-          FROM sends
-          WHERE "campaignId" = ANY(${uCampaignIds})`,
-        prisma.$queryRaw<{ positiveReplies: bigint }[]>`
-          SELECT
-            COUNT(DISTINCT "sendId") AS "positiveReplies"
-          FROM send_events
-          WHERE "occurredAt" >= ${start} AND "occurredAt" < ${end}
-            AND "type" = 'REPLY'
-            AND ("detail"->>'classification' = 'POSITIVE'
-                 OR lower("detail"->>'sentiment') = 'positive'
-                 OR "detail"->>'meetingBooked' = 'true'
-                 OR "detail"->>'meetingOutcome' IN ('BOOKED', 'QUALIFIED'))
-            AND "sendId" IN (SELECT id FROM sends WHERE "campaignId" = ANY(${uCampaignIds}))`,
-        prisma.send.count({
-          where: {
-            campaignId: { in: uCampaignIds },
-            status: "PENDING",
-            stepIndex: { gt: 0 },
-            approvedAt: { not: null },
-            scheduledFor: { lte: now },
-          },
-        }),
-        prisma.send.count({
-          where: {
-            campaignId: { in: uCampaignIds },
-            status: { in: ["FAILED", "UNKNOWN"] },
-          },
-        }),
-      ]);
-      reached = Number(uSends[0]?.distinctReached ?? 0);
-      userReplies = Number(uSends[0]?.replied ?? 0);
-      userPositive = Number(uOutcomes[0]?.positiveReplies ?? 0);
-      dueFollowUps = uDue;
-      deliveryExceptions = uExceptions;
+    for (const c of userCampaigns) {
+      assigned += c.contactList._count.members;
+      const s = emptySendsMap.get(c.id);
+      if (s) {
+        reached += s.distinctReached || s.sent;
+        userReplies += s.replied;
+      }
+      const o = emptyOutcomesMap.get(c.id);
+      if (o) {
+        userPositive += o.positiveReplies;
+      }
+      dueFollowUps += dueByCampaign.get(c.id) ?? 0;
+      deliveryExceptions += exceptionsByCampaign.get(c.id) ?? 0;
     }
 
     const uRepRate = reached > 0 ? Number(((userReplies / reached) * 100).toFixed(1)) : 0;
@@ -462,31 +565,119 @@ export async function getOverviewData(filters: OverviewFilterQuery = { dateRange
       });
     }
 
-    // Unanswered replies
-    const recentReplies = await prisma.send.findMany({
+    // Unanswered replies and conversation action items
+    const needsReplyConvs = await prisma.conversation.findMany({
       where: {
         campaignId: { in: matchingCampaignIds },
-        repliedAt: { not: null },
+        status: "NEEDS_REPLY",
       },
       include: {
         campaign: { select: { id: true, name: true } },
         contact: { select: { firstName: true, lastName: true } },
       },
-      orderBy: { repliedAt: "desc" },
+      orderBy: { lastMessageAt: "desc" },
       take: 5,
     });
 
-    for (const reply of recentReplies) {
-      const contactName = [reply.contact?.firstName, reply.contact?.lastName].filter(Boolean).join(" ") || reply.email;
+    for (const conv of needsReplyConvs) {
+      const contactName = [conv.contact?.firstName, conv.contact?.lastName].filter(Boolean).join(" ") || conv.recipientEmail;
       actionableAttention.push({
-        id: `reply-${reply.id}`,
+        id: `conv-reply-${conv.id}`,
         type: "UNANSWERED_REPLY",
         title: `Inbound reply from ${contactName}`,
-        subtitle: `Campaign: ${reply.campaign.name} · Action required to reply and qualify conversation`,
-        link: `/campaigns/${reply.campaign.id}?tab=recipients&filter=replied`,
+        subtitle: conv.snippet ? `"${conv.snippet.slice(0, 90)}"` : `Awaiting response on ${conv.campaign.name}`,
+        link: `/campaigns/${conv.campaignId}?tab=recipients&recipient=${encodeURIComponent(conv.recipientEmail)}`,
         linkLabel: "Open conversation →",
         severity: "high",
-        createdAt: reply.repliedAt?.toISOString(),
+        createdAt: conv.lastMessageAt.toISOString(),
+      });
+    }
+
+    if (needsReplyConvs.length < 5) {
+      const remainingSlots = 5 - needsReplyConvs.length;
+      const recentReplies = await prisma.send.findMany({
+        where: {
+          campaignId: { in: matchingCampaignIds },
+          repliedAt: { not: null },
+          conversation: null,
+        },
+        include: {
+          campaign: { select: { id: true, name: true } },
+          contact: { select: { firstName: true, lastName: true } },
+        },
+        orderBy: { repliedAt: "desc" },
+        take: remainingSlots,
+      });
+
+      for (const reply of recentReplies) {
+        const contactName = [reply.contact?.firstName, reply.contact?.lastName].filter(Boolean).join(" ") || reply.email;
+        actionableAttention.push({
+          id: `reply-${reply.id}`,
+          type: "UNANSWERED_REPLY",
+          title: `Inbound reply from ${contactName}`,
+          subtitle: `Campaign: ${reply.campaign.name} · Action required to reply and qualify conversation`,
+          link: `/campaigns/${reply.campaign.id}?tab=recipients&recipient=${encodeURIComponent(reply.email)}`,
+          linkLabel: "Open conversation →",
+          severity: "high",
+          createdAt: reply.repliedAt?.toISOString(),
+        });
+      }
+    }
+
+    // Meeting coordination in progress
+    const meetingCoordConvs = await prisma.conversation.findMany({
+      where: {
+        campaignId: { in: matchingCampaignIds },
+        status: "MEETING_COORDINATION",
+      },
+      include: {
+        campaign: { select: { id: true, name: true } },
+        contact: { select: { firstName: true, lastName: true } },
+      },
+      orderBy: { lastMessageAt: "desc" },
+      take: 4,
+    });
+
+    for (const conv of meetingCoordConvs) {
+      const contactName = [conv.contact?.firstName, conv.contact?.lastName].filter(Boolean).join(" ") || conv.recipientEmail;
+      actionableAttention.push({
+        id: `conv-coord-${conv.id}`,
+        type: "MEETING_COORDINATION",
+        title: `Meeting coordination: ${contactName}`,
+        subtitle: conv.meetingNotes || `Aligning meeting time on ${conv.campaign.name}`,
+        link: `/campaigns/${conv.campaignId}?tab=recipients&recipient=${encodeURIComponent(conv.recipientEmail)}`,
+        linkLabel: "Coordinate meeting →",
+        severity: "medium",
+        createdAt: conv.lastMessageAt.toISOString(),
+      });
+    }
+
+    // Overdue conversation next actions
+    const overdueActionConvs = await prisma.conversation.findMany({
+      where: {
+        campaignId: { in: matchingCampaignIds },
+        nextActionDueAt: { lte: now },
+        status: { notIn: ["CLOSED", "NOT_INTERESTED"] },
+      },
+      include: {
+        campaign: { select: { id: true, name: true } },
+        contact: { select: { firstName: true, lastName: true } },
+      },
+      orderBy: { nextActionDueAt: "asc" },
+      take: 4,
+    });
+
+    for (const conv of overdueActionConvs) {
+      const contactName = [conv.contact?.firstName, conv.contact?.lastName].filter(Boolean).join(" ") || conv.recipientEmail;
+      actionableAttention.push({
+        id: `conv-action-${conv.id}`,
+        type: "OVERDUE_ACTION",
+        title: `Overdue action: ${conv.nextAction || "Follow-up"} (${contactName})`,
+        subtitle: `Due ${conv.nextActionDueAt?.toLocaleDateString()} · ${conv.campaign.name}`,
+        link: `/campaigns/${conv.campaignId}?tab=recipients&recipient=${encodeURIComponent(conv.recipientEmail)}`,
+        linkLabel: "Take action →",
+        severity: "high",
+        createdAt: conv.nextActionDueAt?.toISOString(),
       });
     }
   }
@@ -563,40 +754,17 @@ export async function getOverviewData(filters: OverviewFilterQuery = { dateRange
     }
   }
 
-  // 8. Active campaigns with outcomes
+  // 8. Active campaigns with outcomes (aggregated in-memory instantly)
   const activeSummaries = await toCampaignSummaries(activeCampaignsRaw);
-  const activeWithOutcomes: ActiveCampaignOutreachDto[] = [];
-
-  for (const sum of activeSummaries) {
-    let posCount = 0;
-    let meetCount = 0;
-    if (sum.counts.sent > 0) {
-      const outcomes = await prisma.$queryRaw<{ positiveReplies: bigint; meetingsBooked: bigint }[]>`
-        SELECT
-          COUNT(DISTINCT "sendId") FILTER (
-            WHERE "type" = 'REPLY'
-              AND ("detail"->>'classification' = 'POSITIVE'
-                   OR lower("detail"->>'sentiment') = 'positive'
-                   OR "detail"->>'meetingBooked' = 'true'
-                   OR "detail"->>'meetingOutcome' IN ('BOOKED', 'QUALIFIED'))
-          ) AS "positiveReplies",
-          COUNT(DISTINCT "sendId") FILTER (
-            WHERE "type" = 'REPLY'
-              AND ("detail"->>'meetingBooked' = 'true' OR "detail"->>'meetingOutcome' IN ('BOOKED', 'QUALIFIED'))
-          ) AS "meetingsBooked"
-        FROM send_events
-        WHERE "sendId" IN (SELECT id FROM sends WHERE "campaignId" = ${sum.id})`;
-      posCount = Number(outcomes[0]?.positiveReplies ?? 0);
-      meetCount = Number(outcomes[0]?.meetingsBooked ?? 0);
-    }
-
-    activeWithOutcomes.push({
+  const activeWithOutcomes: ActiveCampaignOutreachDto[] = activeSummaries.map((sum) => {
+    const o = emptyOutcomesMap.get(sum.id) ?? { positiveReplies: 0, meetingsBooked: 0 };
+    return {
       ...sum,
       outreachType: (sum.outreachType as CampaignOutreachType) ?? "CUSTOMER_OUTREACH",
-      positiveOutcomes: posCount,
-      meetingsBooked: meetCount,
-    });
-  }
+      positiveOutcomes: o.positiveReplies,
+      meetingsBooked: o.meetingsBooked,
+    };
+  });
 
   // 9. Available filter options
   const distinctOwnerIds = new Set(allMatchingCampaigns.map((c) => c.createdById).filter(Boolean));
@@ -613,6 +781,29 @@ export async function getOverviewData(filters: OverviewFilterQuery = { dateRange
     where: { id: { in: [...issueByCampaign.keys()] } },
     select: { id: true, name: true },
   });
+
+  // 10. Post-Reply Conversation Status Breakdown
+  const convCounts = await prisma.conversation.groupBy({
+    by: ["status"],
+    where: matchingCampaignIds.length ? { campaignId: { in: matchingCampaignIds } } : {},
+    _count: { _all: true },
+  });
+  const convMap = new Map<string, number>();
+  let totalConversations = 0;
+  for (const row of convCounts) {
+    convMap.set(row.status, row._count._all);
+    totalConversations += row._count._all;
+  }
+  const conversationBreakdown = {
+    needsReply: convMap.get("NEEDS_REPLY") ?? 0,
+    waitingForContact: convMap.get("WAITING_FOR_CONTACT") ?? 0,
+    meetingCoordination: convMap.get("MEETING_COORDINATION") ?? 0,
+    meetingScheduled: convMap.get("MEETING_SCHEDULED") ?? 0,
+    interested: convMap.get("INTERESTED") ?? 0,
+    notInterested: convMap.get("NOT_INTERESTED") ?? 0,
+    closed: convMap.get("CLOSED") ?? 0,
+    totalConversations,
+  };
 
   return {
     counts,
@@ -644,6 +835,7 @@ export async function getOverviewData(filters: OverviewFilterQuery = { dateRange
       totalCampaigns,
     },
     funnel,
+    conversationBreakdown,
     outreachByType,
     teamOutreach,
     activityTrend,
