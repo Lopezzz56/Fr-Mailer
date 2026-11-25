@@ -165,7 +165,13 @@ function StatusBanner({ c }: { c: CampaignDetail }) {
         </Callout>
       );
     case "SENDING":
-      return c.waitingReason ? <Callout tone="warning" title="Waiting">{c.waitingReason}</Callout> : <Callout tone="info" title="Sending">About {c.sendRatePerMinute} emails a minute. You can pause at any time.</Callout>;
+      return c.waitingReason ? (
+        <Callout tone="warning" title="Waiting">{c.waitingReason}</Callout>
+      ) : (
+        <Callout tone="info" title="Sending">
+          Sending rate: {Math.min(c.sendRatePerMinute, 10)} emails/minute. Sending continues automatically; you can pause at any time.
+        </Callout>
+      );
     case "PAUSED":
       return <Callout tone="warning" title="Paused">{c.pausedReason ?? "Sending is on hold. Resume to continue where it stopped."}</Callout>;
     case "COMPLETED":
@@ -252,7 +258,7 @@ export function CampaignDetailPage() {
   const r = review.data?.data;
   const canSubmit = Boolean(r && r.ready > 0 && r.templateErrors.length === 0);
   const deliverable = c.counts.total - c.counts.skipped;
-  const etaMinutes = Math.ceil(c.counts.pending / c.sendRatePerMinute);
+  const effectiveRate = Math.min(c.sendRatePerMinute, 10);
 
   const isOwner = c.createdById === user?.id || c.createdBy?.id === user?.id;
   const isFounderOrOffice = user?.role === "FOUNDER" || user?.role === "FOUNDER_OFFICE";
@@ -443,7 +449,7 @@ export function CampaignDetailPage() {
             <div className="grid gap-6 lg:grid-cols-[1fr_auto]">
               <div>
                 <CampaignProgress counts={c.counts} />
-                {c.status === "SENDING" && c.counts.pending > 0 && <p className="mt-2 text-xs text-ink-subtle">About {etaMinutes} minute{etaMinutes === 1 ? "" : "s"} left at the current pace.</p>}
+                {c.status === "SENDING" && c.counts.pending > 0 && <p className="mt-2 text-xs text-ink-subtle">Sending at up to {effectiveRate} emails/minute (300/24h per-mailbox safety limit).</p>}
               </div>
               <div className="grid grid-cols-3 gap-6 sm:grid-cols-6">
                 <Stat label="Sent" value={num(c.counts.sent)} hint={`of ${num(deliverable)}`} />
@@ -500,7 +506,7 @@ export function CampaignDetailPage() {
                 { label: "Safety Stopping Rules", value: "Instant Stop on Inbound Reply • Auto-suppress Bounces • Mailbox Health Guard" },
                 { label: "Sends as", value: fromLine },
                 { label: "Replies go to", value: c.replyTo ?? c.fromEmail ?? "—" },
-                { label: "Pace", value: `${c.sendRatePerMinute} emails per minute` },
+                { label: "Sending rate", value: `${effectiveRate} emails/minute` },
                 { label: "Status", value: CAMPAIGN_STATUS[c.status].description },
                 { label: "Created", value: `${formatDateTime(c.createdAt)}${c.createdBy ? ` by ${c.createdBy.name}` : ""}` },
                 { label: "Submitted", value: c.approvalRequestedAt ? `${formatDateTime(c.approvalRequestedAt)}${c.approvalRequestedBy ? ` by ${c.approvalRequestedBy.name}` : ""}` : "—" },
@@ -556,7 +562,7 @@ export function CampaignDetailPage() {
         loading={act.isPending}
         tone="primary"
         title={`Start sending to ${plural(c.counts.pending, "recipient")}?`}
-        description={`Emails go out from ${c.fromEmail ?? "the mailbox"} at about ${c.sendRatePerMinute} a minute (roughly ${etaMinutes} minute${etaMinutes === 1 ? "" : "s"}). You can pause at any time.`}
+        description={`Emails send from ${c.fromEmail ?? "the mailbox"} at ${effectiveRate} emails/minute (300/24h per-mailbox safety limit). Sending continues automatically until all recipients are reached, and you can pause at any time.`}
         confirmLabel="Start sending"
       />
       <ConfirmDialog

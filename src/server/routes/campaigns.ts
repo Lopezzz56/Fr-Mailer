@@ -23,7 +23,7 @@ import {
   startCampaign,
   withdrawApproval,
 } from "../services/campaign-service.js";
-import { sentInLast24h } from "../services/send-worker.js";
+import { sentInLast24hForCampaign } from "../services/send-worker.js";
 import { kickBackground } from "../services/background.js";
 import { getPersonalMailboxStatus } from "../services/personal-mailbox.js";
 import { getCampaignAnalytics, recordSendOutcome } from "../services/analytics-service.js";
@@ -102,12 +102,12 @@ async function loadDetail(id: string, user?: SessionUser, requiredAccess: Campai
   }
 
   const detail = await toCampaignDetail(campaign);
-  const sent24h = await sentInLast24h();
+  const budget = await sentInLast24hForCampaign(campaign);
   return {
     ...detail,
     waitingReason:
-      campaign.status === "SENDING" && sent24h >= env.DAILY_SEND_LIMIT
-        ? `Waiting: the mailbox reached its limit of ${env.DAILY_SEND_LIMIT} emails in 24 hours. Sending continues automatically.`
+      campaign.status === "SENDING" && budget.remainingBudget <= 0
+        ? `Waiting: mailbox ${budget.identity.email} reached its ${budget.dailyLimit} emails in 24 hours safety limit. Sending continues automatically as capacity frees up.`
         : null,
   };
 }

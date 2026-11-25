@@ -115,11 +115,9 @@ interface SimulationResult {
 }
 
 const PACES = [
-  { value: "5", label: "5 per minute — gentlest" },
-  { value: "10", label: "10 per minute" },
-  { value: "20", label: "20 per minute — recommended" },
-  { value: "30", label: "30 per minute" },
-  { value: "60", label: "60 per minute — fastest" },
+  { value: "5", label: "5 emails/minute — gentlest" },
+  { value: "8", label: "8 emails/minute — conservative" },
+  { value: "10", label: "10 emails/minute — recommended" },
 ];
 
 export function AdvancedCampaignStudio({
@@ -159,7 +157,7 @@ export function AdvancedCampaignStudio({
   const [fromName, setFromName] = useState("");
   const [fromEmail, setFromEmail] = useState("");
   const [replyTo, setReplyTo] = useState("");
-  const [sendRatePerMinute, setSendRatePerMinute] = useState("20");
+  const [sendRatePerMinute, setSendRatePerMinute] = useState("10");
 
   // Automation Mode & Sending Safeguards
   const [automationMode, setAutomationMode] = useState<CampaignAutomationMode>("APPROVAL_REQUIRED");
@@ -268,7 +266,7 @@ export function AdvancedCampaignStudio({
       setFromEmail(c.fromEmail ?? "");
       setMailboxId(c.mailboxId ?? "");
       setReplyTo(c.replyTo ?? "");
-      setSendRatePerMinute(String(c.sendRatePerMinute));
+      setSendRatePerMinute(String(Math.min(c.sendRatePerMinute || 10, 10)));
 
       if (c.templates && c.templates.length > 0) {
         setSelectedTemplates(
@@ -866,7 +864,7 @@ export function AdvancedCampaignStudio({
         fromEmail: fromEmail.trim() || defaultSenderEmail || null,
         mailboxId: mailboxId || undefined,
         replyTo: replyTo.trim() || null,
-        sendRatePerMinute: parseInt(sendRatePerMinute, 10) || 20,
+        sendRatePerMinute: Math.min(parseInt(sendRatePerMinute, 10) || 10, 10),
         automationMode,
         sequenceSteps: sequenceSteps.map((s, idx) => ({
           stepIndex: idx,
@@ -1138,11 +1136,11 @@ export function AdvancedCampaignStudio({
 
             <div>
               <SelectField
-                label="Sending Pace"
+                label="Sending rate"
                 value={sendRatePerMinute}
                 onChange={(e) => setSendRatePerMinute(e.target.value)}
                 options={PACES}
-                hint="Max speed per minute"
+                hint="Coordinated per sending mailbox (max 10/min, 300/24h per mailbox)"
               />
             </div>
           </div>

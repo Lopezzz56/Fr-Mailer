@@ -9,7 +9,7 @@ import { requirePermission } from "../middleware/session.js";
 import { ok, okPage, skipTake } from "../lib/http.js";
 import { summarize } from "../lib/activity.js";
 import { campaignSummaryInclude, toCampaignSummaries } from "../lib/serialize.js";
-import { sentInLast24h } from "../services/send-worker.js";
+import { getMailboxBudgets, sentInLast24h } from "../services/send-worker.js";
 import { verifyMailbox } from "../services/mailer.js";
 import { checkInbox, getImapState } from "../services/inbox-monitor.js";
 import {
@@ -277,10 +277,11 @@ mailboxRouter.get(
       ...(teamMailboxHealth ? { teamMailboxHealth } : {}),
       accessibleMailboxes,
       ...(allMailboxes ? { allMailboxes } : {}),
+      mailboxesUsage: await getMailboxBudgets(env.DAILY_SEND_LIMIT),
       liveSendingEnabled: !blocker && accountConfigured,
       liveSendingBlocker: blocker ?? (!accountConfigured ? "Connect or assign a SpaceMail mailbox before sending campaigns." : null),
       dailyLimit: env.DAILY_SEND_LIMIT,
-      sentLast24h: await sentInLast24h(),
+      sentLast24h: primaryMailbox ? await sentInLast24h(primaryMailbox.id) : await sentInLast24h(),
       publicUrl: env.PUBLIC_URL,
     };
     ok(res, data);

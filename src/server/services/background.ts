@@ -1,81 +1,87 @@
 // Background work for serverless deployments (Vercel), where no process stays alive between requests.
 //
-// A "burst" sends for a bounded time under a database lease (so bursts never overlap), checks the
-// inbox if due, and — if messages are still queued — asks for the next burst. Bursts start:
-//   • right away when someone starts/resumes/retries a campaign (kickBackground)
-//   • from /api/internal/tick (Vercel Cron, an external scheduler, or the previous burst)
+// Each wake-up runs a single bounded sending cycle under a global database lease ("sender"), checks
+// due inboxes for replies/bounces, and coordinates eligible sends across all mailboxes within their
+// independent 300/24h budgets and pacing limits before exiting cleanly ahead of Vercel's timeout.
+//
+// No recursive HTTP self-invocation is used; repeated external /api/internal/tick wake-ups resume any
+// remaining queued work automatically.
 // Self-hosted servers don't use this: they run SendWorker.start() and InboxMonitor continuously.
 import { waitUntil } from "@vercel/functions";
-import { env, isServerless } from "../config.js";
-import { acquireLease, hasQueuedWork, recoverInterruptedSends, releaseLease, SendWorker } from "./send-worker.js";
+import { isServerless } from "../config.js";
+import {
+  acquireLease,
+  recoverInterruptedSends,
+  releaseLease,
+  SendWorker,
+  type MailboxCycleStats,
+} from "./send-worker.js";
 import { anyInboxDue, checkAllInboxes } from "./inbox-monitor.js";
 
-// Must stay below the function's maxDuration (vercel.json: 300s) with room for one SMTP handoff
-const BURST_MS = 240_000;
-const LEASE_MS = BURST_MS + 90_000;
-// Older than any function can live: safe to call these interrupted
+// Must stay safely below the function's maxDuration (vercel.json: 300s) with room for SMTP handoff & cleanup
+export const EXECUTION_BUDGET_MS = 240_000;
+const LEASE_MS = EXECUTION_BUDGET_MS + 90_000;
+// Older than any function can live: safe to mark interrupted CLAIMS as UNKNOWN
 const STALE_CLAIM_MS = 15 * 60_000;
 
-export interface BurstResult {
+export interface SenderCycleResult {
   ran: boolean;
   reason?: string;
-  handled?: number;
-  stoppedBecause?: string;
-  inboxChecked?: boolean;
-  more?: boolean;
+  stoppedBecause?: "budget" | "idle" | "limit";
+  totalSent: number;
+  handled: number;
+  inboxChecked: boolean;
+  durationMs: number;
+  mailboxes: MailboxCycleStats[];
 }
 
-async function inboxDue(): Promise<boolean> {
-  return anyInboxDue();
-}
-
-export async function runBurst(budgetMs = BURST_MS): Promise<BurstResult> {
+export async function runSenderCycle(budgetMs = EXECUTION_BUDGET_MS): Promise<SenderCycleResult> {
+  const startedAt = Date.now();
   await recoverInterruptedSends(STALE_CLAIM_MS);
+
   const owner = await acquireLease("sender", LEASE_MS);
-  if (!owner) return { ran: false, reason: "Another burst is already running." };
+  if (!owner) {
+    return {
+      ran: false,
+      reason: "Another sender worker cycle is already running.",
+      totalSent: 0,
+      handled: 0,
+      inboxChecked: false,
+      durationMs: Date.now() - startedAt,
+      mailboxes: [],
+    };
+  }
 
   try {
     let inboxChecked = false;
-    if (await inboxDue()) {
+    if (await anyInboxDue()) {
       await checkAllInboxes(true);
       inboxChecked = true;
     }
-    const { handled, stoppedBecause } = await new SendWorker().runFor(budgetMs);
-    // More to do and not blocked by the daily limit -> keep going without waiting for cron
-    const more = stoppedBecause === "budget" && (await hasQueuedWork());
-    return { ran: true, handled, stoppedBecause, inboxChecked, more };
+
+    const result = await new SendWorker().runFor(budgetMs);
+    return {
+      ran: true,
+      stoppedBecause: result.stoppedBecause,
+      totalSent: result.totalSent,
+      handled: result.handled,
+      inboxChecked,
+      durationMs: Date.now() - startedAt,
+      mailboxes: result.mailboxes,
+    };
   } finally {
     await releaseLease("sender", owner);
   }
 }
 
-/**
- * Asks the production deployment for another burst (a separate invocation with a fresh time limit).
- * Uses PUBLIC_URL — the per-deployment VERCEL_URL can sit behind Deployment Protection.
- * Preview deployments never chain, so they can't drive sending.
- */
-async function requestNextBurst() {
-  if (process.env.VERCEL_ENV && process.env.VERCEL_ENV !== "production") return;
-  if (!env.CRON_SECRET) {
-    console.warn("[background] CRON_SECRET is not set; remaining messages wait for the next scheduled tick.");
-    return;
-  }
-  await fetch(`${env.PUBLIC_URL.replace(/\/$/, "")}/api/internal/tick`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${env.CRON_SECRET}` },
-  }).catch((err) => console.error("[background] couldn't request the next burst:", (err as Error).message));
-}
-
-/** Runs a burst after the current response is sent, and chains the next one if needed */
-export function runBurstInBackground() {
+/** Runs one non-recursive background cycle after a user-initiated HTTP response is sent */
+export function wakeServerlessSender() {
   waitUntil(
-    runBurst()
-      .then((result) => (result.more ? requestNextBurst() : undefined))
-      .catch((err) => console.error("[background] burst failed:", (err as Error).message))
+    runSenderCycle().catch((err) => console.error("[background] sender cycle failed:", (err as Error).message))
   );
 }
 
-/** Call after anything that creates sendable work. No-op on self-hosted servers (the loop handles it). */
+/** Call after user actions that create sendable work (start, resume, retry). No-op on self-hosted servers. */
 export function kickBackground() {
-  if (isServerless) runBurstInBackground();
+  if (isServerless) wakeServerlessSender();
 }

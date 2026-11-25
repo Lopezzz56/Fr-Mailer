@@ -543,6 +543,9 @@ export interface CampaignRecipientStateDto {
 export const DeliveryStatusSchema = z.enum(["PENDING", "CLAIMED", "SENT", "FAILED", "UNKNOWN", "SKIPPED", "CANCELLED"]);
 export type DeliveryStatus = z.infer<typeof DeliveryStatusSchema>;
 
+export const DEFAULT_SEND_RATE_PER_MINUTE = 10;
+export const MAX_MAILBOX_SEND_RATE_PER_MINUTE = 10;
+
 export const CampaignInputSchema = z.object({
   name: z.string().trim().min(1, "Name is required").max(100),
   description: optionalText(500),
@@ -567,7 +570,7 @@ export const CampaignInputSchema = z.object({
     .optional()
     .nullable()
     .or(z.literal("").transform(() => null)),
-  sendRatePerMinute: z.coerce.number().int().min(1).max(120).default(20),
+  sendRatePerMinute: z.coerce.number().int().min(1).max(120).default(DEFAULT_SEND_RATE_PER_MINUTE),
   automationMode: CampaignAutomationModeSchema.default("APPROVAL_REQUIRED"),
   sequenceSteps: z.array(SequenceStepInputSchema).optional(),
   templates: z
@@ -1108,6 +1111,17 @@ export const UpdateMailboxUserInputSchema = z.object({
 });
 export type UpdateMailboxUserInput = z.infer<typeof UpdateMailboxUserInputSchema>;
 
+export interface MailboxBudgetUsageDto {
+  mailboxId: string | null;
+  email: string;
+  fromName: string;
+  sentLast24h: number;
+  dailyLimit: number;
+  remainingBudget: number;
+  activeCampaigns: number;
+  pendingSends: number;
+}
+
 export interface MailboxStatusDto {
   smtp: { configured: boolean; host: string | null; port: number; secure: boolean; user: string | null; fromEmail: string | null; fromName: string };
   imap: {
@@ -1127,6 +1141,7 @@ export interface MailboxStatusDto {
   };
   accessibleMailboxes?: UserAccessibleMailboxDto[];
   allMailboxes?: MailboxAccountDto[];
+  mailboxesUsage?: MailboxBudgetUsageDto[];
   liveSendingEnabled: boolean;
   liveSendingBlocker: string | null;
   dailyLimit: number;

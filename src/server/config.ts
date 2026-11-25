@@ -50,8 +50,10 @@ const EnvSchema = z.object({
 
   // Safety lock: approved campaigns cannot start sending unless this is true
   ALLOW_LIVE_SENDING: envBoolean.default("false"),
-  // Mailbox-wide cap on messages sent in any rolling 24 hours
+  // Per-mailbox safety cap on messages sent in any rolling 24 hours
   DAILY_SEND_LIMIT: z.coerce.number().int().positive().default(300),
+  // Per-mailbox pacing cap in emails per minute (shared across all campaigns using that mailbox)
+  MAILBOX_MAX_SEND_RATE_PER_MINUTE: z.coerce.number().int().min(1).max(60).default(10),
 
   // SpaceMail IMAP — bounce and reply detection (read-only)
   IMAP_HOST: optionalString,

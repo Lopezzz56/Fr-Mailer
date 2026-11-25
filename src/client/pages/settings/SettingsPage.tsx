@@ -800,14 +800,46 @@ function MailboxTab() {
                   : (m.liveSendingBlocker || "Live sending is locked. Test emails can still be sent.")}
               </span>
             </div>
-            <div>
-              <div className="mb-1.5 flex justify-between text-[13px]">
-                <span className="text-ink-muted">Sent in the last 24 hours</span>
-                <span className="tabular text-ink">{num(m.sentLast24h)} of {num(m.dailyLimit)}</span>
+            {m.mailboxesUsage && m.mailboxesUsage.length > 0 ? (
+              <div className="space-y-4">
+                <div className="text-xs font-medium text-ink-muted">
+                  Rolling 24-hour sending budget (independent 300/24h limit per sending mailbox)
+                </div>
+                {m.mailboxesUsage.map((mb) => (
+                  <div key={mb.mailboxId ?? mb.email} className="rounded-lg border border-line bg-surface-muted/30 p-3 space-y-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[13px]">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-medium text-ink truncate">{mb.email}</span>
+                        {mb.activeCampaigns > 0 && (
+                          <Badge tone="neutral">{mb.activeCampaigns} active</Badge>
+                        )}
+                      </div>
+                      <span className="tabular text-ink text-xs font-medium">
+                        {num(mb.sentLast24h)} / {num(mb.dailyLimit)} sent · {num(mb.remainingBudget)} remaining
+                      </span>
+                    </div>
+                    <ProgressBar
+                      segments={[
+                        { value: mb.sentLast24h, className: "bg-brand", label: "Sent" },
+                        { value: mb.remainingBudget, className: "bg-transparent", label: "Remaining" },
+                      ]}
+                    />
+                  </div>
+                ))}
+                <p className="text-xs text-ink-subtle">
+                  When a mailbox reaches its 300/24h safety limit, that mailbox pauses automatically while other mailboxes continue unaffected.
+                </p>
               </div>
-              <ProgressBar segments={[{ value: m.sentLast24h, className: "bg-brand", label: "Sent" }, { value: Math.max(0, m.dailyLimit - m.sentLast24h), className: "bg-transparent", label: "Remaining" }]} />
-              <p className="mt-1.5 text-xs text-ink-subtle">When the daily limit is reached, sending waits and continues automatically.</p>
-            </div>
+            ) : (
+              <div>
+                <div className="mb-1.5 flex justify-between text-[13px]">
+                  <span className="text-ink-muted">Sent in the last 24 hours (per mailbox)</span>
+                  <span className="tabular text-ink">{num(m.sentLast24h)} of {num(m.dailyLimit)}</span>
+                </div>
+                <ProgressBar segments={[{ value: m.sentLast24h, className: "bg-brand", label: "Sent" }, { value: Math.max(0, m.dailyLimit - m.sentLast24h), className: "bg-transparent", label: "Remaining" }]} />
+                <p className="mt-1.5 text-xs text-ink-subtle">When a mailbox reaches its 24h limit, sending waits and continues automatically.</p>
+              </div>
+            )}
           </div>
         </Panel>
       )}
