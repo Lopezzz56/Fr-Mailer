@@ -7,6 +7,7 @@ import { Router, type Request } from "express";
 import { env, isServerless } from "../config.js";
 import { AppError, asyncHandler } from "../middleware/error-handler.js";
 import { runSenderCycle, wakeServerlessSender } from "../services/background.js";
+import { hasEligiblePendingWork } from "../services/send-worker.js";
 
 export const internalRouter = Router();
 
@@ -33,6 +34,21 @@ internalRouter.all(
           ran: false,
           started: false,
           reason: "This server runs a continuous worker; ticks aren't needed.",
+        },
+      });
+    }
+    const startedAt = Date.now();
+    if (!(await hasEligiblePendingWork())) {
+      return res.json({
+        success: true,
+        data: {
+          ran: false,
+          reason: "No eligible pending work.",
+          totalSent: 0,
+          handled: 0,
+          inboxChecked: false,
+          durationMs: Date.now() - startedAt,
+          mailboxes: [],
         },
       });
     }

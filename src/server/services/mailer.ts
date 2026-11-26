@@ -1,6 +1,7 @@
 // Outgoing mail transport (SpaceMail SMTP via nodemailer), behind an interface so tests can use a fake.
 import nodemailer, { type Transporter } from "nodemailer";
-import { env, smtpConfigured } from "../config.js";
+import { waitUntil } from "@vercel/functions";
+import { env, isServerless, smtpConfigured } from "../config.js";
 
 export interface OutgoingMessage {
   to: string;
@@ -99,21 +100,14 @@ class SmtpTransport implements MailTransport {
     };
     const info = await this.transporter.sendMail(mailOptions);
 
-    // Auto-save copy to IMAP Sent folder so it appears in Outlook / webmail
+    // Auto-save copy to IMAP Sent folder in the background (best-effort, serialized per mailbox)
     const imapHost = this.mailbox?.imapHost || env.IMAP_HOST || (env.SMTP_HOST?.includes("spacemail.com") ? "mail.spacemail.com" : env.SMTP_HOST);
     const imapUser = this.mailbox?.email || env.IMAP_USER || env.SMTP_USER || env.SMTP_FROM_EMAIL;
     const imapPass = this.mailbox?.password || env.IMAP_PASS || env.SMTP_PASS;
     const imapPort = this.mailbox?.imapPort || env.IMAP_PORT || 993;
 
     if (imapHost && imapUser && imapPass) {
-      try {
-        await Promise.race([
-          appendToSent(mailOptions, { host: imapHost, port: imapPort, user: imapUser, pass: imapPass }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("IMAP append timeout (6s)")), 6000)),
-        ]);
-      } catch (err) {
-        console.warn("[mailer] Could not append to Sent folder:", (err as Error).message);
-      }
+      void enqueueAppendToSent(mailOptions, { host: imapHost, port: imapPort, user: imapUser, pass: imapPass });
     }
 
     return { response: String(info.response ?? "") };
@@ -174,6 +168,66 @@ export function closeTransport(accountId?: string) {
 /** Domain used for our Message-IDs, so replies and bounces can be matched back */
 export function messageIdDomain(senderEmail?: string): string {
   return ((senderEmail || env.SMTP_USER || env.SMTP_FROM_EMAIL)?.split("@")[1] ?? "focusrealm.local").toLowerCase();
+}
+
+const SENT_APPEND_TIMEOUT_MS = 6_000;
+const sentAppendQueues = new Map<string, Promise<void>>();
+
+export type SentAppender = (
+  mailOptions: Record<string, unknown>,
+  credentials: { host: string; port: number; user: string; pass: string }
+) => Promise<void>;
+
+let sentAppenderOverride: SentAppender | null = null;
+
+/** Tests can swap the IMAP Sent-folder appender */
+export function setSentAppender(appender: SentAppender | null) {
+  sentAppenderOverride = appender;
+}
+
+function runAppendWithTimeout(
+  mailOptions: Record<string, unknown>,
+  credentials: { host: string; port: number; user: string; pass: string }
+): Promise<void> {
+  const appender = sentAppenderOverride ?? appendToSent;
+  let timer: NodeJS.Timeout | null = null;
+  return Promise.race([
+    appender(mailOptions, credentials).finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    new Promise<void>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("IMAP append timeout (6s)")), SENT_APPEND_TIMEOUT_MS);
+    }),
+  ]);
+}
+
+/**
+ * Enqueues a best-effort IMAP Sent-folder append serialized per mailbox.
+ * Never rejects; failures and 6s timeouts only log a warning.
+ */
+export function enqueueAppendToSent(
+  mailOptions: Record<string, unknown>,
+  credentials: { host: string; port: number; user: string; pass: string }
+): Promise<void> {
+  const mailboxKey = credentials.user.toLowerCase();
+  const prev = sentAppendQueues.get(mailboxKey) ?? Promise.resolve();
+  const next = prev
+    .catch(() => undefined)
+    .then(() => runAppendWithTimeout(mailOptions, credentials))
+    .catch((err) => {
+      console.warn("[mailer] Could not append to Sent folder:", (err as Error).message);
+    })
+    .finally(() => {
+      if (sentAppendQueues.get(mailboxKey) === next) {
+        sentAppendQueues.delete(mailboxKey);
+      }
+    });
+
+  sentAppendQueues.set(mailboxKey, next);
+  if (isServerless) {
+    waitUntil(next);
+  }
+  return next;
 }
 
 /** Appends a message copy to the IMAP Sent mailbox using ImapFlow */

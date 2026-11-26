@@ -404,6 +404,129 @@ export async function hasQueuedWork(): Promise<boolean> {
   return Boolean(next);
 }
 
+/**
+ * Lightweight pre-flight check for `/api/internal/tick`:
+ * Returns true only if there is at least one due, approved/automatic PENDING send
+ * on a SENDING campaign whose mailbox has remaining 24h budget and whose recipient
+ * is not suppressed, replied, or in a terminal sequence state.
+ * Never acquires a lease, never starts SendWorker, and never triggers IMAP sync.
+ */
+export async function hasEligiblePendingWork(
+  dailyLimitPerMailbox = env.DAILY_SEND_LIMIT,
+  nowMs = Date.now()
+): Promise<boolean> {
+  if (liveSendingBlocker()) return false;
+
+  const nowDate = new Date(nowMs);
+  const campaigns = await prisma.campaign.findMany({
+    where: { status: "SENDING" },
+    select: {
+      id: true,
+      fromName: true,
+      fromEmail: true,
+      createdById: true,
+      mailboxId: true,
+    },
+  });
+  if (!campaigns.length) return false;
+
+  const campaignIds = campaigns.map((c) => c.id);
+  const dueGrouped = await prisma.send.groupBy({
+    by: ["campaignId"],
+    where: {
+      campaignId: { in: campaignIds },
+      status: "PENDING",
+      OR: [{ scheduledFor: null }, { scheduledFor: { lte: nowDate } }],
+      AND: [
+        {
+          OR: [{ approvedAt: { not: null } }, { campaign: { automationMode: "AUTOMATIC" } }],
+        },
+      ],
+    },
+    _count: { _all: true },
+  });
+
+  const dueCampaignIds = dueGrouped.filter((g) => g._count._all > 0).map((g) => g.campaignId);
+  if (!dueCampaignIds.length) return false;
+
+  const campaignMap = new Map(campaigns.map((c) => [c.id, c]));
+  const ctx = await loadMailboxLookupContext();
+  const usageByMailbox = await getRolling24hUsageByMailbox(ctx, nowMs, campaignMap);
+
+  const budgetedCampaignIds = dueCampaignIds.filter((cid) => {
+    const c = campaignMap.get(cid);
+    if (!c) return false;
+    const identity = resolveCampaignMailboxIdentity(c, ctx);
+    return (usageByMailbox.get(identity.key) ?? 0) < dailyLimitPerMailbox;
+  });
+  if (!budgetedCampaignIds.length) return false;
+
+  const candidates = await prisma.send.findMany({
+    where: {
+      campaignId: { in: budgetedCampaignIds },
+      status: "PENDING",
+      OR: [{ scheduledFor: null }, { scheduledFor: { lte: nowDate } }],
+      AND: [
+        {
+          OR: [{ approvedAt: { not: null } }, { campaign: { automationMode: "AUTOMATIC" } }],
+        },
+      ],
+    },
+    orderBy: [{ stepIndex: "asc" }, { scheduledFor: "asc" }, { createdAt: "asc" }],
+    take: 50,
+    select: { campaignId: true, email: true, stepIndex: true },
+  });
+  if (!candidates.length) return false;
+
+  const emails = Array.from(new Set(candidates.map((s) => s.email)));
+  const followUpCandidates = candidates.filter((s) => s.stepIndex > 0);
+  const followUpCampaignIds = Array.from(new Set(followUpCandidates.map((s) => s.campaignId)));
+  const followUpEmails = Array.from(new Set(followUpCandidates.map((s) => s.email)));
+
+  const [suppressions, recipientStates, priorReplies] = await Promise.all([
+    prisma.suppressionEntry.findMany({
+      where: {
+        email: { in: emails },
+        OR: [{ expiresAt: null }, { expiresAt: { gt: nowDate } }],
+      },
+      select: { email: true },
+    }),
+    followUpCampaignIds.length
+      ? prisma.campaignRecipientState.findMany({
+          where: {
+            campaignId: { in: followUpCampaignIds },
+            email: { in: followUpEmails },
+            state: { in: ["PAUSED", "CANCELLED", "BOUNCED", "SUPPRESSED", "REPLY_RECEIVED"] },
+          },
+          select: { campaignId: true, email: true },
+        })
+      : Promise.resolve([]),
+    followUpCampaignIds.length
+      ? prisma.send.findMany({
+          where: {
+            campaignId: { in: followUpCampaignIds },
+            email: { in: followUpEmails },
+            repliedAt: { not: null },
+          },
+          select: { campaignId: true, email: true },
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const suppressedSet = new Set(suppressions.map((s) => s.email.toLowerCase()));
+  const blockedRecipientKeys = new Set([
+    ...recipientStates.map((r) => `${r.campaignId}:${r.email.toLowerCase()}`),
+    ...priorReplies.map((r) => `${r.campaignId}:${r.email.toLowerCase()}`),
+  ]);
+
+  return candidates.some((s) => {
+    const emailLower = s.email.toLowerCase();
+    if (suppressedSet.has(emailLower)) return false;
+    if (s.stepIndex > 0 && blockedRecipientKeys.has(`${s.campaignId}:${emailLower}`)) return false;
+    return true;
+  });
+}
+
 async function claimNext(campaignId: string): Promise<ClaimedSend | null> {
   const rows = await prisma.$queryRaw<ClaimedSend[]>`
     UPDATE sends

@@ -7,8 +7,9 @@ import * as personalMailbox from "./personal-mailbox.js";
 import * as inboxMonitor from "./inbox-monitor.js";
 import * as sequenceService from "./sequence-service.js";
 import * as config from "../config.js";
+import * as background from "./background.js";
 import { SendWorker, acquireLease, releaseLease, sentInLast24hForCampaign } from "./send-worker.js";
-import { runSenderCycle } from "./background.js";
+import { runSenderCycle, kickBackground } from "./background.js";
 import { internalRouter } from "../routes/internal.js";
 import { errorHandler } from "../middleware/error-handler.js";
 
@@ -119,7 +120,30 @@ function setupInMemoryStore(initialNow: number) {
   }) as any);
 
   vi.spyOn(prisma.suppressionEntry, "findUnique").mockResolvedValue(null);
+  vi.spyOn(prisma.suppressionEntry, "findMany").mockResolvedValue([]);
   vi.spyOn(prisma.campaignRecipientState, "count").mockResolvedValue(0);
+  vi.spyOn(prisma.campaignRecipientState, "findMany").mockResolvedValue([]);
+
+  vi.spyOn(prisma.send, "findMany").mockImplementation((async (args: any) => {
+    const w = args?.where ?? {};
+    let res = sends.filter((s) => {
+      if (w.campaignId?.in && !w.campaignId.in.includes(s.campaignId)) return false;
+      if (w.status && s.status !== w.status) return false;
+      if (w.email?.in && !w.email.in.includes(s.email)) return false;
+      if (w.repliedAt?.not === null && s.repliedAt === null) return false;
+      if (w.OR) {
+        const dueOk = w.OR.some((o: any) => (o.scheduledFor === null && s.scheduledFor === null) || (o.scheduledFor?.lte && s.scheduledFor && s.scheduledFor <= o.scheduledFor.lte));
+        if (!dueOk) return false;
+      }
+      if (w.AND) {
+        const approvedOk = s.approvedAt !== null || campaigns.find((c) => c.id === s.campaignId)?.automationMode === "AUTOMATIC";
+        if (!approvedOk) return false;
+      }
+      return true;
+    });
+    if (args?.take) res = res.slice(0, args.take);
+    return res;
+  }) as any);
 
   vi.spyOn(prisma.send, "count").mockImplementation((async (args: any) => {
     const w = args?.where ?? {};
@@ -756,6 +780,147 @@ describe("Multi-Mailbox Worker, Per-Mailbox Budgets & Vercel Wake-up Architectur
       } finally {
         (config.env as any).IMAP_POLL_ENABLED = prevPoll;
       }
+    });
+  });
+
+  describe("5. Queue-Aware /api/internal/tick Dispatcher", () => {
+    async function withTickServer(fn: (baseUrl: string) => Promise<void>) {
+      vi.spyOn(config, "isServerless", "get").mockReturnValue(true);
+      const prevCron = config.env.CRON_SECRET;
+      (config.env as any).CRON_SECRET = "test-cron-secret-123";
+      const app = express();
+      app.use("/api/internal", internalRouter);
+      app.use(errorHandler);
+      const server = app.listen(0);
+      const port = (server.address() as AddressInfo).port;
+      try {
+        await fn(`http://127.0.0.1:${port}`);
+      } finally {
+        (config.env as any).CRON_SECRET = prevCron;
+        server.close();
+      }
+    }
+
+    it("1. returns quickly without acquiring lease, syncing IMAP, or starting worker when there is no eligible pending work", async () => {
+      setupInMemoryStore(Date.now());
+      const cycleSpy = vi.spyOn(background, "runSenderCycle");
+      const queryRawSpy = vi.spyOn(prisma, "$queryRaw");
+
+      await withTickServer(async (url) => {
+        const res = await fetch(`${url}/api/internal/tick`, {
+          method: "POST",
+          headers: { Authorization: "Bearer test-cron-secret-123" },
+        });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as any;
+        expect(body.data.ran).toBe(false);
+        expect(body.data.reason).toMatch(/No eligible pending work/i);
+        expect(cycleSpy).not.toHaveBeenCalled();
+        expect(inboxMonitor.anyInboxDue).not.toHaveBeenCalled();
+        expect(queryRawSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    it("2. returns quickly when only future scheduled sends exist", async () => {
+      const store = setupInMemoryStore(Date.now());
+      store.addMailbox("mb-a", "a@focusrealm.org", "Mailbox A");
+      store.addCampaign("camp-a", "mb-a", { sendRatePerMinute: 10 });
+      store.addPendingSend("s-future", "camp-a", "future@hotel.com", {
+        scheduledFor: new Date(store.getNow() + 3_600_000),
+      });
+
+      const cycleSpy = vi.spyOn(background, "runSenderCycle");
+      await withTickServer(async (url) => {
+        const res = await fetch(`${url}/api/internal/tick`, {
+          method: "POST",
+          headers: { Authorization: "Bearer test-cron-secret-123" },
+        });
+        const body = (await res.json()) as any;
+        expect(body.data.ran).toBe(false);
+        expect(cycleSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    it("3 & 4. starts worker once when eligible pending sends exist across one or multiple mailboxes", async () => {
+      const store = setupInMemoryStore(Date.now());
+      store.addMailbox("mb-a", "a@focusrealm.org", "Mailbox A");
+      store.addMailbox("mb-b", "b@focusrealm.org", "Mailbox B");
+      store.addCampaign("camp-a", "mb-a", { sendRatePerMinute: 10 });
+      store.addCampaign("camp-b", "mb-b", { sendRatePerMinute: 10 });
+      store.addPendingSend("sa-1", "camp-a", "a1@hotel.com");
+      store.addPendingSend("sb-1", "camp-b", "b1@hotel.com");
+
+      const cycleSpy = vi.spyOn(background, "runSenderCycle");
+      await withTickServer(async (url) => {
+        const res = await fetch(`${url}/api/internal/tick`, {
+          method: "POST",
+          headers: { Authorization: "Bearer test-cron-secret-123" },
+        });
+        const body = (await res.json()) as any;
+        expect(body.data.ran).toBe(true);
+        expect(body.data.totalSent).toBe(2);
+        expect(cycleSpy).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it("5. concurrent ticks remain protected by the existing global sender lease", async () => {
+      const store = setupInMemoryStore(Date.now());
+      store.addMailbox("mb-a", "a@focusrealm.org", "Mailbox A");
+      store.addCampaign("camp-a", "mb-a", { sendRatePerMinute: 10 });
+      store.addPendingSend("sa-1", "camp-a", "a1@hotel.com");
+
+      const held = await acquireLease("sender", 60_000);
+      expect(held).toBeTruthy();
+
+      await withTickServer(async (url) => {
+        const res = await fetch(`${url}/api/internal/tick`, {
+          method: "POST",
+          headers: { Authorization: "Bearer test-cron-secret-123" },
+        });
+        const body = (await res.json()) as any;
+        expect(body.data.ran).toBe(false);
+        expect(body.data.reason).toMatch(/already running/i);
+        expect(store.sentMessages).toHaveLength(0);
+      });
+
+      await releaseLease("sender", held!);
+    });
+
+    it("6 & 7. paused/completed campaigns and approval-blocked follow-ups do not wake the worker", async () => {
+      const store = setupInMemoryStore(Date.now());
+      store.addMailbox("mb-a", "a@focusrealm.org", "Mailbox A");
+      store.addCampaign("camp-paused", "mb-a", { status: "PAUSED" });
+      store.addCampaign("camp-done", "mb-a", { status: "COMPLETED" });
+      store.addCampaign("camp-sending", "mb-a", { status: "SENDING", automationMode: "APPROVAL_REQUIRED" });
+
+      store.addPendingSend("sp-1", "camp-paused", "p@hotel.com");
+      store.addPendingSend("sd-1", "camp-done", "d@hotel.com");
+      store.addPendingSend("sfu-1", "camp-sending", "fu@hotel.com", { stepIndex: 1, approvedAt: null });
+
+      const cycleSpy = vi.spyOn(background, "runSenderCycle");
+      await withTickServer(async (url) => {
+        const res = await fetch(`${url}/api/internal/tick`, {
+          method: "POST",
+          headers: { Authorization: "Bearer test-cron-secret-123" },
+        });
+        const body = (await res.json()) as any;
+        expect(body.data.ran).toBe(false);
+        expect(cycleSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    it("8. existing manual kickBackground() still triggers immediate sending on serverless", async () => {
+      const store = setupInMemoryStore(Date.now());
+      store.addMailbox("mb-a", "a@focusrealm.org", "Mailbox A");
+      store.addCampaign("camp-a", "mb-a", { sendRatePerMinute: 10 });
+      store.addPendingSend("s-1", "camp-a", "manual@hotel.com");
+
+      vi.spyOn(config, "isServerless", "get").mockReturnValue(true);
+
+      kickBackground();
+      await vi.waitFor(() => {
+        expect(store.sentMessages.map((m) => m.to)).toEqual(["manual@hotel.com"]);
+      });
     });
   });
 });
