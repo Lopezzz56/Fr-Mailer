@@ -26,13 +26,12 @@ export function unsubscribeUrl(sendId: string): string {
 }
 
 /** Appends the unsubscribe footer; called once at approval so stored content == delivered content */
-export function withFooter(html: string, text: string, url: string, senderName: string): { html: string; text: string } {
+export function withFooter(html: string, text: string, url: string, _senderName: string): { html: string; text: string } {
   const footerHtml =
-    `<div style="margin-top:32px;padding-top:16px;border-top:1px solid #DCE4F0;font-family:Arial,sans-serif;font-size:12px;line-height:18px;color:#64748B">` +
-    `You received this email from ${escapeHtml(senderName)}. ` +
-    `<a href="${escapeHtml(url)}" style="color:#64748B;text-decoration:underline">Unsubscribe</a> to stop receiving these emails.` +
+    `<div style="margin-top:24px;font-size:12px;line-height:18px;color:#64748B">` +
+    `If you'd prefer not to hear from me, you can <a href="${escapeHtml(url)}" style="color:#64748B;text-decoration:underline">opt out</a>.` +
     `</div>`;
-  const footerText = `\n\n--\nYou received this email from ${senderName}. Unsubscribe: ${url}`;
+  const footerText = `\n\nIf you'd prefer not to hear from me, you can opt out: ${url}`;
 
   const bodyClose = html.search(/<\/body>/i);
   const nextHtml = bodyClose === -1 ? html + footerHtml : html.slice(0, bodyClose) + footerHtml + html.slice(bodyClose);

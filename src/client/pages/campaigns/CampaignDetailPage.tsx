@@ -312,8 +312,11 @@ export function CampaignDetailPage() {
     }
   })();
 
+  const uniqueRecipients = c.counts.uniqueRecipients ?? c.counts.total;
+  const stepCount = c.sequenceSteps?.length ?? 1;
+
   const tabs = [
-    ...(preApproval ? [{ key: "review" as const, label: "Review" }] : [{ key: "recipients" as const, label: "Recipients", count: c.counts.total }]),
+    ...(preApproval ? [{ key: "review" as const, label: "Review" }] : [{ key: "recipients" as const, label: "Recipients", count: uniqueRecipients }]),
     { key: "templates" as const, label: "Templates & Rules", count: (c.templates?.length ?? 1) },
     ...(!preApproval ? [{ key: "analytics" as const, label: "Performance & Analytics" }] : []),
     ...(!preApproval ? [{ key: "content" as const, label: "Approved content" }] : []),
@@ -452,12 +455,12 @@ export function CampaignDetailPage() {
                 {c.status === "SENDING" && c.counts.pending > 0 && <p className="mt-2 text-xs text-ink-subtle">Sending at up to {effectiveRate} emails/minute (300/24h per-mailbox safety limit).</p>}
               </div>
               <div className="grid grid-cols-3 gap-6 sm:grid-cols-6">
-                <Stat label="Sent" value={num(c.counts.sent)} hint={`of ${num(deliverable)}`} />
-                <Stat label="Queued" value={num(c.counts.pending)} />
-                <Stat label="Failed" value={num(c.counts.failed)} tone={c.counts.failed ? "danger" : "default"} />
-                <Stat label="Replied" value={num(c.counts.replied)} tone={c.counts.replied ? "success" : "default"} />
-                <Stat label="Bounced" value={num(c.counts.bounced)} tone={c.counts.bounced ? "warning" : "default"} />
-                <Stat label="Unsubscribed" value={num(c.counts.unsubscribed)} />
+                <Stat label="Unique Recipients" value={num(uniqueRecipients)} hint={`${stepCount} step${stepCount === 1 ? "" : "s"}`} />
+                <Stat label="Emails Sent" value={num(c.counts.sent)} hint={`of ${num(deliverable)} touches`} />
+                <Stat label="Queued Touches" value={num(c.counts.pending)} />
+                <Stat label="Unique Repliers" value={num(c.counts.uniqueReplied ?? c.counts.replied)} tone={(c.counts.uniqueReplied ?? c.counts.replied) ? "success" : "default"} />
+                <Stat label="Bounced" value={num(c.counts.uniqueBounced ?? c.counts.bounced)} tone={(c.counts.uniqueBounced ?? c.counts.bounced) ? "warning" : "default"} />
+                <Stat label="Unsubscribed" value={num(c.counts.uniqueUnsubscribed ?? c.counts.unsubscribed)} />
               </div>
             </div>
           </Panel>

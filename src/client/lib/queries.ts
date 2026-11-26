@@ -4,6 +4,7 @@ import { api, qs } from "./api";
 import type {
   ActivityDto,
   CampaignDetailDto,
+  CampaignRecipientsResponseDto,
   CampaignReviewDto,
   CampaignStatus,
   CampaignSummaryDto,
@@ -42,6 +43,7 @@ export const keys = {
   campaign: (id: string) => ["campaigns", "detail", id] as const,
   review: (id: string) => ["campaigns", "review", id] as const,
   sends: (id: string, p: Record<string, unknown>) => ["campaigns", "sends", id, p] as const,
+  recipients: (id: string, p: Record<string, unknown>) => ["campaigns", "recipients", id, p] as const,
   suppressions: (p: Record<string, unknown>) => ["suppressions", p] as const,
   enrichment: (contactId: string) => ["enrichment", contactId] as const,
   mailbox: ["mailbox"] as const,
@@ -165,6 +167,27 @@ export const useSends = (
     queryFn: () =>
       api.get<SendDto[]>(
         `/api/campaigns/${id}/sends${qs({
+          page: p.page,
+          pageSize: 25,
+          filter: p.filter === "all" ? undefined : p.filter,
+          conversationStatus: p.conversationStatus === "all" ? undefined : p.conversationStatus,
+          search: p.search,
+        })}`
+      ),
+    placeholderData: keepPreviousData,
+    refetchInterval: live ? 4000 : false,
+  });
+
+export const useCampaignRecipients = (
+  id: string,
+  p: { page: number; filter: string; conversationStatus?: string; search: string },
+  live: boolean
+) =>
+  useQuery({
+    queryKey: keys.recipients(id, p),
+    queryFn: () =>
+      api.get<CampaignRecipientsResponseDto>(
+        `/api/campaigns/${id}/recipients${qs({
           page: p.page,
           pageSize: 25,
           filter: p.filter === "all" ? undefined : p.filter,

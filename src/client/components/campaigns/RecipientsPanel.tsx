@@ -2,19 +2,25 @@
 import { useState, useEffect } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
+  AlertTriangle,
   CheckCircle,
+  ChevronDown,
+  ChevronRight,
   Clock,
   Download,
   Mail,
+  MessageSquare,
   Pause,
   Play,
   Square,
+  XCircle,
 } from "lucide-react";
 import {
   RECIPIENT_SEQUENCE_STATE_LABELS,
   CONVERSATION_STATUS_LABELS,
   CONVERSATION_STATUS_TONES,
   type CampaignCounts,
+  type CampaignRecipientSummaryDto,
   type SendDto,
   type CampaignRecipientStateDto,
   type RecipientSequenceState,
@@ -22,7 +28,7 @@ import {
   type ConversationStatus,
 } from "@shared/types";
 import { api, errorMessage } from "../../lib/api";
-import { useInvalidate, useSends, useCampaignConversationCounts, type SendDetail } from "../../lib/queries";
+import { useInvalidate, useCampaignRecipients, type SendDetail } from "../../lib/queries";
 import { useDebounced } from "../../lib/hooks";
 import { useAuth } from "../../lib/auth";
 import { formatDateTime } from "../../lib/format";
@@ -683,6 +689,104 @@ function SendDrawer({ campaignId, sendId, fromLine, onClose }: { campaignId: str
   );
 }
 
+function RecipientTimeline({
+  recipient,
+  onOpenSend,
+}: {
+  recipient: CampaignRecipientSummaryDto;
+  onOpenSend: (sendId: string) => void;
+}) {
+  const conv = recipient.currentConversation;
+  return (
+    <div className="space-y-3 py-1">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-3 text-xs">
+          <span className="font-semibold text-ink">
+            {[recipient.contact?.firstName, recipient.contact?.lastName].filter(Boolean).join(" ") || recipient.email}
+            {recipient.contact?.company ? ` / ${recipient.contact.company}` : ""}
+          </span>
+          <span className="text-ink-subtle">Progress: <strong className="text-ink">{recipient.progressLabel}</strong></span>
+          <span className="text-ink-subtle">
+            Conversation:{" "}
+            <strong className="text-ink">
+              {conv ? CONVERSATION_STATUS_LABELS[conv.status] ?? conv.status : "No conversation"}
+            </strong>
+          </span>
+        </div>
+        <Button size="sm" variant="secondary" onClick={() => onOpenSend(recipient.primarySendId)}>
+          {conv ? "Open reply & actions" : "Open email & sequence"}
+        </Button>
+      </div>
+
+      <ol className="space-y-1.5 border-l-2 border-line pl-3 ml-1">
+        {recipient.timeline.map((step) => {
+          const isSent = step.status === "SENT";
+          const isCancelled = step.status === "CANCELLED";
+          const isFailed = step.status === "FAILED";
+          const isAwaiting = step.status === "PENDING" && Boolean(step.scheduledFor) && !step.approvedAt;
+          const stepTitle = step.stepIndex === 0 ? "Step 1 (Initial)" : `Step ${step.stepIndex + 1}`;
+          return (
+            <li key={step.id} className="space-y-1">
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-xs">
+                <div className="flex items-center gap-2 min-w-0">
+                  {isSent ? (
+                    <CheckCircle className="h-3.5 w-3.5 text-success shrink-0" />
+                  ) : isCancelled || isFailed ? (
+                    <XCircle className="h-3.5 w-3.5 text-ink-subtle shrink-0" />
+                  ) : isAwaiting ? (
+                    <AlertTriangle className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+                  ) : (
+                    <Clock className="h-3.5 w-3.5 text-ink-subtle shrink-0" />
+                  )}
+                  <span className="font-semibold text-ink shrink-0">{stepTitle}</span>
+                  <DeliveryStatusBadge status={step.status} />
+                  {isAwaiting && <Badge tone="warning">Awaiting Approval</Badge>}
+                  {step.skipReason && <span className="text-ink-subtle truncate">— {step.skipReason}</span>}
+                  {!step.skipReason && step.lastError && (
+                    <span className="text-danger truncate">— {step.lastError}</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-3 shrink-0">
+                  <span className="text-[11px] text-ink-subtle">
+                    {step.sentAt
+                      ? formatDateTime(step.sentAt)
+                      : step.scheduledFor
+                      ? `Scheduled: ${formatDateTime(step.scheduledFor)}`
+                      : "Queued"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onOpenSend(step.id)}
+                    className="text-[11px] font-medium text-brand hover:underline"
+                  >
+                    Inspect
+                  </button>
+                </div>
+              </div>
+
+              {step.repliedAt && (
+                <div className="ml-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-brand/30 bg-brand-soft/20 px-3 py-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    <MessageSquare className="h-3.5 w-3.5 text-brand shrink-0" />
+                    <span className="font-semibold text-ink">Inbound Reply</span>
+                    {conv && (
+                      <Badge tone={CONVERSATION_STATUS_TONES[conv.status] ?? "neutral"}>
+                        {CONVERSATION_STATUS_LABELS[conv.status] ?? conv.status}
+                      </Badge>
+                    )}
+                    {conv?.snippet && <span className="text-ink-muted truncate max-w-md">"{conv.snippet}"</span>}
+                  </div>
+                  <span className="text-[11px] text-ink-subtle">{formatDateTime(step.repliedAt)}</span>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 export function RecipientsPanel({
   campaignId,
   counts,
@@ -709,10 +813,11 @@ export function RecipientsPanel({
   );
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
+  const [expandedEmail, setExpandedEmail] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
 
   const debouncedSearch = useDebounced(search);
-  const sends = useSends(
+  const recipientsQuery = useCampaignRecipients(
     campaignId,
     {
       page,
@@ -723,35 +828,28 @@ export function RecipientsPanel({
     live
   );
 
-  const convCountsQuery = useCampaignConversationCounts(campaignId);
+  const payload = recipientsQuery.data?.data;
+  const rows = payload?.items;
+  const deliveryCounts = payload?.deliveryCounts;
+  const convCountsData = payload?.conversationCounts;
 
   // Auto-open target recipient if supplied via URL
   useEffect(() => {
-    if (targetRecipient) {
-      const match = sends.data?.data.find(
-        (s) => s.email.toLowerCase() === targetRecipient.toLowerCase()
-      );
+    if (targetRecipient && rows) {
+      const match = rows.find((r) => r.email.toLowerCase() === targetRecipient.toLowerCase());
       if (match) {
-        setOpenId(match.id);
-      } else {
-        api
-          .get<SendDto[]>(
-            `/api/campaigns/${campaignId}/sends?search=${encodeURIComponent(targetRecipient)}&pageSize=1`
-          )
-          .then((res) => {
-            if (res.data?.[0]) setOpenId(res.data[0].id);
-          })
-          .catch(() => {});
+        setExpandedEmail(match.email);
+        setOpenId(match.primarySendId);
       }
     }
-  }, [targetRecipient, campaignId, sends.data]);
+  }, [targetRecipient, rows]);
 
   // Bulk actions
   const approveAll = useMutation({
     mutationFn: () => api.post<{ approvedCount: number }>(`/api/campaigns/${campaignId}/sends/approve-all`),
     onSuccess: async (res) => {
       await invalidate("campaigns", "overview");
-      await sends.refetch();
+      await recipientsQuery.refetch();
       toast.success("Follow-ups approved", `${res.data.approvedCount} due follow-up emails approved for dispatch.`);
     },
     onError: (err) => toast.error("Could not approve follow-ups", errorMessage(err)),
@@ -761,38 +859,32 @@ export function RecipientsPanel({
     mutationFn: () => api.post<{ cancelledSendsCount: number }>(`/api/campaigns/${campaignId}/sequence/stop-all`),
     onSuccess: async (res) => {
       await invalidate("campaigns", "overview");
-      await sends.refetch();
+      await recipientsQuery.refetch();
       toast.success("All follow-ups stopped", `${res.data.cancelledSendsCount} scheduled follow-ups cancelled.`);
     },
     onError: (err) => toast.error("Could not stop follow-ups", errorMessage(err)),
   });
 
-  // Query awaiting approval count
-  const awaitingQuery = useQuery({
-    queryKey: ["campaigns", campaignId, "awaiting-count"],
-    queryFn: () => api.get<SendDto[]>(`/api/campaigns/${campaignId}/sends?filter=awaiting_approval&pageSize=1`),
-    staleTime: 10000,
-  });
-  const awaitingCount = awaitingQuery.data?.pagination?.total ?? 0;
+  const awaitingRecipientCount = deliveryCounts?.awaiting_approval ?? 0;
 
   const deliveryOptions: { key: FilterKey; label: string; count?: number }[] = [
-    { key: "all", label: "All", count: counts.total },
-    { key: "scheduled", label: "Scheduled" },
-    { key: "pending", label: "Queued", count: counts.pending },
-    { key: "sent", label: "Sent", count: counts.sent },
-    { key: "failed", label: "Failed", count: counts.failed },
-    { key: "unknown", label: "Needs review", count: counts.unknown },
-    { key: "cancelled", label: "Cancelled", count: counts.cancelled },
-    { key: "replied", label: "Replied", count: counts.replied },
-    { key: "bounced", label: "Bounced", count: counts.bounced },
-    { key: "awaiting_approval", label: "Awaiting Approval", count: awaitingCount },
-    { key: "skipped", label: "Skipped", count: counts.skipped },
-    { key: "unsubscribed", label: "Unsubscribed", count: counts.unsubscribed },
+    { key: "all", label: "All Recipients", count: deliveryCounts?.all ?? counts.uniqueRecipients ?? counts.total },
+    { key: "scheduled", label: "Scheduled", count: deliveryCounts?.scheduled },
+    { key: "pending", label: "Queued", count: deliveryCounts?.pending },
+    { key: "sent", label: "Sent", count: deliveryCounts?.sent },
+    { key: "failed", label: "Failed", count: deliveryCounts?.failed },
+    { key: "unknown", label: "Needs review", count: deliveryCounts?.unknown },
+    { key: "cancelled", label: "Cancelled", count: deliveryCounts?.cancelled },
+    { key: "replied", label: "Replied", count: deliveryCounts?.replied },
+    { key: "bounced", label: "Bounced", count: deliveryCounts?.bounced },
+    { key: "awaiting_approval", label: "Awaiting Approval", count: awaitingRecipientCount },
+    { key: "skipped", label: "Skipped", count: deliveryCounts?.skipped },
+    { key: "unsubscribed", label: "Unsubscribed", count: deliveryCounts?.unsubscribed },
   ];
 
-  const convCounts = convCountsQuery.data?.counts;
+  const convCounts = convCountsData?.counts;
   const conversationOptions: { key: ConversationFilterKey; label: string; count?: number }[] = [
-    { key: "all", label: "All Conversations", count: convCountsQuery.data?.total },
+    { key: "all", label: "All Conversations", count: convCountsData?.total },
     { key: "NEEDS_REPLY", label: "Needs Reply", count: convCounts?.NEEDS_REPLY ?? 0 },
     { key: "MEETING_SCHEDULED", label: "Meeting Scheduled", count: convCounts?.MEETING_SCHEDULED ?? 0 },
     { key: "INTERESTED", label: "Interested", count: convCounts?.INTERESTED ?? 0 },
@@ -802,136 +894,125 @@ export function RecipientsPanel({
     { key: "CLOSED", label: "Closed", count: convCounts?.CLOSED ?? 0 },
   ];
 
-  const columns: Column<SendDto>[] = [
+  const columns: Column<CampaignRecipientSummaryDto>[] = [
     {
       key: "email",
       header: "Recipient",
-      cell: (s) => {
-        const name = [s.contact?.firstName, s.contact?.lastName].filter(Boolean).join(" ");
+      cell: (r) => {
+        const name = [r.contact?.firstName, r.contact?.lastName].filter(Boolean).join(" ");
+        const isExpanded = expandedEmail === r.email;
         return (
-          <div className="flex flex-col gap-0.5 min-w-0">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              {name ? (
+          <div className="flex items-start gap-2 min-w-0">
+            <span className="mt-0.5 text-ink-subtle shrink-0">
+              {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+            </span>
+            <div className="flex flex-col gap-0.5 min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="font-semibold text-ink text-xs truncate max-w-[200px] sm:max-w-none">
-                  {name}
+                  {name || r.email}
                 </span>
-              ) : (
-                <span className="font-medium text-ink text-xs truncate max-w-[200px] sm:max-w-none">
-                  {s.email}
-                </span>
-              )}
-              {s.isCustom && <Badge tone="neutral">Customized</Badge>}
-            </div>
-            <div className="flex items-center gap-1.5 text-2xs text-ink-subtle truncate">
-              {name && <span className="truncate">{s.email}</span>}
-              {name && s.contact?.company && <span>·</span>}
-              {s.contact?.company && <span className="truncate font-medium text-ink-muted">{s.contact.company}</span>}
-            </div>
-            <div className="flex items-center gap-2 sm:hidden text-2xs text-ink-subtle mt-0.5">
-              <span>{s.stepIndex === 0 ? "Initial" : `Step ${s.stepIndex ?? 1}`}</span>
-              {s.sentAt && <span>· {formatDateTime(s.sentAt)}</span>}
+              </div>
+              <div className="flex items-center gap-1.5 text-2xs text-ink-subtle truncate">
+                {name && <span className="truncate">{r.email}</span>}
+                {name && r.contact?.company && <span>·</span>}
+                {r.contact?.company && <span className="truncate font-medium text-ink-muted">{r.contact.company}</span>}
+              </div>
             </div>
           </div>
         );
       },
     },
     {
-      key: "step",
-      header: "Step",
-      headerClassName: "hidden sm:table-cell",
-      className: "hidden sm:table-cell",
-      cell: (s) => (
-        <div className="flex items-center gap-1">
-          <Badge tone={s.stepIndex === 0 ? "neutral" : "brand"}>
-            {s.stepIndex === 0 ? "Initial" : `Step ${s.stepIndex ?? 1}`}
-          </Badge>
-          {s.inReplyToId && (
-            <span
-              className="text-[10px] text-ink-subtle font-medium bg-surface-muted px-1 py-0.5 rounded"
-              title="Threaded in original conversation"
-            >
-              Re:
-            </span>
-          )}
+      key: "progress",
+      header: "Delivery & Progress",
+      cell: (r) => (
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {r.deliverySummary === "AWAITING_APPROVAL" ? (
+              <Badge tone="warning">Awaiting Approval</Badge>
+            ) : r.deliverySummary === "SCHEDULED" ? (
+              <Badge tone="neutral">Scheduled</Badge>
+            ) : (
+              <DeliveryStatusBadge status={r.deliverySummary} />
+            )}
+          </div>
+          <span className="text-2xs text-ink-subtle font-medium">{r.progressLabel}</span>
         </div>
       ),
-    },
-    {
-      key: "status",
-      header: "Delivery",
-      cell: (s) => {
-        const isAwaiting = s.status === "PENDING" && s.scheduledFor && !s.approvedAt;
-        return (
-          <div className="flex flex-col gap-0.5">
-            <DeliveryStatusBadge status={s.status} />
-            {isAwaiting && <Badge tone="warning">Awaiting Approval</Badge>}
-          </div>
-        );
-      },
     },
     {
       key: "conversation",
       header: "Conversation",
       headerClassName: "hidden sm:table-cell",
       className: "hidden sm:table-cell",
-      cell: (s) => {
-        const conv = s.conversation;
+      cell: (r) => {
+        const conv = r.currentConversation;
         if (!conv) {
-          return <span className="text-xs text-ink-subtle select-none">—</span>;
+          return <span className="text-xs text-ink-faint select-none">No conversation</span>;
         }
         const tone = CONVERSATION_STATUS_TONES[conv.status] ?? "neutral";
         const label = CONVERSATION_STATUS_LABELS[conv.status] ?? conv.status;
         return (
           <div className="flex items-center gap-1.5 flex-wrap">
             <Badge tone={tone}>{label}</Badge>
+            {r.conversationCount > 1 && (
+              <span className="text-[10px] text-ink-subtle font-medium" title="Multiple threads">
+                +{r.conversationCount - 1}
+              </span>
+            )}
           </div>
         );
       },
     },
     {
-      key: "detail",
-      header: "Details",
+      key: "lastActivity",
+      header: "Last Activity",
       headerClassName: "hidden md:table-cell",
       className: "hidden md:table-cell",
-      cell: (s) => {
-        const conv = s.conversation;
-        const text =
-          conv?.outcome ??
-          (s.status === "PENDING" && s.scheduledFor
-            ? `Due: ${formatDateTime(s.scheduledFor)}`
-            : s.skipReason ?? s.lastError ?? "");
-        return (
-          <span className="line-clamp-1 max-w-xs text-xs text-ink-subtle" title={text}>
-            {text || "—"}
-          </span>
-        );
-      },
+      cell: (r) => (
+        <div className="text-xs">
+          <div className="font-medium text-ink">{r.lastActivityLabel}</div>
+          {r.lastActivityAt && (
+            <div className="text-2xs text-ink-subtle">{formatDateTime(r.lastActivityAt)}</div>
+          )}
+        </div>
+      ),
     },
     {
-      key: "sentAt",
-      header: "Timing",
+      key: "nextAction",
+      header: "Next Action",
       headerClassName: "hidden lg:table-cell",
       className: "hidden lg:table-cell",
-      cell: (s) => (
-        <span className="whitespace-nowrap text-ink-muted text-xs">
-          {s.sentAt
-            ? formatDateTime(s.sentAt)
-            : s.scheduledFor
-            ? `Scheduled: ${formatDateTime(s.scheduledFor)}`
-            : "—"}
-        </span>
+      cell: (r) => (
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs">
+            <span className={cn("font-medium", r.currentConversation?.status === "NEEDS_REPLY" ? "text-brand" : "text-ink-muted")}>
+              {r.nextActionLabel}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpenId(r.primarySendId);
+            }}
+            className="text-2xs font-medium text-brand hover:underline shrink-0"
+          >
+            Open
+          </button>
+        </div>
       ),
     },
   ];
 
   return (
     <Card>
-      {awaitingCount > 0 && can("campaigns.approve") && (
+      {awaitingRecipientCount > 0 && can("campaigns.approve") && (
         <div className="flex items-center justify-between gap-3 bg-amber-500/10 border-b border-amber-500/20 px-4 py-2.5 text-xs text-amber-900 dark:text-amber-200">
           <div className="flex items-center gap-2">
             <Clock className="h-4 w-4 text-amber-600" />
             <span>
-              <strong>{awaitingCount}</strong> follow-up email{awaitingCount === 1 ? "" : "s"} due and awaiting your human approval.
+              <strong>{awaitingRecipientCount}</strong> recipient{awaitingRecipientCount === 1 ? "" : "s"} with follow-ups awaiting human approval.
             </span>
           </div>
           <div className="flex items-center gap-2">
@@ -942,7 +1023,7 @@ export function RecipientsPanel({
               onClick={() => approveAll.mutate()}
               icon={<CheckCircle className="h-3.5 w-3.5" />}
             >
-              Approve All Due ({awaitingCount})
+              Approve All Due
             </Button>
           </div>
         </div>
@@ -951,7 +1032,7 @@ export function RecipientsPanel({
       <div className="border-b border-line p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="text-xs font-semibold text-ink uppercase tracking-wider">
-            Recipients & Activity
+            Unique Recipients ({deliveryCounts?.all ?? counts.uniqueRecipients ?? counts.total})
           </div>
           <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
             {can("campaigns.control") && (
@@ -1026,20 +1107,24 @@ export function RecipientsPanel({
         </div>
       </div>
 
-      {sends.isError ? (
-        <ErrorState error={sends.error} onRetry={() => sends.refetch()} />
+      {recipientsQuery.isError ? (
+        <ErrorState error={recipientsQuery.error} onRetry={() => recipientsQuery.refetch()} />
       ) : (
         <>
           <DataTable
             columns={columns}
-            rows={sends.data?.data}
-            rowKey={(s) => s.id}
-            loading={sends.isPending}
-            onRowClick={(s) => setOpenId(s.id)}
-            caption="Recipients"
+            rows={rows}
+            rowKey={(r) => r.email}
+            loading={recipientsQuery.isPending}
+            onRowClick={(r) => setExpandedEmail(expandedEmail === r.email ? null : r.email)}
+            expandedRow={{
+              isExpanded: (r) => expandedEmail === r.email,
+              render: (r) => <RecipientTimeline recipient={r} onOpenSend={(sid) => setOpenId(sid)} />,
+            }}
+            caption="Unique campaign recipients"
             empty={<EmptyState icon={Mail} title="No recipients here" description="Nothing matches this filter." />}
           />
-          <Pagination pagination={sends.data?.pagination} onPage={setPage} />
+          <Pagination pagination={recipientsQuery.data?.pagination} onPage={setPage} />
         </>
       )}
       {openId && <SendDrawer campaignId={campaignId} sendId={openId} fromLine={fromLine} onClose={() => setOpenId(null)} />}

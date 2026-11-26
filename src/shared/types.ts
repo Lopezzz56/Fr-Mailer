@@ -622,6 +622,11 @@ export interface CampaignCounts {
   bounced: number;
   replied: number;
   unsubscribed: number;
+  uniqueRecipients?: number;
+  uniqueReached?: number;
+  uniqueReplied?: number;
+  uniqueBounced?: number;
+  uniqueUnsubscribed?: number;
 }
 
 export interface CampaignSummaryDto {
@@ -821,10 +826,54 @@ export interface SendDto {
   } | null;
 }
 
+export interface CampaignRecipientSummaryDto {
+  campaignId: string;
+  email: string;
+  contactId: string | null;
+  contact: {
+    firstName: string | null;
+    lastName: string | null;
+    company: string | null;
+  } | null;
+  emailsSent: number;
+  stepsCompleted: number;
+  stepsTotal: number;
+  deliverySummary: DeliveryStatus | "AWAITING_APPROVAL" | "SCHEDULED";
+  recipientState: RecipientSequenceState | null;
+  currentConversation: {
+    id: string;
+    status: ConversationStatus;
+    snippet: string | null;
+    outcome: string | null;
+    meetingAt: string | null;
+    lastMessageAt: string;
+  } | null;
+  conversationCount: number;
+  lastActivityAt: string | null;
+  lastActivityLabel: string;
+  nextActionAt: string | null;
+  nextActionLabel: string;
+  progressLabel: string;
+  timeline: SendDto[];
+  primarySendId: string;
+}
+
+export interface CampaignRecipientsResponseDto {
+  items: CampaignRecipientSummaryDto[];
+  deliveryCounts: Record<string, number>;
+  conversationCounts: {
+    total: number;
+    counts: Record<ConversationStatus, number>;
+  };
+}
+
 export interface CampaignAnalyticsSummaryDto {
   campaignId: string;
   campaignName: string;
   totalRecipients: number;
+  totalSends?: number;
+  uniqueReachedCount?: number;
+  totalInboundMessages?: number;
   attemptedSends: number;
   providerAcceptedCount: number;
   bouncedCount: number;
@@ -871,6 +920,7 @@ export interface CampaignAnalyticsSummaryDto {
     stepIndex: number;
     purpose: string;
     assignedCount: number;
+    recipientsReached?: number;
     sentCount: number;
     repliedCount: number;
     positiveRepliesCount: number;

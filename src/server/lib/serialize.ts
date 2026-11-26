@@ -216,6 +216,11 @@ const emptyCounts = (): CampaignCounts => ({
   bounced: 0,
   replied: 0,
   unsubscribed: 0,
+  uniqueRecipients: 0,
+  uniqueReached: 0,
+  uniqueReplied: 0,
+  uniqueBounced: 0,
+  uniqueUnsubscribed: 0,
 });
 
 export async function loadCampaignCounts(campaignIds: string[]): Promise<Map<string, CampaignCounts>> {
@@ -234,6 +239,11 @@ export async function loadCampaignCounts(campaignIds: string[]): Promise<Map<str
     bounced: bigint;
     replied: bigint;
     unsubscribed: bigint;
+    uniqueRecipients: bigint;
+    uniqueReached: bigint;
+    uniqueReplied: bigint;
+    uniqueBounced: bigint;
+    uniqueUnsubscribed: bigint;
   }[]>`
     SELECT "campaignId",
            COUNT(*) as total,
@@ -245,7 +255,12 @@ export async function loadCampaignCounts(campaignIds: string[]): Promise<Map<str
            COUNT(*) FILTER (WHERE status = 'CANCELLED') as cancelled,
            COUNT("bouncedAt") as bounced,
            COUNT("repliedAt") as replied,
-           COUNT("unsubscribedAt") as unsubscribed
+           COUNT("unsubscribedAt") as unsubscribed,
+           COUNT(DISTINCT lower(email)) as "uniqueRecipients",
+           COUNT(DISTINCT lower(email)) FILTER (WHERE status = 'SENT') as "uniqueReached",
+           COUNT(DISTINCT lower(email)) FILTER (WHERE "repliedAt" IS NOT NULL) as "uniqueReplied",
+           COUNT(DISTINCT lower(email)) FILTER (WHERE "bouncedAt" IS NOT NULL) as "uniqueBounced",
+           COUNT(DISTINCT lower(email)) FILTER (WHERE "unsubscribedAt" IS NOT NULL) as "uniqueUnsubscribed"
     FROM sends
     WHERE "campaignId" = ANY(${campaignIds})
     GROUP BY "campaignId"`;
@@ -263,6 +278,11 @@ export async function loadCampaignCounts(campaignIds: string[]): Promise<Map<str
     c.bounced = Number(row.bounced);
     c.replied = Number(row.replied);
     c.unsubscribed = Number(row.unsubscribed);
+    c.uniqueRecipients = Number(row.uniqueRecipients);
+    c.uniqueReached = Number(row.uniqueReached);
+    c.uniqueReplied = Number(row.uniqueReplied);
+    c.uniqueBounced = Number(row.uniqueBounced);
+    c.uniqueUnsubscribed = Number(row.uniqueUnsubscribed);
   }
   return map;
 }

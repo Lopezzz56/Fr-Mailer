@@ -201,13 +201,13 @@ function OutreachTrendChart({ trend }: { trend: DailyActivityTrendDto[] }) {
     <div className="rounded-xl border border-line bg-surface p-4 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
         <div>
-          <h3 className="text-sm font-semibold text-ink">30-Day Outreach Activity Trend</h3>
-          <p className="text-xs text-ink-subtle mt-0.5">Daily contacts reached, replies detected, and positive outcomes</p>
+          <h3 className="text-sm font-semibold text-ink">30-Day Email Activity Trend</h3>
+          <p className="text-xs text-ink-subtle mt-0.5">Daily emails sent (touches), replies detected, and positive outcomes</p>
         </div>
         <div className="flex items-center gap-4 text-xs">
           <div className="flex items-center gap-1.5">
             <span className="h-2.5 w-2.5 rounded-sm bg-brand" />
-            <span className="text-ink-subtle">Reached</span>
+            <span className="text-ink-subtle">Emails Sent</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="h-2.5 w-2.5 rounded-sm bg-sky-400" />
@@ -278,35 +278,35 @@ function OutreachFunnelCard({ funnel }: { funnel: OutreachFunnelDto }) {
   return (
     <section aria-label="Conversion Funnel">
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-ink">Outreach Funnel</h2>
-        <span className="text-xs text-ink-subtle">Reached → Replies → Positive Outcomes → Meetings / Opportunities</span>
+        <h2 className="text-sm font-semibold text-ink">Conversion Funnel</h2>
+        <span className="text-xs text-ink-subtle">Where are recipients dropping off?</span>
       </div>
       <div className="grid grid-cols-1 gap-3 rounded-xl border border-line bg-surface p-4 shadow-sm sm:grid-cols-4">
         <div className="rounded-lg bg-surface-muted/50 p-3.5 border border-line/40">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-ink-subtle">1. Outreach Reached</span>
+            <span className="text-xs font-medium text-ink-subtle">1. Unique Contacts Reached</span>
             <span className="text-[10px] font-semibold text-brand bg-brand/10 px-1.5 py-0.5 rounded">100%</span>
           </div>
           <p className="mt-1.5 text-2xl font-bold tracking-tight text-ink">{num(funnel.reached)}</p>
-          <p className="mt-0.5 text-xs text-ink-faint">Verified recipient dispatches</p>
+          <p className="mt-0.5 text-xs text-ink-faint">Unique contacts emailed</p>
         </div>
 
         <div className="rounded-lg bg-surface-muted/50 p-3.5 border border-line/40">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-ink-subtle">2. Replies Received</span>
+            <span className="text-xs font-medium text-ink-subtle">2. Unique Repliers</span>
             <span className="text-[10px] font-semibold text-brand bg-brand/10 px-1.5 py-0.5 rounded">
               {funnel.replyRate}% of reached
             </span>
           </div>
           <p className="mt-1.5 text-2xl font-bold tracking-tight text-ink">{num(funnel.replies)}</p>
-          <p className="mt-0.5 text-xs text-ink-faint">Inbound engagement via IMAP</p>
+          <p className="mt-0.5 text-xs text-ink-faint">Unique contacts who replied</p>
         </div>
 
         <div className="rounded-lg bg-surface-muted/50 p-3.5 border border-line/40">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-ink-subtle">3. Positive Outcomes</span>
+            <span className="text-xs font-medium text-ink-subtle">3. Positive Conversations</span>
             <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
-              {funnel.positiveRate}% of replies
+              {funnel.positiveRate}% of repliers
             </span>
           </div>
           <p className="mt-1.5 text-2xl font-bold tracking-tight text-emerald-700">{num(funnel.positiveOutcomes)}</p>
@@ -315,13 +315,13 @@ function OutreachFunnelCard({ funnel }: { funnel: OutreachFunnelDto }) {
 
         <div className="rounded-lg bg-surface-muted/50 p-3.5 border border-line/40">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-ink-subtle">4. Meetings / Opps</span>
+            <span className="text-xs font-medium text-ink-subtle">4. Meetings Scheduled</span>
             <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200">
               {funnel.overallConversionRate}% overall
             </span>
           </div>
           <p className="mt-1.5 text-2xl font-bold tracking-tight text-indigo-700">{num(funnel.meetings)}</p>
-          <p className="mt-0.5 text-xs text-ink-faint">Booked or business opportunities</p>
+          <p className="mt-0.5 text-xs text-ink-faint">Booked meetings &amp; opportunities</p>
         </div>
       </div>
     </section>
@@ -334,7 +334,7 @@ function OutreachByTypeCard({ metrics }: { metrics: OutreachTypeMetricDto[] }) {
       <div className="flex items-center justify-between mb-3">
         <div>
           <h3 className="text-sm font-semibold text-ink">Outreach by Type</h3>
-          <p className="text-xs text-ink-subtle mt-0.5">Performance across customer, partnership, advisor, and team channels</p>
+          <p className="text-xs text-ink-subtle mt-0.5">Where is our outreach effort going across customer, partnership, advisor, and team channels?</p>
         </div>
       </div>
 
@@ -357,11 +357,11 @@ function OutreachByTypeCard({ metrics }: { metrics: OutreachTypeMetricDto[] }) {
 
             <div className="grid grid-cols-3 gap-2 mt-3 pt-2.5 border-t border-line/40 text-center">
               <div>
-                <p className="text-[11px] text-ink-subtle font-medium">Reached</p>
+                <p className="text-[11px] text-ink-subtle font-medium">Unique Reached</p>
                 <p className="text-sm font-bold text-ink mt-0.5">{num(m.reached)}</p>
               </div>
               <div>
-                <p className="text-[11px] text-ink-subtle font-medium">Replies</p>
+                <p className="text-[11px] text-ink-subtle font-medium">Repliers</p>
                 <p className="text-sm font-bold text-ink mt-0.5">{num(m.replies)}</p>
                 <p className="text-[10px] text-brand font-medium">{m.replyRate}%</p>
               </div>
@@ -384,7 +384,7 @@ function TeamOutreachCard({ team }: { team: TeamOutreachMetricDto[] }) {
       <div className="flex items-center justify-between mb-3">
         <div>
           <h3 className="text-sm font-semibold text-ink">Team Outreach</h3>
-          <p className="text-xs text-ink-subtle mt-0.5">Assigned contacts, reach volume, outcomes, and pending work per owner</p>
+          <p className="text-xs text-ink-subtle mt-0.5">Who is doing the outreach and generating outcomes?</p>
         </div>
       </div>
 
@@ -393,9 +393,9 @@ function TeamOutreachCard({ team }: { team: TeamOutreachMetricDto[] }) {
           <thead>
             <tr className="border-b border-line text-ink-subtle font-medium">
               <th className="pb-2.5 font-medium">Team Member</th>
-              <th className="pb-2.5 font-medium text-right">Assigned</th>
-              <th className="pb-2.5 font-medium text-right">Reached</th>
-              <th className="pb-2.5 font-medium text-right">Replies</th>
+              <th className="pb-2.5 font-medium text-right">Assigned Contacts</th>
+              <th className="pb-2.5 font-medium text-right">Unique Reached</th>
+              <th className="pb-2.5 font-medium text-right">Unique Repliers</th>
               <th className="pb-2.5 font-medium text-right">Positive</th>
               <th className="pb-2.5 font-medium text-right">Pending Work</th>
             </tr>
@@ -618,25 +618,27 @@ function FounderOverview() {
           </div>
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
             <ExecutiveMetric
-              label="Total Outreach / Contacts Reached"
+              label="Unique Contacts Reached"
               current={totalReached}
               previous={prevReached}
+              rate={data.last30Days.sent ? `${num(data.last30Days.sent)}` : undefined}
+              rateLabel={data.last30Days.sent ? "emails sent" : undefined}
               periodLabel={periodLabel}
             />
             <ExecutiveMetric
-              label="Inbound Replies"
+              label="Unique Repliers"
               current={replies}
               previous={prevReplies}
               rate={replyRate}
-              rateLabel="reply rate"
+              rateLabel="of reached"
               periodLabel={periodLabel}
             />
             <ExecutiveMetric
-              label="Positive Outcomes"
+              label="Positive Conversations"
               current={positiveOutcomes}
               previous={prevPositive}
               rate={positiveRate}
-              rateLabel="of replies"
+              rateLabel="of repliers"
               periodLabel={periodLabel}
             />
             <div className="rounded-xl border border-line bg-surface p-4 shadow-sm">
@@ -755,7 +757,9 @@ function FounderOverview() {
               activeCampaigns.map((c) => {
                 const total = c.counts.total || 1;
                 const pct = Math.min(100, Math.round((c.counts.sent / total) * 100));
-                const repRate = c.counts.sent > 0 ? ((c.counts.replied / c.counts.sent) * 100).toFixed(1) + "%" : "0%";
+                const reached = c.counts.uniqueReached ?? c.counts.sent;
+                const repCount = c.counts.uniqueReplied ?? c.counts.replied;
+                const repRate = reached > 0 ? ((repCount / reached) * 100).toFixed(1) + "%" : "0%";
                 const posOutcomes = (c as any).positiveOutcomes ?? 0;
                 const meetingsCount = (c as any).meetingsBooked ?? 0;
                 const oType = c.outreachType as CampaignOutreachType | undefined;
@@ -777,7 +781,7 @@ function FounderOverview() {
                         )}
                       </div>
                       <p className="mt-1 truncate text-xs text-ink-subtle">
-                        {c.list.name} ({plural(c.list.memberCount, "contact")}) · {c.template.name}
+                        {plural(c.counts.uniqueRecipients ?? c.list.memberCount, "recipient")} · {c.template.name}
                         {c.createdBy && ` · Owner: ${c.createdBy.name}`}
                       </p>
                     </div>
@@ -785,7 +789,7 @@ function FounderOverview() {
                     <div className="flex items-center gap-6 shrink-0 text-xs">
                       <div className="w-28">
                         <div className="flex justify-between text-[11px] text-ink-subtle">
-                          <span>{pct}% sent</span>
+                          <span>{pct}% touches</span>
                           <span>{c.counts.sent}/{c.counts.total}</span>
                         </div>
                         <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-surface-sunken">
@@ -794,8 +798,8 @@ function FounderOverview() {
                       </div>
 
                       <div className="text-right min-w-[70px]">
-                        <p className="font-semibold text-ink">{num(c.counts.replied)} replies</p>
-                        <p className="text-[11px] text-brand font-medium">{repRate} reply rate</p>
+                        <p className="font-semibold text-ink">{num(repCount)} repliers</p>
+                        <p className="text-[11px] text-brand font-medium">{repRate} of reached</p>
                       </div>
 
                       <div className="text-right min-w-[80px]">

@@ -26,36 +26,88 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
     throw AppError.notFound("CAMPAIGN_NOT_FOUND", "Campaign not found.");
   }
 
-  // Fetch all sends for this campaign with contact classification and events
-  const sends = await prisma.send.findMany({
-    where: { campaignId },
-    include: {
-      contact: {
-        select: {
-          id: true,
-          hotelSegment: true,
-          contactPersona: true,
+  // Fetch all sends, conversations, and recipient sequence states for this campaign in parallel
+  const [sends, conversations, recipientStates, inboundMessagesCount] = await Promise.all([
+    prisma.send.findMany({
+      where: { campaignId },
+      include: {
+        contact: {
+          select: {
+            id: true,
+            hotelSegment: true,
+            contactPersona: true,
+          },
+        },
+        events: {
+          select: {
+            id: true,
+            type: true,
+            occurredAt: true,
+            detail: true,
+          },
         },
       },
-      events: {
-        select: {
-          id: true,
-          type: true,
-          occurredAt: true,
-          detail: true,
-        },
+    }),
+    prisma.conversation.findMany({
+      where: { campaignId },
+      orderBy: { lastMessageAt: "desc" },
+      select: {
+        id: true,
+        recipientEmail: true,
+        status: true,
+        sentiment: true,
+        meetingAt: true,
+        lastMessageAt: true,
       },
-    },
-  });
+    }),
+    prisma.campaignRecipientState.findMany({
+      where: { campaignId },
+      select: {
+        email: true,
+        state: true,
+      },
+    }),
+    prisma.conversationMessage.count({
+      where: {
+        direction: "INBOUND",
+        conversation: { campaignId },
+      },
+    }),
+  ]);
 
-  const totalRecipients = sends.length;
+  // Group sends and conversations by canonical lower-case recipient email
+  const sendsByEmail = new Map<string, typeof sends>();
+  for (const send of sends) {
+    const em = send.email.toLowerCase();
+    const arr = sendsByEmail.get(em) ?? [];
+    arr.push(send);
+    sendsByEmail.set(em, arr);
+  }
+
+  const convByEmail = new Map<string, (typeof conversations)[0]>();
+  for (const conv of conversations) {
+    const em = conv.recipientEmail.toLowerCase();
+    if (!convByEmail.has(em)) {
+      convByEmail.set(em, conv);
+    }
+  }
+
+  const stateByEmail = new Map<string, string>();
+  for (const rs of recipientStates) {
+    stateByEmail.set(rs.email.toLowerCase(), rs.state);
+  }
+
+  const totalSends = sends.length;
+  const totalRecipients = sendsByEmail.size;
   let attemptedSends = 0;
   let providerAcceptedCount = 0;
+  let uniqueReachedCount = 0;
   let bouncedCount = 0;
   let repliedCount = 0;
   let positiveRepliesCount = 0;
   let meetingsBookedCount = 0;
   let unsubscribedCount = 0;
+  let replyEventCount = 0;
 
   // Breakdown aggregators
   const stepMap = new Map<
@@ -64,6 +116,7 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
       stepIndex: number;
       purpose: string;
       assignedCount: number;
+      recipientsReached: number;
       sentCount: number;
       repliedCount: number;
       positiveRepliesCount: number;
@@ -78,6 +131,7 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
       stepIndex: st.stepIndex,
       purpose: st.purpose,
       assignedCount: 0,
+      recipientsReached: 0,
       sentCount: 0,
       repliedCount: 0,
       positiveRepliesCount: 0,
@@ -172,17 +226,16 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
     pending: 0,
   };
 
+  // Track unique recipients reached per step so step-level metrics distinguish recipients vs sends
+  const stepReachedEmails = new Map<number, Set<string>>();
+
   for (const send of sends) {
     attemptedSends += Math.max(1, send.attempts);
     const isSent = send.status === "SENT";
     const isBounced = Boolean(send.bouncedAt || (send.status === "FAILED" && send.attempts > 0));
     const isReplied = Boolean(send.repliedAt);
-    const isUnsubscribed = Boolean(send.unsubscribedAt);
 
     if (isSent) providerAcceptedCount++;
-    if (isBounced) bouncedCount++;
-    if (isReplied) repliedCount++;
-    if (isUnsubscribed) unsubscribedCount++;
 
     // Track activity in timeline
     if (send.sentAt) {
@@ -198,44 +251,19 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
       getTimelineRow(d).bounced++;
     }
 
-    // Check for positive replies or meetings booked from events
+    // Check for positive replies or meetings booked from events on this touch
     let isPositive = false;
-    let isNegative = false;
     let isMeeting = false;
 
     for (const ev of send.events) {
+      if (ev.type === "REPLY") replyEventCount++;
       const d = ev.detail as Record<string, unknown> | null;
       if (d) {
         if (d.classification === "POSITIVE" || d.sentiment === "positive") isPositive = true;
-        if (d.classification === "NEGATIVE" || d.sentiment === "negative") isNegative = true;
         if (d.meetingBooked === true || d.meetingOutcome === "BOOKED" || d.meetingOutcome === "QUALIFIED") {
           isMeeting = true;
         }
       }
-    }
-
-    if (isPositive) positiveRepliesCount++;
-    if (isMeeting) meetingsBookedCount++;
-
-    // Recipient outcome breakdown attribution
-    if (isUnsubscribed) {
-      outcomeBreakdown.unsubscribed++;
-    } else if (isBounced) {
-      outcomeBreakdown.bounced++;
-    } else if (isReplied) {
-      if (isMeeting) {
-        outcomeBreakdown.meetingBooked++;
-      } else if (isPositive) {
-        outcomeBreakdown.interested++;
-      } else if (isNegative) {
-        outcomeBreakdown.notInterested++;
-      } else {
-        outcomeBreakdown.replied++;
-      }
-    } else if (isSent) {
-      outcomeBreakdown.noResponse++;
-    } else {
-      outcomeBreakdown.pending++;
     }
 
     // Template attribution
@@ -308,6 +336,7 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
         stepIndex: stepIdx,
         purpose: stepIdx === 0 ? "Initial Email" : `Follow-up ${stepIdx}`,
         assignedCount: 0,
+        recipientsReached: 0,
         sentCount: 0,
         repliedCount: 0,
         positiveRepliesCount: 0,
@@ -318,7 +347,12 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
       stepMap.set(stepIdx, stepEntry);
     }
     stepEntry.assignedCount++;
-    if (isSent) stepEntry.sentCount++;
+    if (isSent) {
+      stepEntry.sentCount++;
+      const set = stepReachedEmails.get(stepIdx) ?? new Set<string>();
+      set.add(send.email.toLowerCase());
+      stepReachedEmails.set(stepIdx, set);
+    }
     if (isReplied) stepEntry.repliedCount++;
     if (isPositive) stepEntry.positiveRepliesCount++;
     if (isMeeting) stepEntry.meetingsBookedCount++;
@@ -326,7 +360,78 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
   }
 
   for (const s of stepMap.values()) {
+    s.recipientsReached = stepReachedEmails.get(s.stepIndex)?.size ?? 0;
     s.replyRate = s.sentCount > 0 ? Number(((s.repliedCount / s.sentCount) * 100).toFixed(1)) : 0;
+  }
+
+  // Recipient-level / Conversation-level attribution (never double-counts sequence touches)
+  for (const [emailLower, group] of sendsByEmail.entries()) {
+    const conv = convByEmail.get(emailLower);
+    const rState = stateByEmail.get(emailLower);
+
+    const hasSent = group.some((s) => s.status === "SENT");
+    const hasBounced = rState === "BOUNCED" || group.some((s) => Boolean(s.bouncedAt));
+    const hasUnsubscribed = rState === "SUPPRESSED" || group.some((s) => Boolean(s.unsubscribedAt));
+    const hasReplied = rState === "REPLY_RECEIVED" || group.some((s) => Boolean(s.repliedAt)) || Boolean(conv);
+
+    if (hasSent) uniqueReachedCount++;
+    if (hasBounced) bouncedCount++;
+    if (hasReplied) repliedCount++;
+    if (hasUnsubscribed) unsubscribedCount++;
+
+    let isMeeting = false;
+    let isPositive = false;
+    let isNegative = false;
+
+    if (conv) {
+      if (conv.status === "MEETING_SCHEDULED" || Boolean(conv.meetingAt)) {
+        isMeeting = true;
+      } else if (
+        conv.status === "INTERESTED" ||
+        conv.status === "MEETING_COORDINATION" ||
+        (conv.sentiment === "POSITIVE" && conv.status !== "NOT_INTERESTED" && conv.status !== "CLOSED")
+      ) {
+        isPositive = true;
+      } else if (conv.status === "NOT_INTERESTED") {
+        isNegative = true;
+      }
+    } else {
+      for (const s of group) {
+        for (const ev of s.events) {
+          const d = ev.detail as Record<string, unknown> | null;
+          if (!d) continue;
+          if (d.meetingBooked === true || d.meetingOutcome === "BOOKED" || d.meetingOutcome === "QUALIFIED") {
+            isMeeting = true;
+          }
+          if (d.classification === "POSITIVE" || d.sentiment === "positive") isPositive = true;
+          if (d.classification === "NEGATIVE" || d.sentiment === "negative") isNegative = true;
+        }
+      }
+    }
+
+    if (isMeeting) meetingsBookedCount++;
+    else if (isPositive) positiveRepliesCount++;
+
+    // Assign exactly ONE outcome bucket per unique recipient
+    if (hasUnsubscribed) {
+      outcomeBreakdown.unsubscribed++;
+    } else if (hasBounced && !hasReplied) {
+      outcomeBreakdown.bounced++;
+    } else if (hasReplied) {
+      if (isMeeting) {
+        outcomeBreakdown.meetingBooked++;
+      } else if (isPositive) {
+        outcomeBreakdown.interested++;
+      } else if (isNegative) {
+        outcomeBreakdown.notInterested++;
+      } else {
+        outcomeBreakdown.replied++;
+      }
+    } else if (hasSent) {
+      outcomeBreakdown.noResponse++;
+    } else {
+      outcomeBreakdown.pending++;
+    }
   }
 
   const byTemplate = [...templateMap.values()].map((t) => ({
@@ -336,13 +441,17 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
 
   const timeline = [...timelineMap.values()].sort((a, b) => a.date.localeCompare(b.date));
 
-  // Denominator: Provider-accepted sends (never count rejected attempts or total list size as delivered)
-  const denominator = Math.max(1, providerAcceptedCount);
+  // Denominator: unique recipients reached (or totalRecipients if none sent yet)
+  const recipientDenominator = Math.max(1, uniqueReachedCount);
+  const totalInboundMessages = Math.max(inboundMessagesCount, replyEventCount, repliedCount);
 
   return {
     campaignId: campaign.id,
     campaignName: campaign.name,
     totalRecipients,
+    totalSends,
+    uniqueReachedCount,
+    totalInboundMessages,
     attemptedSends,
     providerAcceptedCount,
     bouncedCount,
@@ -351,12 +460,12 @@ export async function getCampaignAnalytics(campaignId: string): Promise<Campaign
     meetingsBookedCount,
     unsubscribedCount,
     rates: {
-      bounceRate: Number(((bouncedCount / denominator) * 100).toFixed(1)),
-      replyRate: Number(((repliedCount / denominator) * 100).toFixed(1)),
-      positiveReplyRate: Number(((positiveRepliesCount / denominator) * 100).toFixed(1)),
+      bounceRate: uniqueReachedCount > 0 ? Number(((bouncedCount / recipientDenominator) * 100).toFixed(1)) : 0,
+      replyRate: uniqueReachedCount > 0 ? Number(((repliedCount / recipientDenominator) * 100).toFixed(1)) : 0,
+      positiveReplyRate: uniqueReachedCount > 0 ? Number(((positiveRepliesCount / recipientDenominator) * 100).toFixed(1)) : 0,
       positiveOutcomeRate: repliedCount > 0 ? Number((((positiveRepliesCount + meetingsBookedCount) / repliedCount) * 100).toFixed(1)) : 0,
-      meetingRate: Number(((meetingsBookedCount / denominator) * 100).toFixed(1)),
-      unsubscribeRate: Number(((unsubscribedCount / denominator) * 100).toFixed(1)),
+      meetingRate: uniqueReachedCount > 0 ? Number(((meetingsBookedCount / recipientDenominator) * 100).toFixed(1)) : 0,
+      unsubscribeRate: uniqueReachedCount > 0 ? Number(((unsubscribedCount / recipientDenominator) * 100).toFixed(1)) : 0,
     },
     byTemplate,
     byHotelSegment: [...segmentMap.values()],

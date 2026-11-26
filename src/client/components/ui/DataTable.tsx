@@ -1,5 +1,5 @@
 // Data table: header, rows, optional selection, row click, loading skeleton and empty state
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { Skeleton } from "./Spinner";
@@ -21,6 +21,7 @@ export function DataTable<T>({
   empty,
   onRowClick,
   selection,
+  expandedRow,
   caption,
 }: {
   columns: Column<T>[];
@@ -30,6 +31,7 @@ export function DataTable<T>({
   empty?: ReactNode;
   onRowClick?: (row: T) => void;
   selection?: { selected: Set<string>; onChange: (next: Set<string>) => void };
+  expandedRow?: { isExpanded: (row: T) => boolean; render: (row: T) => ReactNode };
   caption?: string;
 }) {
   const data = rows ?? [];
@@ -96,33 +98,43 @@ export function DataTable<T>({
             : data.map((row) => {
                 const id = rowKey(row);
                 const selected = selection?.selected.has(id);
+                const isExp = expandedRow?.isExpanded(row) ?? false;
                 return (
-                  <tr
-                    key={id}
-                    onClick={onRowClick ? () => onRowClick(row) : undefined}
-                    className={cn(
-                      "transition-colors duration-100",
-                      onRowClick && "cursor-pointer hover:bg-surface-muted/80",
-                      selected && "bg-brand-soft/40"
+                  <Fragment key={id}>
+                    <tr
+                      onClick={onRowClick ? () => onRowClick(row) : undefined}
+                      className={cn(
+                        "transition-colors duration-100",
+                        onRowClick && "cursor-pointer hover:bg-surface-muted/80",
+                        selected && "bg-brand-soft/40",
+                        isExp && "bg-surface-muted/50"
+                      )}
+                    >
+                      {selection && (
+                        <td className="py-3 pl-5 pr-1" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            aria-label="Select row"
+                            checked={Boolean(selected)}
+                            onChange={() => toggle(id)}
+                            className="h-4 w-4 rounded border-line-strong text-brand focus:ring-brand/30 accent-[rgb(var(--brand))]"
+                          />
+                        </td>
+                      )}
+                      {columns.map((c, j) => (
+                        <td key={c.key} className={cn("py-3 pr-4 align-middle text-ink", j === 0 && !selection && "pl-5", c.className)}>
+                          {c.cell(row)}
+                        </td>
+                      ))}
+                    </tr>
+                    {isExp && expandedRow && (
+                      <tr className="bg-surface-muted/30">
+                        <td colSpan={columns.length + (selection ? 1 : 0)} className="px-5 py-3 border-t border-line/50">
+                          {expandedRow.render(row)}
+                        </td>
+                      </tr>
                     )}
-                  >
-                    {selection && (
-                      <td className="py-3 pl-5 pr-1" onClick={(e) => e.stopPropagation()}>
-                        <input
-                          type="checkbox"
-                          aria-label="Select row"
-                          checked={Boolean(selected)}
-                          onChange={() => toggle(id)}
-                          className="h-4 w-4 rounded border-line-strong text-brand focus:ring-brand/30 accent-[rgb(var(--brand))]"
-                        />
-                      </td>
-                    )}
-                    {columns.map((c, j) => (
-                      <td key={c.key} className={cn("py-3 pr-4 align-middle text-ink", j === 0 && !selection && "pl-5", c.className)}>
-                        {c.cell(row)}
-                      </td>
-                    ))}
-                  </tr>
+                  </Fragment>
                 );
               })}
         </tbody>

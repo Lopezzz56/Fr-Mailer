@@ -27,6 +27,7 @@ import { sentInLast24hForCampaign } from "../services/send-worker.js";
 import { kickBackground } from "../services/background.js";
 import { getPersonalMailboxStatus } from "../services/personal-mailbox.js";
 import { getCampaignAnalytics, recordSendOutcome } from "../services/analytics-service.js";
+import { listCampaignRecipients } from "../services/campaign-recipients.js";
 import { selectTemplateForRecipient, type EligibleTemplate, type SelectionContext } from "../services/template-selection.js";
 import { inferPersonaFromTitle, inferSegmentFromCompany } from "../services/classification.js";
 import { contactMergeData, htmlToText, renderEmail, type TemplateParts } from "../../shared/merge.js";
@@ -1373,10 +1374,10 @@ router.get(
     const id = IdSchema.parse(req.params.id);
     await loadDetail(id, req.user!, "VIEW");
 
-    const grouped = await prisma.conversation.groupBy({
-      by: ["status"],
+    const conversations = await prisma.conversation.findMany({
       where: { campaignId: id },
-      _count: { _all: true },
+      orderBy: { lastMessageAt: "desc" },
+      select: { recipientEmail: true, status: true },
     });
 
     const counts: Record<ConversationStatus, number> = {
@@ -1389,15 +1390,49 @@ router.get(
       CLOSED: 0,
     };
 
+    const seenEmails = new Set<string>();
     let total = 0;
-    for (const g of grouped) {
-      if (g.status in counts) {
-        counts[g.status as ConversationStatus] = g._count._all;
-        total += g._count._all;
+    for (const c of conversations) {
+      const em = c.recipientEmail.toLowerCase();
+      if (seenEmails.has(em)) continue;
+      seenEmails.add(em);
+      if (c.status in counts) {
+        counts[c.status as ConversationStatus]++;
+        total++;
       }
     }
 
     ok(res, { total, counts });
+  })
+);
+
+router.get(
+  "/:id/recipients",
+  asyncHandler(async (req, res) => {
+    const id = IdSchema.parse(req.params.id);
+    await loadDetail(id, req.user!, "VIEW");
+    const { page, pageSize } = PaginationQuerySchema.parse(req.query);
+    const filter = searchParam(req.query.filter);
+    const conversationStatus = searchParam(req.query.conversationStatus);
+    const search = searchParam(req.query.search);
+
+    const result = await listCampaignRecipients(id, {
+      page,
+      pageSize,
+      filter,
+      conversationStatus,
+      search,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        items: result.items,
+        deliveryCounts: result.deliveryCounts,
+        conversationCounts: result.conversationCounts,
+      },
+      pagination: result.pagination,
+    });
   })
 );
 
