@@ -142,7 +142,9 @@ function setupInMemoryStore(initialNow: number) {
         if (w.campaignId.in && !w.campaignId.in.includes(s.campaignId)) return false;
       }
       if (w.status && s.status !== w.status) return false;
+      if (w.email && s.email !== w.email) return false;
       if (w.sentAt?.not === null && s.sentAt === null) return false;
+      if (w.repliedAt?.not === null && s.repliedAt === null) return false;
       if (w.OR) {
         const matchesOr = w.OR.some((clause: any) => {
           if (clause.mailboxId && s.mailboxId === clause.mailboxId) return true;
@@ -302,7 +304,7 @@ function setupInMemoryStore(initialNow: number) {
         ...options,
       });
     },
-    addPendingSend(id: string, campaignId: string, email: string) {
+    addPendingSend(id: string, campaignId: string, email: string, options: Partial<(typeof sends)[0]> = {}) {
       sends.push({
         id,
         campaignId,
@@ -327,6 +329,7 @@ function setupInMemoryStore(initialNow: number) {
         attachments: [],
         createdAt: new Date(currentNow),
         updatedAt: new Date(currentNow),
+        ...options,
       });
     },
     addHistoricalSent(count: number, campaignId: string, mailboxId: string, sentAtMs: number) {
@@ -645,6 +648,113 @@ describe("Multi-Mailbox Worker, Per-Mailbox Budgets & Vercel Wake-up Architectur
       } finally {
         (config.env as any).CRON_SECRET = prevCron;
         server.close();
+      }
+    });
+  });
+
+  describe("4. Mailbox IMAP Identity & Follow-up Safeguards", () => {
+    it("resolves imap.state.<mailboxId> for follow-ups even when campaign createdById differs from mailboxId", async () => {
+      const store = setupInMemoryStore(Date.now());
+      store.addMailbox("mb-founderoffice", "founderoffice@focusrealm.org", "Frank Lopes");
+      store.addCampaign("camp-fu", "mb-founderoffice", {
+        sendRatePerMinute: 10,
+        createdById: "user-frank",
+      });
+      store.addPendingSend("fu-step1", "camp-fu", "lead1@hotel.com", { stepIndex: 1 });
+      store.addPendingSend("fu-step2", "camp-fu", "lead2@hotel.com", { stepIndex: 2 });
+
+      const prevPoll = config.env.IMAP_POLL_ENABLED;
+      (config.env as any).IMAP_POLL_ENABLED = true;
+
+      try {
+        // Store IMAP state under canonical mailboxId (not user-frank)
+        vi.spyOn(prisma.setting, "findUnique").mockImplementation((async (args: any) => {
+          if (args?.where?.key === "imap.state.mb-founderoffice") {
+            return {
+              id: "s-mb",
+              key: "imap.state.mb-founderoffice",
+              value: { lastCheckedAt: new Date(store.getNow()).toISOString(), lastError: null },
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            };
+          }
+          return null;
+        }) as any);
+
+        // Verify isInboxMonitoringSafe checks mailboxId directly
+        const health = await inboxMonitor.isInboxMonitoringSafe("mb-founderoffice");
+        expect(health).toEqual({ safe: true });
+
+        // Ensure follow-up safeguard queries return no reply/suppression/bounce
+        vi.spyOn(prisma.campaignRecipientState, "findUnique").mockResolvedValue({ state: "FOLLOW_UP_SCHEDULED" } as any);
+
+        const worker = new SendWorker({ dailyLimitPerMailbox: 300, mailboxMaxRatePerMinute: 10, now: store.getNow });
+        expect(await worker.tick()).toBe("worked");
+        store.advanceTime(6_500);
+        expect(await worker.tick()).toBe("worked");
+
+        expect(store.sentMessages.map((m) => m.to)).toEqual(["lead1@hotel.com", "lead2@hotel.com"]);
+        expect(store.sends.find((s) => s.id === "fu-step1")?.status).toBe("SENT");
+        expect(store.sends.find((s) => s.id === "fu-step2")?.status).toBe("SENT");
+      } finally {
+        (config.env as any).IMAP_POLL_ENABLED = prevPoll;
+      }
+    });
+
+    it("cancels follow-ups when a prior reply exists, and skips suppressed or bounced recipients", async () => {
+      const store = setupInMemoryStore(Date.now());
+      store.addMailbox("mb-a", "a@focusrealm.org", "Mailbox A");
+      store.addCampaign("camp-a", "mb-a", { sendRatePerMinute: 10, createdById: "user-1" });
+
+      // Lead 1 replied on step 0 -> step 1 must be cancelled
+      store.addPendingSend("prior-reply-0", "camp-a", "replied@hotel.com", {
+        status: "SENT",
+        stepIndex: 0,
+        sentAt: new Date(store.getNow() - 86_400_000),
+        repliedAt: new Date(store.getNow() - 3_600_000),
+      });
+      store.addPendingSend("s-replied", "camp-a", "replied@hotel.com", { stepIndex: 1 });
+      // Lead 2 is suppressed -> must be skipped
+      store.addPendingSend("s-suppressed", "camp-a", "suppressed@hotel.com", { stepIndex: 0 });
+      // Lead 3 bounced on prior step -> step 1 must be cancelled
+      store.addPendingSend("s-bounced", "camp-a", "bounced@hotel.com", { stepIndex: 1 });
+
+      const prevPoll = config.env.IMAP_POLL_ENABLED;
+      (config.env as any).IMAP_POLL_ENABLED = true;
+
+      try {
+        vi.spyOn(prisma.setting, "findUnique").mockResolvedValue({
+          id: "s-mb",
+          key: "imap.state.mb-a",
+          value: { lastCheckedAt: new Date(store.getNow()).toISOString(), lastError: null },
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        } as any);
+
+        vi.spyOn(prisma.suppressionEntry, "findUnique").mockImplementation((async (args: any) => {
+          if (args?.where?.email === "suppressed@hotel.com") {
+            return { id: "sup-1", email: "suppressed@hotel.com", expiresAt: null };
+          }
+          return null;
+        }) as any);
+
+        vi.spyOn(prisma.campaignRecipientState, "findUnique").mockImplementation((async (args: any) => {
+          const email = args?.where?.campaignId_email?.email;
+          if (email === "bounced@hotel.com") return { state: "BOUNCED" };
+          return { state: "FOLLOW_UP_SCHEDULED" };
+        }) as any);
+
+        const worker = new SendWorker({ dailyLimitPerMailbox: 300, mailboxMaxRatePerMinute: 10, now: store.getNow });
+        await worker.tick();
+        await worker.tick();
+        await worker.tick();
+
+        expect(store.sentMessages).toHaveLength(0);
+        expect(store.sends.find((s) => s.id === "s-replied")?.status).toBe("CANCELLED");
+        expect(store.sends.find((s) => s.id === "s-suppressed")?.status).toBe("SKIPPED");
+        expect(store.sends.find((s) => s.id === "s-bounced")?.status).toBe("CANCELLED");
+      } finally {
+        (config.env as any).IMAP_POLL_ENABLED = prevPoll;
       }
     });
   });

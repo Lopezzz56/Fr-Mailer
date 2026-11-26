@@ -441,6 +441,25 @@ async function finishIfDone(campaignId: string) {
   });
 }
 
+async function resolveInboxSafetyIdentity(campaign: {
+  mailboxId?: string | null;
+  fromEmail?: string | null;
+  fromName?: string | null;
+  createdById?: string | null;
+}): Promise<string | undefined> {
+  if (campaign.mailboxId) return campaign.mailboxId;
+  if (campaign.fromEmail) {
+    const byEmail = await getMailboxCredentialsByEmail(campaign.fromEmail, campaign.fromName ?? undefined).catch(() => null);
+    if (byEmail?.accountId) return byEmail.accountId;
+  }
+  if (campaign.createdById) {
+    const personal = await getPersonalMailboxCredentials(campaign.createdById).catch(() => null);
+    if (personal?.accountId) return personal.accountId;
+    return campaign.createdById;
+  }
+  return undefined;
+}
+
 export type SendOneOutcome = "sent" | "skipped" | "failed" | "deferred" | "empty";
 
 /**
@@ -510,7 +529,8 @@ export async function sendOneDetailed(campaign: {
     }
 
     // 3. Inbox monitoring health check: defer if monitoring is unhealthy or stale
-    const inboxHealth = await isInboxMonitoringSafe(campaign.createdById ?? undefined);
+    const inboxIdentity = await resolveInboxSafetyIdentity(campaign);
+    const inboxHealth = await isInboxMonitoringSafe(inboxIdentity);
     if (!inboxHealth.safe) {
       await prisma.send.update({
         where: { id: send.id },

@@ -368,25 +368,27 @@ async function applyClassification(message: IncomingMessage, domain: string, mai
   return targets.length ? result.type : null;
 }
 
-export async function isInboxMonitoringSafe(userId?: string): Promise<{ safe: boolean; reason?: string }> {
+export async function isInboxMonitoringSafe(mailboxIdOrUserId?: string): Promise<{ safe: boolean; reason?: string }> {
   if (!env.IMAP_POLL_ENABLED) return { safe: true };
-  if (userId) {
+  let stateId = mailboxIdOrUserId;
+  if (mailboxIdOrUserId) {
     try {
-      if (!(await getPersonalMailboxCredentials(userId))) {
-        const mb = await getMailboxCredentials(userId);
-        if (!mb) {
-          const userMb = await getMailboxCredentialsForUser(userId);
-          if (!userMb) {
-            return { safe: false, reason: "The campaign owner has not connected a SpaceMail mailbox." };
-          }
+      let mb = await getMailboxCredentials(mailboxIdOrUserId);
+      if (!mb) {
+        mb = await getMailboxCredentialsForUser(mailboxIdOrUserId);
+        if (mb?.accountId) {
+          stateId = mb.accountId;
         }
       }
+      if (!mb) {
+        return { safe: false, reason: "The sending SpaceMail mailbox is not connected." };
+      }
     } catch (error) {
-      return { safe: false, reason: "The campaign owner mailbox credentials couldn't be read. Reconnect the mailbox in Settings." };
+      return { safe: false, reason: "The sending mailbox credentials couldn't be read. Reconnect the mailbox in Settings." };
     }
   }
-  if (!userId && !imapConfigured) return { safe: true };
-  const state = await getImapState(userId);
+  if (!stateId && !imapConfigured) return { safe: true };
+  const state = await getImapState(stateId);
   if (state.lastError) {
     return { safe: false, reason: `Inbox monitoring error: ${state.lastError}` };
   }

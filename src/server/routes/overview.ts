@@ -226,13 +226,11 @@ mailboxRouter.get(
   "/",
   asyncHandler(async (req, res) => {
     const user = req.user!;
-    const [accessibleMailboxes, imap] = await Promise.all([
-      listAccessibleMailboxes(user.id),
-      getImapState(user.id),
-    ]);
+    const accessibleMailboxes = await listAccessibleMailboxes(user.id);
     const server = personalMailboxServerSettings();
     const accountConfigured = accessibleMailboxes.length > 0;
     const primaryMailbox = accessibleMailboxes.find((m) => m.isDefault) || accessibleMailboxes[0] || null;
+    const imap = await getImapState(primaryMailbox?.id ?? user.id);
 
     let allMailboxes = undefined;
     let teamMailboxHealth = undefined;
